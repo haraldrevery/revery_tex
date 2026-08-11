@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>Revery TeX — engine check</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 'wasm-unsafe-eval' is required: without it WebAssembly.compile is refused
+     and the engine cannot start. Revery Notebook's CSP omits it because it
+     runs no WASM. Keep this in sync with tauri.conf.json. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'">
+<style>
+/* Revery design tokens (revery_notebook_style.css:136-224). */
+:root { --font-mono: 'HaraldMono', ui-monospace, 'Courier New', monospace;
+        --tracking-wide: .09em; --tracking-wider: .16em; }
+[data-theme="dark"] {
+  --bg:#0a0a0a; --bg-panel:#1e1e1e; --bg-hover:#2c2c2c;
+  --border:rgba(255,255,255,.08); --border-md:rgba(255,255,255,.14);
+  --text:#f5f5f5; --text-muted:rgba(255,255,255,.46); --text-dim:rgba(255,255,255,.18);
+  --accent:rgba(255,255,255,.58); --scrollbar:rgba(255,255,255,.1);
+  --ok:#7fc97f; --warn:#e2c46a; --err:#e08a7a;
+}
+* { box-sizing:border-box }
+html,body { height:100%; margin:0; overflow:hidden }
+body { background:var(--bg); color:var(--text); font-family:var(--font-mono);
+       font-size:.75rem; display:flex; flex-direction:column }
+#topbar { height:2.4rem; flex:none; display:flex; align-items:center; gap:.6rem;
+          padding:0 .9rem; border-bottom:1px solid var(--border) }
+.lbl { font-size:.62rem; letter-spacing:var(--tracking-wider); text-transform:uppercase;
+       color:var(--text-dim) }
+button { font-family:var(--font-mono); font-size:.7rem; text-transform:uppercase;
+         letter-spacing:var(--tracking-wide); color:var(--text-muted); background:none;
+         border:1px solid var(--border-md); border-radius:2px;
+         padding:.375rem .75rem .1875rem; line-height:1; cursor:pointer;
+         transition:color .15s,border-color .15s,background .15s }
+button:hover:not(:disabled) { color:var(--text); border-color:var(--accent); background:var(--bg-hover) }
+button:disabled { opacity:.35; cursor:default }
+.spacer { flex:1 }
+#verdict { font-size:.72rem; letter-spacing:var(--tracking-wide); text-transform:uppercase;
+           color:var(--text-muted); white-space:nowrap }
+#verdict.ok { color:var(--ok) } #verdict.err { color:var(--err) } #verdict.warn { color:var(--warn) }
+#env { padding:6px 14px; font-size:.64rem; color:var(--text-dim);
+       border-bottom:1px solid var(--border); white-space:pre-wrap }
+#log { flex:1; overflow:auto; padding:8px 14px; white-space:pre; font-size:.7rem;
+       line-height:1.45 }
+#log::-webkit-scrollbar { width:8px; height:8px }
+#log::-webkit-scrollbar-thumb { background:var(--scrollbar); border-radius:2px }
+.l-inf { color:var(--text-muted) } .l-dbg { color:var(--text) }
+.l-wrn { color:var(--warn) } .l-err { color:var(--err) }
+.l-hdr { color:var(--accent); text-transform:uppercase; letter-spacing:var(--tracking-wide) }
+.l-meta { color:var(--text-dim) }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <span class="lbl">Engine check</span>
+  <button id="run">Run</button>
+  <button id="clear">Clear log</button>
+  <div class="spacer"></div>
+  <span id="verdict">idle</span>
+</div>
+<div id="env">probing…</div>
+<div id="log"></div>
+
+<script type="module">
+// Deliberately self-contained: no dev server, no /api, no project fixtures.
+// The same file is opened by the browser (via test/serve.js) and by the Tauri
+// window, so a difference in result is a difference in the browser engine.
+import { WasmTexEngine } from './jvscrpt_and_css_extra/tex_engine_wasm.js';
+
+const $ = id => document.getElementById(id);
+const logEl = $('log');
+let pinned = true;
+logEl.addEventListener('scroll', () => {
+  pinned = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
+});
+
+function log(kind, msg) {
+  for (const line of String(msg).split('\n')) {
+    const d = document.createElement('div');
+    d.className = 'l-' + kind;
+    d.textContent = line;
+    logEl.appendChild(d);
+  }
+  if (pinned) logEl.scrollTop = logEl.scrollHeight;
+}
+const verdict = (t, c = '') => { $('verdict').textContent = t; $('verdict').className = c; };
+
+// A small document that still exercises the parts most likely to break in a
+// different browser engine: a real class, a package from the closure, maths,
+// and a second page so the page count is a meaningful assertion.
+const DOC = String.raw`\documentclass[11pt]{article}
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\begin{document}
+\section*{Revery \TeX{} engine check}
+If this renders, the WASM engine runs in this browser.
+\begin{equation}
+  \int_{-\infty}^{\infty} e^{-x^{2}}\,\mathrm{d}x = \sqrt{\pi}
+\end{equation}
+\textcolor{gray}{Second page follows.}
+\newpage
+Page two.
+\end{document}
+`;
+
+function probeEnv() {
+  const bits = [];
+  bits.push(`ua        ${navigator.userAgent}`);
+  bits.push(`wasm      ${typeof WebAssembly === 'object' ? 'present' : 'MISSING'}`);
+  bits.push(`worker    ${typeof Worker === 'function' ? 'present' : 'MISSING'}`);
+  bits.push(`indexeddb ${typeof indexedDB === 'object' ? 'present' : 'MISSING'}`);
+  bits.push(`memory    ${navigator.deviceMemory ? navigator.deviceMemory + ' GB (approx)' : 'unknown'}`);
+  bits.push(`origin    ${location.origin}${location.protocol === 'file:' ? '  ⚠ file:// — fetch() will fail' : ''}`);
+  $('env').textContent = bits.join('\n');
+}
+
+let engine = null;
+
+async function run() {
+  $('run').disabled = true;
+  logEl.textContent = '';
+  const t0 = performance.now();
+  try {
+    log('hdr', '— initialising engine');
+    verdict('initialising…', 'warn');
+
+    if (!engine) {
+      engine = new WasmTexEngine({
+        onLog: (line, level) =>
+          log({ debug: 'dbg', info: 'inf', warn: 'wrn', error: 'err' }[level] || 'dbg', line)
+      });
+      await engine.init();
+      log('meta', `capabilities: ${JSON.stringify(engine.capabilities)}`);
+    }
+
+    log('hdr', '— compiling inline document with pdflatex');
+    verdict('compiling…', 'warn');
+    const r = await engine.compile({
+      files: [{ path: 'main.tex', content: DOC }],
+      mainFile: 'main.tex',
+      engine: 'pdflatex',
+      passes: false
+    });
+
+    if (r.log) log(r.success ? 'dbg' : 'err', r.log);
+    const secs = ((performance.now() - t0) / 1000).toFixed(1);
+
+    if (r.success && r.pages === 2) {
+      log('hdr', `✓ PASS — ${r.pages} pages, ${(r.pdf.length / 1024).toFixed(0)} KB, ${secs}s total`);
+      verdict(`✓ pass · ${r.pages} pages · ${secs}s`, 'ok');
+    } else if (r.success) {
+      log('wrn', `⚠ compiled but produced ${r.pages} pages, expected 2`);
+      verdict(`⚠ ${r.pages} pages, expected 2`, 'warn');
+    } else {
+      log('err', `✗ FAIL — ${r.error}`);
+      for (const m of r.missingPackages) log('wrn', `  missing: ${m}`);
+      verdict(`✗ ${r.error}`, 'err');
+    }
+  } catch (err) {
+    log('err', `✗ ${err.message}`);
+    log('meta', err.stack || '');
+    verdict(`✗ ${err.message}`, 'err');
+  } finally {
+    $('run').disabled = false;
+  }
+}
+
+$('run').onclick = run;
+$('clear').onclick = () => { logEl.textContent = ''; };
+
+probeEnv();
+log('meta', 'ready — press Run');
+
+// ?autorun=1 lets a shell (or the Tauri window, whose URL is fixed in
+// tauri.conf.json) start the check without a click.
+if (new URLSearchParams(location.search).has('autorun')) {
+  log('meta', 'autorun requested');
+  run();
+}
+
+// Expose for headless drivers, same contract as the Phase 0 harness.
+window.__reveryCheck = {
+  run: async () => { await run(); return $('verdict').textContent; },
+  get ready() { return true; }
+};
+</script>
+</body>
+</html>

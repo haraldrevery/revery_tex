@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Capability for Revery TeX",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

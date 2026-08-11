@@ -1,0 +1,18 @@
+{
+  "name": "revery-tex",
+  "version": "0.1.0",
+  "description": "A local-first LaTeX editor",
+  "license": "Apache-2.0",
+  "private": true,
+  "scripts": {
+    "start:tauri": "tauri dev   --config tauri/tauri.conf.json",
+    "build:tauri": "tauri build --config tauri/tauri.conf.json",
+    "serve": "node test/serve.js",
+    "gate": "node test/run_phase0.js",
+    "build:texmf": "node build_tools/build_slim_texmf.js",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

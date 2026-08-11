@@ -1,0 +1,19 @@
+[package]
+name    = "revery-tex"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+# Phase A is an engine spike: a window and nothing else. Revery Notebook's
+# 134 KB main.rs and its filesystem command set arrive in Phase B, trimmed.
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[profile.release]
+opt-level = "s"
+lto       = "thin"
+panic     = "abort"

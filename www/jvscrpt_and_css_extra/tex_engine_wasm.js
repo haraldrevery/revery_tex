@@ -21,8 +21,12 @@
 //   5. Missing packages fail opaquely. With a slim texmf that is the single
 //      most likely failure, so it has to name the package.
 
+// Vendored INTO www/ deliberately: Tauri bundles only frontendDist, so anything
+// imported from outside www/ simply is not there at runtime. The copy under
+// vendor/texlyre-busytex/ stays as the provenance record (AGPL-3.0), mirroring
+// Revery Notebook's third_party_sources/ convention.
 import { BusyTexRunner, PdfLatex, XeLatex, LuaLatex, clearAllPackageCache }
-  from '../../vendor/texlyre-busytex/dist/index.js';
+  from './texlyre_busytex.js';
 
 const TOOLS = { pdflatex: PdfLatex, xelatex: XeLatex, lualatex: LuaLatex };
 
@@ -88,13 +92,26 @@ function pagesFromLog(log) {
 }
 
 export class WasmTexEngine {
+  /** Absolute URL, no trailing slash, relative to the document. */
+  static resolve(p) {
+    if (/^[a-z]+:/i.test(p)) return p.replace(/\/+$/, '');
+    const base = (typeof document !== 'undefined' && document.baseURI) || location.href;
+    return new URL(p, base).href.replace(/\/+$/, '');
+  }
+
   constructor({ basePath, texmfPath, onLog } = {}) {
     this.id = 'wasm-busytex';
     // Runtime and texmf both live in engine/dist/ -- it is entirely build
     // output, which is what makes it committable (engine/busytex/ is the
     // gitignored 649 MB upstream release).
-    this.basePath = basePath || './engine/dist';
-    this.texmfPath = texmfPath || './engine/dist';
+    //
+    // Resolved to absolute URLs, which is not cosmetic: these paths are posted
+    // into the Web Worker, and a relative path is re-resolved there against the
+    // worker's own location (already inside engine/dist/), producing
+    // engine/dist/engine/dist/busytex.js. Absolute URLs are also what makes
+    // this work unchanged under Tauri's custom protocol origin.
+    this.basePath = WasmTexEngine.resolve(basePath || './engine/dist');
+    this.texmfPath = WasmTexEngine.resolve(texmfPath || './engine/dist');
     this.onLog = onLog || (() => {});
     this._runner = null;
     this._manifest = null;
