@@ -1,0 +1,1 @@
+In this folder (revery_tex), all the latex editors code should be inserted.
