@@ -2,7 +2,7 @@
 // only what documents actually need.
 //
 //   node build_tools/build_slim_texmf.js --report        # dry run, print sizes
-//   node build_tools/build_slim_texmf.js                 # write www/engine/slim/
+//   node build_tools/build_slim_texmf.js                 # write www/engine/dist/
 //   node build_tools/build_slim_texmf.js --engine xetex  # ship only xelatex.fmt
 //
 // The source bundle is an Emscripten -sLZ4 package: a 2048-byte-chunked virtual
@@ -12,8 +12,9 @@
 // the engine's own MiniLZ4 codec so the output is bit-compatible by
 // construction (see build_tools/lz4_codec.js).
 //
-// Non-destructive: reads www/engine/busytex/, writes www/engine/slim/. The
-// originals are never modified.
+// Non-destructive: reads www/engine/busytex/ (the gitignored 649 MB upstream
+// release), writes www/engine/dist/ (committed build output: texmf parts plus
+// the four runtime files). The originals are never modified.
 
 const fs = require('fs');
 const path = require('path');
@@ -31,7 +32,7 @@ const has = (f) => process.argv.includes(f);
 
 const SRC_DIR = path.resolve(arg('--src', path.join(ROOT, 'www/engine/busytex')));
 const SRC_BUNDLE = arg('--bundle', 'texlive-extra');
-const OUT_DIR = path.resolve(arg('--out', path.join(ROOT, 'www/engine/slim')));
+const OUT_DIR = path.resolve(arg('--out', path.join(ROOT, 'www/engine/dist')));
 const OUT_NAME = arg('--name', 'texlive-slim');
 const ENGINE = arg('--engine', 'both');          // both | pdftex | xetex
 const TRACE = path.resolve(arg('--trace', path.join(__dirname, 'texmf_trace.json')));
@@ -89,8 +90,8 @@ function isInfrastructure(n) {
 
 const FMT_FOR = { pdftex: 'pdflatex.fmt', xetex: 'xelatex.fmt' };
 
-// Cloudflare caps a static asset at 25 MiB, so the slim tree is emitted as
-// several data packages rather than one. Emscripten loads any number of them
+// The slim tree is emitted as several data packages rather than one, keeping
+// every file under the 50 MB git cap. Emscripten loads any number of them
 // independently -- that is exactly what texlive-basic/recommended/extra are.
 //
 //   core    macros, formats, kpathsea infra   preload
@@ -107,7 +108,16 @@ const PART_OF = {
   common: 'extras'
 };
 const PRELOAD_PARTS = ['core', 'fonts', 'icu'];
-const CAP = 25 * 1024 * 1024;
+// 50 MB decimal, deliberately stricter than 50 MiB: git is the delivery path
+// for the web build, GitHub warns at 50 MB and hard-rejects at 100 MB, and a
+// build failure is a much better place to discover that than a push failure.
+const CAP = 50 * 1000 * 1000;
+
+// The four files the app ships from the upstream release, copied into the
+// output directory so `dist/` is entirely build output. Without this the
+// runtime lives inside the gitignored 649 MB source tree and cannot be
+// committed at all.
+const RUNTIME_FILES = ['busytex.wasm', 'busytex.js', 'busytex_worker.js', 'busytex_pipeline.js'];
 
 function selectFiles(all, traced) {
   const tracedSet = new Set(traced);
@@ -363,9 +373,21 @@ function main() {
     console.log(`${info.files} files, ${mb(info.dataBytes)} MB ${info.dataBytes > CAP ? '⚠ OVER CAP' : '✓'}`);
   }
 
+  // Copy the upstream runtime alongside the texmf parts.
+  const runtime = [];
+  for (const f of RUNTIME_FILES) {
+    const src = path.join(SRC_DIR, f);
+    if (!fs.existsSync(src)) throw new Error(`runtime file missing from source: ${src}`);
+    const bytes = fs.statSync(src).size;
+    fs.copyFileSync(src, path.join(OUT_DIR, f));
+    runtime.push({ name: f, bytes });
+    console.log(`copying ${f.padEnd(22)} ${mb(bytes)} MB ${bytes > CAP ? '⚠ OVER CAP' : '✓'}`);
+  }
+
   const manifest = {
     generated: new Date().toISOString(),
     parts,
+    runtime,
     // What the app must pass to the engine. preload is always mounted; catalog
     // is searched and mounted on demand when a \usepackage is unresolved.
     preload: parts.filter(p => PRELOAD_PARTS.includes(p.part)).map(p => `${p.name}.js`),
@@ -389,16 +411,20 @@ function main() {
   };
   fs.writeFileSync(path.join(OUT_DIR, `${OUT_NAME}.manifest.json`), JSON.stringify(manifest, null, 2) + '\n');
 
-  const totalData = parts.reduce((n, p) => n + p.dataBytes, 0);
-  const over = parts.filter(p => p.dataBytes > CAP);
+  const totalData = parts.reduce((n, p) => n + p.dataBytes, 0) + runtime.reduce((n, r) => n + r.bytes, 0);
+  const over = [
+    ...parts.filter(p => p.dataBytes > CAP).map(p => ({ name: p.name + '.data', bytes: p.dataBytes })),
+    ...runtime.filter(r => r.bytes > CAP)
+  ];
   console.log(`\nwrote ${path.relative(process.cwd(), OUT_DIR)}/  (${parts.length} data packages)`);
   console.log(`  preload: ${manifest.preload.join(', ') || '(none)'}`);
   console.log(`  catalog: ${manifest.catalog.join(', ') || '(none)'}`);
-  console.log(`  total   ${mb(totalData)} MB across all parts`);
+  console.log(`  total   ${mb(totalData)} MB shipped (texmf + runtime)`);
   console.log(`  reduction: ${(100 * (1 - keepBytes / srcBytes)).toFixed(1)}% of virtual bytes removed`);
   if (over.length) {
-    console.log(`\n⚠ ${over.length} part(s) over the 25 MiB cap: ${over.map(p => `${p.name} (${mb(p.dataBytes)} MB)`).join(', ')}`);
+    console.log(`\n⚠ ${over.length} file(s) over the ${CAP / 1e6} MB cap: ${over.map(p => `${p.name} (${mb(p.bytes)} MB)`).join(', ')}`);
     console.log('  subdivide the part, or trim its selection rule.');
+    process.exitCode = 1;
   }
 }
 

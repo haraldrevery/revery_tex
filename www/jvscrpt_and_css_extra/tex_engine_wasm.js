@@ -90,8 +90,11 @@ function pagesFromLog(log) {
 export class WasmTexEngine {
   constructor({ basePath, texmfPath, onLog } = {}) {
     this.id = 'wasm-busytex';
-    this.basePath = basePath || './engine/busytex';
-    this.texmfPath = texmfPath || './engine/slim';
+    // Runtime and texmf both live in engine/dist/ -- it is entirely build
+    // output, which is what makes it committable (engine/busytex/ is the
+    // gitignored 649 MB upstream release).
+    this.basePath = basePath || './engine/dist';
+    this.texmfPath = texmfPath || './engine/dist';
     this.onLog = onLog || (() => {});
     this._runner = null;
     this._manifest = null;
