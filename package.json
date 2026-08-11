@@ -14,11 +14,22 @@
     "build:texmf": "node build_tools/build_slim_texmf.js",
     "test": "node --test \"test/**/*.test.js\"",
     "start:electron": "env -u ELECTRON_RUN_AS_NODE electron .",
-    "build:electron": "electron-builder"
+    "test:electron": "node test/run_electron.js",
+    "build:electron": "env -u ELECTRON_RUN_AS_NODE electron-builder --linux deb rpm",
+    "version:check": "node build_tools/sync_version.js --check",
+    "version:set": "node build_tools/sync_version.js",
+    "verify:installers": "node test/verify_installers.js"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
-    "electron": "^33.0.0"
+    "electron": "^43.4.0",
+    "electron-builder": "^26.15.3"
   },
-  "main": "electron/main.js"
+  "main": "electron/main.js",
+  "author": {
+    "name": "Harald Revery",
+    "email": "harald.thirslund@gmail.com"
+  },
+  "homepage": "https://haraldrevery.com",
+  "desktopName": "revery-tex.desktop"
 }

@@ -1,0 +1,62 @@
+# Electron packaging.
+#
+# In a YAML file rather than package.json's "build" key because the two
+# decisions below need explaining, electron-builder rejects unknown properties
+# (so a "//comment" key fails the build), and JSON has no comments.
+
+appId: com.haraldrevery.tex
+productName: Revery TeX
+copyright: Copyright © Harald Revery
+
+directories:
+  output: dist-electron
+
+# asar MUST stay off.
+#
+# The custom protocol serves www/ with net.fetch(pathToFileURL(...)), and
+# Chromium's file:// handler does not understand asar archives. Node's fs does
+# — which is why this looks like it should work — but that code path never
+# touches fs. With asar on, every asset 404s and the engine cannot start.
+# There is nothing to gain either way: the payload is 97 MB of wasm and texmf
+# that asar would not compress.
+asar: false
+
+# A whitelist, because the default is "everything not excluded" and this repo
+# contains www/engine/busytex/ — 649 MB of upstream release, gitignored, and
+# sitting directly beside the 97 MB that does ship. An installer that silently
+# grew sevenfold is the failure being prevented here.
+files:
+  - package.json
+  - LICENSE
+  - NOTICE
+  - electron/**/*
+  - www/**/*
+  - "!www/engine/busytex${/*}"
+  - "!www/engine/*.tar.gz"
+  - "!**/*.map"
+
+linux:
+  # Pairs with `desktopName` in package.json. Without both, the desktop
+  # environment may not associate the running window with the .desktop entry,
+  # so the taskbar shows a generic icon instead of the app's.
+  syncDesktopName: true
+  target:
+    - deb
+    - rpm
+  category: Office
+  icon: tauri/icons/icon.png
+  maintainer: Harald Revery <harald.thirslund@gmail.com>
+  synopsis: Local-first LaTeX editor
+  description: >-
+    Edit, compile and preview LaTeX entirely on your own machine. Bundles
+    TeX Live 2026 compiled to WebAssembly, so there is no server, no account
+    and no network.
+  # `desktopEntry` in older electron-builder; renamed to `mimeTypes` by v26,
+  # and an unknown key here fails the build with only "linux should be null".
+  mimeTypes:
+    - text/x-tex
+    - application/x-tex
+    - text/x-latex
+
+deb:
+  priority: optional

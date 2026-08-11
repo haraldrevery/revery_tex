@@ -1,0 +1,222 @@
+// The Electron shell, driven end to end over the real IPC.
+//
+//   node test/run_electron.js                                    # from the repo
+//   REVERY_TEX_BIN=dist-electron/linux-unpacked/revery-tex \
+//     node test/run_electron.js                                  # the packaged app
+//
+// Electron speaks the DevTools Protocol, so unlike Tauri it can be driven
+// headlessly with the same client the Chrome tests use. This is the only
+// automated proof that the desktop save path works — that a save reaches the
+// disk, and that a file changed underneath is refused rather than overwritten.
+//
+// It runs against a **scratch copy** of a fixture, never the real
+// latex_project_tests/, because it deliberately writes and conflicts files.
+
+const { spawn } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { Cdp, sleep } = require('./cdp.js');
+
+const ROOT = path.resolve(__dirname, '..');
+const PORT = Number(process.env.CDP_PORT) || 9336;
+
+let failures = 0;
+function check(name, ok, detail = '') {
+  console.log(`  ${ok ? '✓' : '✗'} ${name}${detail ? `  ${detail}` : ''}`);
+  if (!ok) failures++;
+}
+
+/** A small project of our own, so nothing depends on the fixtures' contents. */
+function scratchProject() {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'revery-tex-electron-')));
+  fs.mkdirSync(path.join(dir, 'chapters'));
+  fs.writeFileSync(path.join(dir, 'main.tex'), String.raw`\documentclass{article}
+\begin{document}
+\section{Desktop}
+\input{chapters/one}
+\end{document}
+`);
+  fs.writeFileSync(path.join(dir, 'chapters', 'one.tex'), 'Original content.\n');
+  return dir;
+}
+
+async function connect() {
+  for (let i = 0; i < 150; i++) {
+    try {
+      const list = await fetch(`http://127.0.0.1:${PORT}/json/list`).then(r => r.json());
+      // Electron exposes the main process as a target too; we want the window.
+      const page = list.find(t => t.type === 'page' && t.url.startsWith('revery://'));
+      if (page) return page;
+    } catch { /* not up yet */ }
+    await sleep(200);
+  }
+  throw new Error('Electron did not expose a DevTools page target');
+}
+
+/**
+ * Refuse to start if something is already on the debug port.
+ *
+ * Attaching to a leftover instance is worse than failing: the checks run
+ * against the wrong process and the wrong project, and pass or fail for
+ * reasons that have nothing to do with the current code.
+ */
+async function requirePortFree() {
+  try {
+    const r = await fetch(`http://127.0.0.1:${PORT}/json/version`, { signal: AbortSignal.timeout(1000) });
+    if (r.ok) {
+      throw new Error(
+        `Something is already listening on the DevTools port ${PORT} — probably an Electron ` +
+        `left over from an earlier run. Find it with \`ss -lptn 'sport = :${PORT}'\` and kill ` +
+        `that PID (never by pattern), or set CDP_PORT to a free port.`
+      );
+    }
+  } catch (e) {
+    if (e instanceof Error && /already listening/.test(e.message)) throw e;
+    /* connection refused is what we want */
+  }
+}
+
+async function main() {
+  await requirePortFree();
+  const project = scratchProject();
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'revery-tex-electron-data-'));
+
+  // The real binary, not node_modules/electron/cli.js. cli.js is a Node
+  // wrapper that spawns Electron as a *child*, so killing the PID spawn gives
+  // back leaves Electron running — and the next run then attaches to the
+  // previous run's window, on a project directory that has since been deleted.
+  // That failure reads as ENOENT from deep inside the app and took a while to
+  // recognise. `detached` plus a negative kill takes the whole group.
+  // REVERY_TEX_BIN points this at a *packaged* build
+  // (dist-electron/linux-unpacked/revery-tex), which is the only way to prove
+  // the thing that ships works — the installer narrows `files`, and a path that
+  // resolves in the repo can be absent from the package.
+  const packaged = process.env.REVERY_TEX_BIN;
+  const electronBinary = packaged || require(path.join(ROOT, 'node_modules', 'electron'));
+  const child = spawn(electronBinary, [
+    ...(packaged ? [] : [ROOT]),        // a packaged app already knows its app dir
+    `--remote-debugging-port=${PORT}`,
+    `--user-data-dir=${userData}`,
+    // Headless has no GPU and no window server in CI or over ssh.
+    '--headless=new', '--disable-gpu', '--no-sandbox'
+  ], {
+    cwd: ROOT,
+    detached: true,
+    // VS Code terminals export this, and under it Electron boots as plain Node
+    // with every API undefined.
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, REVERY_TEX_OPEN: project },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  let stderr = '';
+  child.stderr.on('data', d => { stderr += d.toString(); });
+  child.stdout.on('data', d => { stderr += d.toString(); });
+
+  const cleanup = () => {
+    // Kill the process group by PID, never by pattern: a pattern matches this
+    // script's own command line and takes the session with it.
+    try { process.kill(-child.pid, 'SIGKILL'); } catch { }
+    try { process.kill(child.pid, 'SIGKILL'); } catch { }
+    try { fs.rmSync(project, { recursive: true, force: true }); } catch { }
+    try { fs.rmSync(userData, { recursive: true, force: true }); } catch { }
+  };
+  process.on('exit', cleanup);
+  process.on('SIGINT', () => { cleanup(); process.exit(130); });
+
+  try {
+    const target = await connect();
+    const ws = new WebSocket(target.webSocketDebuggerUrl);
+    await new Promise((res, rej) => {
+      ws.addEventListener('open', res, { once: true });
+      ws.addEventListener('error', () => rej(new Error('CDP websocket failed')), { once: true });
+    });
+    const cdp = new Cdp(ws);
+    await cdp.send('Runtime.enable');
+    await cdp.send('Page.enable');
+    cdp.on((msg) => {
+      if (msg.method === 'Page.javascriptDialogOpening') {
+        cdp.send('Page.handleJavaScriptDialog', { accept: true }).catch(() => {});
+      }
+    });
+
+    await cdp.waitFor('!!window.__reveryTexApp && window.__reveryTexApp.ready',
+      { what: 'app open on the scratch project', timeoutMs: 60000 });
+
+    const shell = await cdp.evaluate(`(() => ({
+      backend: window.NativeAPI.env,
+      desktop: window.NativeAPI.isDesktop,
+      canOpen: !!window.NativeAPI.openFolder,
+      importVisible: getComputedStyle(document.getElementById('importzip')).display !== 'none',
+      noticeShown: !document.getElementById('notice').hidden,
+      files: [...document.querySelectorAll('.node[data-path]')].map(n => n.dataset.path).sort()
+    }))()`);
+
+    check('electron backend selected', shell.backend === 'electron', shell.backend);
+    check('reports itself as desktop', shell.desktop === true);
+    check('can open folders', shell.canOpen);
+    check('no zip import offered', !shell.importVisible);
+    check('no browser-storage notice', !shell.noticeShown);
+    check('opened the scratch project', shell.files.join(',') === 'chapters/one.tex,main.tex',
+      shell.files.join(', '));
+
+    /* ── a save reaches the disk ────────────────────────────────────── */
+    const saved = await cdp.evaluate(`(async () => {
+      const r = await window.NativeAPI.readTextFile('chapters/one.tex');
+      const s = await window.NativeAPI.writeFile('chapters/one.tex', 'Saved from the app.\\n', r.stamp);
+      return { stamp: s };
+    })()`);
+    const onDisk = fs.readFileSync(path.join(project, 'chapters/one.tex'), 'utf8');
+    check('save reaches the real filesystem', onDisk === 'Saved from the app.\n', JSON.stringify(onDisk));
+    check('write returns a usable stamp', !!(saved.stamp && saved.stamp.size));
+
+    /* ── the data-loss case ─────────────────────────────────────────── */
+    // Read, let something else change the file, then try to save. This is the
+    // scenario the whole conflict mechanism exists for: another editor, a git
+    // checkout, a sync client.
+    // Wrapped in an IIFE: a bare top-level await is a syntax error in a
+    // Runtime.evaluate expression, and the failure reads as "Unexpected
+    // identifier" rather than anything about await.
+    const stale = await cdp.evaluate(
+      `(async () => (await window.NativeAPI.readTextFile('chapters/one.tex')).stamp)()`);
+    await sleep(20);
+    fs.writeFileSync(path.join(project, 'chapters/one.tex'), 'Written by something else entirely.\n');
+
+    const refused = await cdp.evaluate(`(async () => {
+      try {
+        await window.NativeAPI.writeFile('chapters/one.tex', 'my version\\n', ${JSON.stringify(stale)});
+        return { refused: false, message: null };
+      } catch (e) {
+        return { refused: /CONFLICT:/.test(e.message), message: e.message };
+      }
+    })()`);
+    check('a stale save is refused', refused.refused, refused.message || '');
+    check("the other program's work survives",
+      fs.readFileSync(path.join(project, 'chapters/one.tex'), 'utf8') === 'Written by something else entirely.\n');
+
+    await cdp.evaluate(`window.NativeAPI.writeFile('chapters/one.tex', 'forced\\n', null)`, true);
+    check('a forced overwrite still works',
+      fs.readFileSync(path.join(project, 'chapters/one.tex'), 'utf8') === 'forced\n');
+
+    /* ── containment ────────────────────────────────────────────────── */
+    const escape = await cdp.evaluate(`(async () => {
+      try { await window.NativeAPI.writeFile('../escaped.tex', 'pwned', null); return 'ALLOWED'; }
+      catch (e) { return e.message; }
+    })()`);
+    check('a write outside the project is refused', /escape/i.test(escape), escape.slice(0, 60));
+    check('nothing was written outside the project',
+      !fs.existsSync(path.join(path.dirname(project), 'escaped.tex')));
+
+    /* ── and it actually compiles, through the custom protocol ──────── */
+    const result = await cdp.evaluate(`window.__reveryTexApp.compile()`, true);
+    check('compiles to a PDF', result.ok && result.pages === 1, result.status);
+  } finally {
+    cleanup();
+    if (failures) console.log(`\n--- electron output ---\n${stderr.slice(-2000)}`);
+  }
+
+  console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');
+  process.exit(failures ? 1 : 0);
+}
+
+main().catch((err) => { console.error(err); process.exit(1); });
