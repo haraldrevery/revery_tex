@@ -9,6 +9,7 @@
 // the File System Access API in the browser. Everything else here is final.
 
 import { WasmTexEngine } from './tex_engine_wasm.js';
+import { PdfPreview } from './pdf_preview.js';
 
 const $ = (id) => document.getElementById(id);
 const CM = window.CM;
@@ -18,8 +19,8 @@ let engine = null;
 let project = null;          // { key, main, engine, files: Map<path, {content, dirty}> }
 let currentPath = null;
 let view = null;             // CodeMirror EditorView
-let lastPdfUrl = null;
 let lastPdf = null;
+let preview = null;
 let rawLines = [];
 let diagnostics = [];
 
@@ -350,7 +351,7 @@ async function compile() {
     renderIssues();
 
     if (r.success) {
-      showPdf(r.pdf, r.pages);
+      await showPdf(r.pdf, r.pages);
       const errs = diagnostics.filter(d => d.severity === 'error').length;
       const warns = diagnostics.filter(d => d.severity === 'warning').length;
       setStatus(`✓ ${r.pages} pages · ${errs} errors, ${warns} warnings · ${secs}s`, errs ? 'warn' : 'ok');
@@ -374,14 +375,19 @@ async function compile() {
   }
 }
 
-function showPdf(bytes, pages) {
+async function showPdf(bytes, pages) {
   lastPdf = bytes;
-  if (lastPdfUrl) URL.revokeObjectURL(lastPdfUrl);
-  lastPdfUrl = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
   $('pdfempty').style.display = 'none';
   $('pdf').style.display = 'block';
-  $('pdf').src = lastPdfUrl;
-  $('pdfmeta').textContent = `${pages ?? '?'} pages · ${(bytes.length / 1024).toFixed(0)} KB`;
+  if (!preview) preview = new PdfPreview($('pdf'));
+  try {
+    const n = await preview.load(bytes);
+    $('pdfmeta').textContent = `${n} pages · ${(bytes.length / 1024).toFixed(0)} KB`;
+  } catch (err) {
+    // A render failure must not read as a compile failure: the PDF is valid.
+    rawLog('err', `PDF preview failed: ${err.message}`);
+    $('pdfmeta').textContent = `${pages ?? '?'} pages · preview failed`;
+  }
   $('savepdf').disabled = false;
 }
 

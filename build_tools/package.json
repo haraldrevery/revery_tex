@@ -15,7 +15,8 @@
     "@codemirror/search": "^6.5.10",
     "@codemirror/state": "^6.4.1",
     "@codemirror/view": "^6.36.3",
-    "@lezer/highlight": "^1.2.1"
+    "@lezer/highlight": "^1.2.1",
+    "pdfjs-dist": "^4.10.38"
   },
   "devDependencies": {
     "esbuild": "^0.24.2"

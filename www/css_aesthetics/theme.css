@@ -138,7 +138,11 @@ button.primary { color:var(--text); border-color:var(--accent) }
 .cm-lint-err { color:var(--err) } .cm-lint-warn { color:var(--warn) }
 
 /* ── pdf ────────────────────────────────────────────────────────────── */
-#pdf { flex:1; border:0; width:100%; background:#222; display:none }
+#pdf { flex:1; overflow:auto; display:none; padding:12px; background:var(--bg) }
+#pdf::-webkit-scrollbar { width:8px; height:8px }
+#pdf::-webkit-scrollbar-thumb { background:var(--scrollbar); border-radius:2px }
+.pdfpage { display:block; margin:0 auto 12px; background:#fff;
+           border:1px solid var(--border); border-radius:2px; max-width:100% }
 #pdfempty { flex:1; display:flex; align-items:center; justify-content:center;
             color:var(--text-dim); font-size:.66rem; letter-spacing:var(--tracking-wider);
             text-transform:uppercase }
