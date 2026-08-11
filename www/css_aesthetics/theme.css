@@ -157,6 +157,17 @@ button.primary { color:var(--text); border-color:var(--accent) }
 #pdf { flex:1; overflow:auto; display:none; padding:12px; background:var(--bg) }
 #pdf::-webkit-scrollbar { width:8px; height:8px }
 #pdf::-webkit-scrollbar-thumb { background:var(--scrollbar); border-radius:2px }
+#pdf { position:relative }
+.pdf-syncmark {
+  position:absolute; width:10px; height:10px; margin:-5px 0 0 -5px;
+  border:2px solid var(--warn); border-radius:50%; pointer-events:none;
+  animation: syncpulse 1.6s ease-out forwards;
+}
+@keyframes syncpulse {
+  0%   { transform:scale(.4); opacity:1 }
+  60%  { transform:scale(2.4); opacity:.5 }
+  100% { transform:scale(3); opacity:0 }
+}
 .pdfpage { display:block; margin:0 auto 12px; background:#fff;
            border:1px solid var(--border); border-radius:2px; max-width:100% }
 #pdfempty { flex:1; display:flex; align-items:center; justify-content:center;

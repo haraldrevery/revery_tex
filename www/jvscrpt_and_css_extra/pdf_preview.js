@@ -100,6 +100,7 @@ export class PdfPreview {
       canvas.height = Math.floor(viewport.height);
       canvas.style.width = Math.floor(viewport.width / dpr) + 'px';
       canvas.style.height = Math.floor(viewport.height / dpr) + 'px';
+      canvas.dataset.page = String(n);
       frag.appendChild(canvas);
 
       await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
@@ -108,6 +109,41 @@ export class PdfPreview {
     if (token !== this._renderToken) return;
     this.container.textContent = '';
     this.container.appendChild(frag);
+  }
+
+  /**
+   * Report clicks as a page number plus PDF-point coordinates, which is what
+   * SyncTeX speaks. CSS pixels relate to PDF points by this.scale alone — the
+   * devicePixelRatio is already divided out of the canvas's style size.
+   */
+  onPageClick(cb) {
+    this.container.addEventListener('click', (ev) => {
+      const canvas = ev.target.closest?.('canvas.pdfpage');
+      if (!canvas) return;
+      const r = canvas.getBoundingClientRect();
+      cb({
+        page: Number(canvas.dataset.page),
+        x: (ev.clientX - r.left) / this.scale,
+        y: (ev.clientY - r.top) / this.scale,
+        native: ev
+      });
+    });
+  }
+
+  /** Scroll so a PDF-point position on a page is visible, and flash a marker. */
+  scrollToPosition(page, x, y) {
+    const canvas = this.container.querySelector(`canvas.pdfpage[data-page="${page}"]`);
+    if (!canvas) return false;
+    const top = canvas.offsetTop + y * this.scale - this.container.clientHeight / 3;
+    this.container.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+
+    const dot = document.createElement('div');
+    dot.className = 'pdf-syncmark';
+    dot.style.left = (canvas.offsetLeft + x * this.scale) + 'px';
+    dot.style.top = (canvas.offsetTop + y * this.scale) + 'px';
+    this.container.appendChild(dot);
+    setTimeout(() => dot.remove(), 1600);
+    return true;
   }
 
   async destroyDoc() {

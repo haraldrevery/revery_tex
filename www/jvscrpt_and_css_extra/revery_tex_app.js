@@ -14,6 +14,7 @@ import { WasmTexEngine } from './tex_engine_wasm.js';
 import { PdfPreview } from './pdf_preview.js';
 import { NativeAPI } from './native_api.js';
 import { latexEditingExtensions, setDiagnostics, beginEndInsertion } from './latex_editor.js';
+import { SyncTex } from './synctex.js';
 
 const $ = (id) => document.getElementById(id);
 const CM = window.CM;
@@ -28,6 +29,7 @@ let preview = null;
 let rawLines = [];
 let diagnostics = [];
 let backupTimer = null;
+const syncTex = new SyncTex();
 // Set while openFile() replaces the document. Without it, loading a file marks
 // it modified — the update listener cannot tell a programmatic replacement from
 // typing — which would enable Save and schedule a crash backup for a file the
@@ -206,6 +208,21 @@ function makeEditor() {
         { key: 'Mod-s', preventDefault: true, run: () => { saveAll(); return true; } },
         { key: 'Mod-Enter', preventDefault: true, run: () => { compile(); return true; } }
       ]),
+      // Ctrl/Cmd+click in the source jumps the PDF to the matching place.
+      CM.EditorView.domEventHandlers({
+        mousedown(ev, view) {
+          if (!ev.ctrlKey && !ev.metaKey) return false;
+          const pos = view.posAtCoords({ x: ev.clientX, y: ev.clientY });
+          if (pos == null || !currentPath) return false;
+          const line = view.state.doc.lineAt(pos).number;
+          const hit = syncTex.fromSource(currentPath, line);
+          if (!hit || !preview) return false;
+          preview.scrollToPosition(hit.page, hit.x, hit.y);
+          setStatus(`↘ page ${hit.page}`, 'ok');
+          ev.preventDefault();
+          return true;
+        }
+      }),
       CM.EditorView.updateListener.of(u => {
         if (loadingDoc || !u.docChanged || !currentPath || !project) return;
         const f = project.files.get(currentPath);
@@ -566,6 +583,13 @@ async function compile() {
     pushDiagnosticsToGutter();
 
     if (r.success) {
+      // SyncTeX is optional: a failure to parse must not fail the compile.
+      try {
+        await syncTex.parse(r.synctex);
+        syncTex.setProjectFiles([...project.files.keys()]);
+      } catch (e) {
+        rawLog('wrn', `synctex unavailable: ${e.message}`);
+      }
       await showPdf(r.pdf, r.pages);
       const errs = diagnostics.filter(d => d.severity === 'error').length;
       const warns = diagnostics.filter(d => d.severity === 'warning').length;
@@ -594,7 +618,16 @@ async function showPdf(bytes, pages) {
   lastPdf = bytes;
   $('pdfempty').style.display = 'none';
   $('pdf').style.display = 'block';
-  if (!preview) preview = new PdfPreview($('pdf'));
+  if (!preview) {
+    preview = new PdfPreview($('pdf'));
+    preview.onPageClick(({ page, x, y }) => {
+      const hit = syncTex.fromPdf(page, x, y);
+      if (!hit) return;
+      if (hit.file && project.files.has(hit.file) && hit.file !== currentPath) openFile(hit.file);
+      gotoLine(hit.line);
+      setStatus(`↖ ${hit.file}:${hit.line}`, 'ok');
+    });
+  }
   // Stay where the reader was looking, rather than snapping to page 1 on every
   // recompile.
   const where = preview.scrollFraction();
