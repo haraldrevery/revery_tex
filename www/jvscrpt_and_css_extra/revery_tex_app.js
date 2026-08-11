@@ -13,6 +13,7 @@
 import { WasmTexEngine } from './tex_engine_wasm.js';
 import { PdfPreview } from './pdf_preview.js';
 import { NativeAPI } from './native_api.js';
+import { latexEditingExtensions, setDiagnostics, beginEndInsertion } from './latex_editor.js';
 
 const $ = (id) => document.getElementById(id);
 const CM = window.CM;
@@ -130,6 +131,13 @@ function renderIssues() {
   }
 }
 
+// Diagnostics carry a line number only when the log gave one; the gutter shows
+// just those, and the Issues tab remains the complete list.
+function pushDiagnosticsToGutter() {
+  if (!view) return;
+  view.dispatch({ effects: setDiagnostics.of(diagnostics.filter(d => d.line)) });
+}
+
 function gotoLine(n) {
   if (!view) return;
   const line = view.state.doc.line(Math.min(Math.max(1, n), view.state.doc.lines));
@@ -169,7 +177,9 @@ function makeEditor() {
       CM.foldGutter(),
       CM.syntaxHighlighting(CM.defaultHighlightStyle, { fallback: true }),
       CM.latex(),
-      CM.autocompletion({ selectOnOpen: false, icons: false }),
+      // LaTeX-specific behaviour: \begin auto-close, project-aware completion,
+      // TeX-shaped highlighting, and compile diagnostics in the gutter.
+      ...latexEditingExtensions(() => project),
       CM.highlightSelectionMatches(),
       CM.EditorView.lineWrapping,
       CM.keymap.of([
@@ -536,6 +546,7 @@ async function compile() {
     if (r.log) rawLog(r.success ? 'dbg' : 'err', r.log);
     diagnostics = r.diagnostics || [];
     renderIssues();
+    pushDiagnosticsToGutter();
 
     if (r.success) {
       await showPdf(r.pdf, r.pages);
@@ -616,6 +627,31 @@ view = makeEditor();
 renderIssues();
 await loadProjects();
 setStatus('ready');
+
+// Test hook for the editor extensions: completion and auto-close are hard to
+// exercise through the UI without a keystroke driver.
+window.__reveryTexTest = {
+  index: () => {
+    const labels = new Set(), citations = new Set();
+    if (project) for (const [, f] of project.files) {
+      if (typeof f.content !== 'string') continue;
+      for (const m of f.content.matchAll(/\\label\{([^}]+)\}/g)) labels.add(m[1]);
+      for (const m of f.content.matchAll(/@\w+\s*\{\s*([^,\s}]+)/g)) citations.add(m[1]);
+    }
+    return { labels: [...labels], citations: [...citations] };
+  },
+  tryBeginAutoClose: () => {
+    const st = CM.EditorState.create({ doc: '\\begin{itemize' });
+    const spec = beginEndInsertion(st, 14, 14, '}');
+    if (!spec) return 'no insertion';
+    return spec.changes.insert.replace(/\n/g, '\\n');
+  },
+  tryBeginAutoCloseBalanced: () => {
+    // Already has a matching \end — must NOT insert a second one.
+    const st = CM.EditorState.create({ doc: '\\begin{itemize\n\n\\end{itemize}' });
+    return beginEndInsertion(st, 14, 14, '}') === null ? 'correctly skipped' : 'WRONG: duplicated';
+  }
+};
 
 // Headless driver hook, same contract as the Phase 0 harness.
 window.__reveryTexApp = {

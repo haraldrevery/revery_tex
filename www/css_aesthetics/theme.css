@@ -22,6 +22,7 @@
   --accent:rgba(255,255,255,.58); --scrollbar:rgba(255,255,255,.1); --menu-bg:#1f1f1f;
   --ok:#7fc97f; --warn:#e2c46a; --err:#e08a7a;
   --sel:rgba(255,255,255,.22);
+  --tex-command:#8ab4d8; --tex-env:#c3a6e0; --tex-math:#e2c46a; --tex-arg:#9fc98f;
 }
 [data-theme="light"] {
   --bg:#fafaf8; --bg-panel:#ffffff; --bg-hover:#f2f2ef;
@@ -31,6 +32,7 @@
   --accent:rgba(0,0,0,.58); --scrollbar:rgba(0,0,0,.1); --menu-bg:#ffffff;
   --ok:#2e7d32; --warn:#8a6d1f; --err:#b3261e;
   --sel:rgba(0,0,0,.22);
+  --tex-command:#1a5f8a; --tex-env:#6b3fa0; --tex-math:#8a6d1f; --tex-arg:#2f6b2a;
 }
 [data-theme="paper"] {
   --bg:#f4efe4; --bg-panel:#ece5d6; --bg-hover:#dabca2;
@@ -40,6 +42,7 @@
   --accent:rgba(176,95,51,.55); --scrollbar:rgba(110,80,40,.14); --menu-bg:#ece5d6;
   --ok:#4a7a3a; --warn:#8a6d1f; --err:#a33a2a;
   --sel:rgba(110,80,40,.22);
+  --tex-command:#8a5a2a; --tex-env:#7a4a6a; --tex-math:#9a6a1a; --tex-arg:#4a6a3a;
 }
 [data-theme="forest"] {
   --bg:#0e1a11; --bg-panel:#152019; --bg-hover:#1d2d22;
@@ -49,6 +52,7 @@
   --accent:rgba(130,195,118,.65); --scrollbar:rgba(90,170,90,.11); --menu-bg:#192a1d;
   --ok:#8fd07f; --warn:#d7c06a; --err:#e08a7a;
   --sel:rgba(130,195,118,.22);
+  --tex-command:#7fc0a8; --tex-env:#a8c87f; --tex-math:#d7c06a; --tex-arg:#9fd08f;
 }
 
 @font-face { font-family:'HaraldText'; src:url('../fonts/HaraldReveryTextFont.woff2') format('woff2'),
@@ -137,7 +141,17 @@ button.primary { color:var(--text); border-color:var(--accent) }
 .cm-selectionBackground, .cm-content ::selection { background:var(--sel) !important }
 .cm-activeLine { background:color-mix(in srgb, var(--bg-hover) 40%, transparent) }
 /* Diagnostics from the compile log, shown in the gutter. */
-.cm-lint-err { color:var(--err) } .cm-lint-warn { color:var(--warn) }
+.cm-diaggutter { min-width:1.1rem }
+.cm-diag { font-size:.55rem; line-height:1.7; display:block; text-align:center }
+.cm-diag-error { color:var(--err) } .cm-diag-warning { color:var(--warn) }
+/* Completion popup, in the app's own idiom rather than CodeMirror's default. */
+.cm-tooltip.cm-tooltip-autocomplete {
+  background:var(--menu-bg); border:1px solid var(--border-md); border-radius:2px;
+  font-family:var(--font-mono); font-size:.7rem;
+}
+.cm-tooltip-autocomplete ul li { padding:.15rem .5rem; color:var(--text-muted) }
+.cm-tooltip-autocomplete ul li[aria-selected] { background:var(--bg-hover); color:var(--text) }
+.cm-completionDetail { color:var(--text-dim); font-style:normal; margin-left:.6rem }
 
 /* ── pdf ────────────────────────────────────────────────────────────── */
 #pdf { flex:1; overflow:auto; display:none; padding:12px; background:var(--bg) }
