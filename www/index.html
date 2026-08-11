@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>Revery TeX</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 'wasm-unsafe-eval' is required for the engine. Keep in sync with
+     tauri/tauri.conf.json — a mismatch shows up only at runtime, as a refusal
+     to instantiate WebAssembly. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src 'self' blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'">
+<link rel="stylesheet" href="./css_aesthetics/theme.css">
+<script src="./jvscrpt_and_css_extra/codemirror-bundle.js"></script>
+</head>
+<body>
+
+<div id="topbar">
+  <span class="lbl">Project</span>
+  <select id="project"></select>
+  <span class="lbl">Engine</span>
+  <select id="engine"></select>
+  <button id="compile" class="primary">Compile</button>
+  <span id="docname" class="docname"></span>
+  <div class="spacer"></div>
+  <button id="status" class="statusline">idle</button>
+  <button id="theme" title="Cycle theme">Theme</button>
+</div>
+
+<div id="workspace">
+  <aside id="sidebar">
+    <div class="panehead"><span>Files</span><div class="spacer"></div><span id="filecount" class="dim"></span></div>
+    <div id="filetree"></div>
+  </aside>
+  <div class="vdiv" data-resize="sidebar"></div>
+
+  <section id="editorpane">
+    <div class="panehead"><span id="editortitle">no file</span><div class="spacer"></div><span id="dirty" class="dim"></span></div>
+    <div id="editor"></div>
+  </section>
+  <div class="vdiv" data-resize="editor"></div>
+
+  <section id="pdfpane">
+    <div class="panehead"><span>PDF</span><div class="spacer"></div><span id="pdfmeta" class="dim"></span>
+      <button id="savepdf" disabled>Download</button></div>
+    <div id="pdfempty">no output yet</div>
+    <iframe id="pdf" title="PDF preview"></iframe>
+  </section>
+</div>
+
+<div class="hdiv" id="paneldiv"></div>
+
+<div id="panel">
+  <div class="panelhead">
+    <button class="tab active" data-tab="issues">Issues <span id="issuecount" class="dim"></span></button>
+    <button class="tab" data-tab="raw">Raw log</button>
+    <div class="spacer"></div>
+    <span id="logmeta" class="dim"></span>
+    <button id="copylog">Copy</button>
+    <button id="savelog">Download .log</button>
+    <button id="togglepanel">Hide</button>
+  </div>
+  <div id="issues" class="tabbody"></div>
+  <div id="raw" class="tabbody hidden"></div>
+</div>
+
+<script type="module" src="./jvscrpt_and_css_extra/revery_tex_app.js"></script>
+</body>
+</html>

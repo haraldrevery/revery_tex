@@ -1,0 +1,168 @@
+/* Revery TeX — design tokens and app chrome.
+ *
+ * The four themes and the 15-property contract are copied from Revery Notebook
+ * (revery_notebook_style.css:136-224) so the two apps stay visually identical.
+ * Chrome is mono/uppercase/wide-tracked; content is the serif brand face.
+ * The Harald face has no real bold: weight stays 400 and emphasis is underline.
+ */
+
+:root {
+  --font-brand: 'HaraldText', Georgia, 'Times New Roman', serif;
+  --font-mono:  'HaraldMono', ui-monospace, 'Courier New', monospace;
+  --tracking-body: .01em;
+  --tracking-wide: .09em;
+  --tracking-wider: .16em;
+}
+
+[data-theme="dark"] {
+  --bg:#0a0a0a; --bg-panel:#1e1e1e; --bg-hover:#2c2c2c;
+  --border:rgba(255,255,255,.08); --border-md:rgba(255,255,255,.14);
+  --theme-divider:rgb(30,30,30); --theme-divider-hover:rgb(42,42,42);
+  --text:#f5f5f5; --text-muted:rgba(255,255,255,.46); --text-dim:rgba(255,255,255,.18);
+  --accent:rgba(255,255,255,.58); --scrollbar:rgba(255,255,255,.1); --menu-bg:#1f1f1f;
+  --ok:#7fc97f; --warn:#e2c46a; --err:#e08a7a;
+  --sel:rgba(255,255,255,.22);
+}
+[data-theme="light"] {
+  --bg:#fafaf8; --bg-panel:#ffffff; --bg-hover:#f2f2ef;
+  --border:rgba(0,0,0,.07); --border-md:rgba(0,0,0,.14);
+  --theme-divider:rgb(232,232,232); --theme-divider-hover:rgb(211,211,211);
+  --text:#171717; --text-muted:rgba(0,0,0,.632); --text-dim:rgba(0,0,0,.18);
+  --accent:rgba(0,0,0,.58); --scrollbar:rgba(0,0,0,.1); --menu-bg:#ffffff;
+  --ok:#2e7d32; --warn:#8a6d1f; --err:#b3261e;
+  --sel:rgba(0,0,0,.22);
+}
+[data-theme="paper"] {
+  --bg:#f4efe4; --bg-panel:#ece5d6; --bg-hover:#dabca2;
+  --border:rgba(110,80,40,.11); --border-md:rgba(110,80,40,.21);
+  --theme-divider:rgb(208,196,176); --theme-divider-hover:rgb(188,174,150);
+  --text:#2f2820; --text-muted:rgba(55,38,18,.536); --text-dim:rgba(55,38,18,.22);
+  --accent:rgba(176,95,51,.55); --scrollbar:rgba(110,80,40,.14); --menu-bg:#ece5d6;
+  --ok:#4a7a3a; --warn:#8a6d1f; --err:#a33a2a;
+  --sel:rgba(110,80,40,.22);
+}
+[data-theme="forest"] {
+  --bg:#0e1a11; --bg-panel:#152019; --bg-hover:#1d2d22;
+  --border:rgba(90,170,90,.09); --border-md:rgba(90,170,90,.17);
+  --theme-divider:rgb(24,40,28); --theme-divider-hover:rgb(36,58,40);
+  --text:#cfe8c8; --text-muted:rgba(170,215,158,.50); --text-dim:rgba(170,215,158,.20);
+  --accent:rgba(130,195,118,.65); --scrollbar:rgba(90,170,90,.11); --menu-bg:#192a1d;
+  --ok:#8fd07f; --warn:#d7c06a; --err:#e08a7a;
+  --sel:rgba(130,195,118,.22);
+}
+
+@font-face { font-family:'HaraldText'; src:url('../fonts/HaraldReveryTextFont.woff2') format('woff2'),
+  url('../fonts/HaraldReveryTextFont.woff') format('woff'); font-weight:normal; font-display:swap }
+@font-face { font-family:'HaraldMono'; src:url('../fonts/HaraldReveryMonoFont.woff2') format('woff2'),
+  url('../fonts/HaraldReveryMonoFont.woff') format('woff'); font-weight:normal; font-display:swap }
+
+* { box-sizing:border-box }
+html,body { height:100%; margin:0; overflow:hidden }
+body {
+  background:var(--bg); color:var(--text); font-family:var(--font-mono);
+  font-size:.75rem; display:flex; flex-direction:column;
+}
+
+/* ── chrome ─────────────────────────────────────────────────────────── */
+.lbl, .dim {
+  font-size:.62rem; letter-spacing:var(--tracking-wider); text-transform:uppercase;
+  color:var(--text-dim); white-space:nowrap;
+}
+.spacer { flex:1 }
+
+button, select {
+  font-family:var(--font-mono); font-size:.7rem; text-transform:uppercase;
+  letter-spacing:var(--tracking-wide); color:var(--text-muted);
+  background:none; border:1px solid var(--border-md); border-radius:2px;
+  /* asymmetric padding: the brand face sits high in its em box */
+  padding:.375rem .75rem .1875rem .75rem; line-height:1; cursor:pointer;
+  transition:color .15s, border-color .15s, background .15s;
+}
+select { padding:.3rem .4rem }
+select option { background:var(--menu-bg); color:var(--text) }
+button:hover:not(:disabled), select:hover { color:var(--text); border-color:var(--accent); background:var(--bg-hover) }
+button:disabled { opacity:.35; cursor:default }
+button.primary { color:var(--text); border-color:var(--accent) }
+
+#topbar {
+  height:2.4rem; flex:none; display:flex; align-items:center; gap:.55rem;
+  padding:0 .9rem; border-bottom:1px solid var(--border); background:var(--bg);
+}
+.docname { font-size:.66rem; letter-spacing:var(--tracking-wide); color:var(--text-muted); text-transform:uppercase }
+.statusline { border-color:transparent; color:var(--text-muted) }
+.statusline.ok { color:var(--ok) } .statusline.err { color:var(--err) } .statusline.warn { color:var(--warn) }
+
+/* ── layout ─────────────────────────────────────────────────────────── */
+#workspace { flex:1; display:flex; min-height:0 }
+#sidebar  { width:230px; min-width:120px; display:flex; flex-direction:column; background:var(--bg-panel) }
+#editorpane { flex:1 1 55%; display:flex; flex-direction:column; min-width:0 }
+#pdfpane  { flex:1 1 45%; display:flex; flex-direction:column; min-width:0; background:var(--bg-panel) }
+
+.vdiv { width:1px; background:var(--theme-divider); cursor:col-resize; flex:none }
+.vdiv:hover { background:var(--theme-divider-hover) }
+.hdiv { height:1px; background:var(--theme-divider); cursor:row-resize; flex:none }
+.hdiv:hover { background:var(--theme-divider-hover) }
+
+.panehead, .panelhead {
+  flex:none; display:flex; align-items:center; gap:.4rem;
+  padding:8px 14px 6px; border-bottom:1px solid var(--border);
+  font-size:.62rem; letter-spacing:var(--tracking-wider); text-transform:uppercase;
+  color:var(--text-dim); background:color-mix(in srgb, var(--bg-panel) 40%, transparent);
+}
+.panehead button, .panelhead button { padding:.2rem .45rem .1rem; font-size:.6rem }
+
+/* ── file tree ──────────────────────────────────────────────────────── */
+#filetree { flex:1; overflow:auto; padding:4px 0 }
+.node {
+  padding:.22rem .6rem .16rem 1rem; cursor:pointer; white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis; font-size:.7rem; color:var(--text-muted);
+}
+.node:hover { background:var(--bg-hover); color:var(--text) }
+.node.active { color:var(--text); border-left:2px solid var(--accent); padding-left:calc(1rem - 2px) }
+.node.dir { color:var(--text-dim); letter-spacing:var(--tracking-wide); text-transform:uppercase; font-size:.62rem;
+            margin-top:.35rem; cursor:default }
+.node.dir:hover { background:none; color:var(--text-dim) }
+.node.main::after { content:' ■'; color:var(--accent) }
+
+/* ── editor ─────────────────────────────────────────────────────────── */
+#editor { flex:1; min-height:0; overflow:hidden }
+.cm-editor { height:100% }
+.cm-scroller { font-family:var(--font-mono) !important; line-height:1.6 }
+.cm-gutters { background:transparent !important; border-right:1px solid var(--border) !important; color:var(--text-dim) !important }
+.cm-activeLineGutter { background:transparent !important; color:var(--text-muted) !important }
+.cm-content { caret-color:var(--text) }
+.cm-cursor { border-left-color:var(--text) !important }
+.cm-selectionBackground, .cm-content ::selection { background:var(--sel) !important }
+.cm-activeLine { background:color-mix(in srgb, var(--bg-hover) 40%, transparent) }
+/* Diagnostics from the compile log, shown in the gutter. */
+.cm-lint-err { color:var(--err) } .cm-lint-warn { color:var(--warn) }
+
+/* ── pdf ────────────────────────────────────────────────────────────── */
+#pdf { flex:1; border:0; width:100%; background:#222; display:none }
+#pdfempty { flex:1; display:flex; align-items:center; justify-content:center;
+            color:var(--text-dim); font-size:.66rem; letter-spacing:var(--tracking-wider);
+            text-transform:uppercase }
+
+/* ── bottom panel ───────────────────────────────────────────────────── */
+#panel { height:200px; min-height:0; flex:none; display:flex; flex-direction:column; background:var(--bg-panel) }
+#panel.collapsed { height:2rem }
+#panel.collapsed .tabbody { display:none }
+.tab { border:0; border-bottom:1px solid transparent; border-radius:0; color:var(--text-dim) }
+.tab.active { color:var(--text); border-bottom-color:var(--accent) }
+.tabbody { flex:1; overflow:auto; padding:6px 14px; white-space:pre; font-size:.7rem; line-height:1.45 }
+.tabbody.hidden { display:none }
+.tabbody::-webkit-scrollbar, #filetree::-webkit-scrollbar { width:8px; height:8px }
+.tabbody::-webkit-scrollbar-thumb, #filetree::-webkit-scrollbar-thumb { background:var(--scrollbar); border-radius:2px }
+
+.l-inf { color:var(--text-muted) } .l-dbg { color:var(--text) }
+.l-wrn { color:var(--warn) } .l-err { color:var(--err) }
+.l-hdr { color:var(--accent); text-transform:uppercase; letter-spacing:var(--tracking-wide) }
+.l-meta { color:var(--text-dim) }
+
+.issue { cursor:pointer; padding:.15rem 0; white-space:normal }
+.issue:hover { color:var(--text) }
+.issue .sev { display:inline-block; width:4.2rem; text-transform:uppercase;
+              letter-spacing:var(--tracking-wide); font-size:.62rem }
+.issue.error .sev { color:var(--err) } .issue.warning .sev { color:var(--warn) }
+.issue .where { color:var(--text-dim) }
+.empty { color:var(--text-dim); font-size:.66rem; letter-spacing:var(--tracking-wider); text-transform:uppercase }

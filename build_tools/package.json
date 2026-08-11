@@ -1,0 +1,23 @@
+{
+  "name": "revery-tex-build-tools",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Build tool: bundles CodeMirror 6 (LaTeX) into a single self-hosted IIFE",
+  "scripts": {
+    "build": "node build_cm.js",
+    "watch": "node build_cm.js --watch"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "^6.20.3",
+    "@codemirror/commands": "^6.7.1",
+    "@codemirror/language": "^6.10.8",
+    "@codemirror/legacy-modes": "^6.4.2",
+    "@codemirror/search": "^6.5.10",
+    "@codemirror/state": "^6.4.1",
+    "@codemirror/view": "^6.36.3",
+    "@lezer/highlight": "^1.2.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.2"
+  }
+}

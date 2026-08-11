@@ -16,3 +16,4 @@ tauri/target/
 dist-electron/
 *.log
 .DS_Store
+build_tools/node_modules/

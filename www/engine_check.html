@@ -8,7 +8,7 @@
      and the engine cannot start. Revery Notebook's CSP omits it because it
      runs no WASM. Keep this in sync with tauri.conf.json. -->
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'">
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src 'self' blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'">
 <style>
 /* Revery design tokens (revery_notebook_style.css:136-224). */
 :root { --font-mono: 'HaraldMono', ui-monospace, 'Courier New', monospace;
