@@ -1,0 +1,58 @@
+{
+    "name": "texlyre-busytex",
+    "version": "1.2.3",
+    "description": "Run LaTeX compilation (pdflatex, xelatex, lualatex) in the browser using WebAssembly (TeX Live 2026)",
+    "author": "Fares Abawi <fares@abawi.me> (https://abawi.me)",
+    "license": "AGPL-3.0-or-later",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/TeXlyre/texlyre-busytex.git"
+    },
+    "homepage": "https://texlyre.github.io/texlyre-busytex/",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "type": "module",
+    "bin": {
+        "texlyre-busytex": "scripts/cli.cjs"
+    },
+    "scripts": {
+        "update:cache-version": "node scripts/update-cache-version.cjs",
+        "build": "npm run update:cache-version && tsc && rollup -c",
+        "dev": "tsc --watch",
+        "download-assets": "node scripts/download-assets.cjs",
+        "upload-assets": "bash scripts/upload-to-release.sh",
+        "build:example": "cd example/github-pages-example && npm install",
+        "build:pages-example": "npm run build && cd example/github-pages-example && npm install",
+        "example": "cd example/github-pages-example && npm start",
+        "pages-example": "cd example/github-pages-example && npm start"
+    },
+    "keywords": [
+        "latex",
+        "busytex",
+        "pdflatex",
+        "xelatex",
+        "lualatex",
+        "bibtex",
+        "browser",
+        "wasm",
+        "webassembly",
+        "pdf",
+        "synctex"
+    ],
+    "files": [
+        "dist/",
+        "scripts/cli.cjs",
+        "scripts/download-assets.cjs",
+        "README.md",
+        "LICENSE"
+    ],
+    "devDependencies": {
+        "@rollup/plugin-typescript": "^12.3.0",
+        "@types/node": "^20.0.0",
+        "rollup": "^3.30.0",
+        "rollup-plugin-dts": "^6.0.0",
+        "tar": "^7.5.12",
+        "tslib": "^2.8.1",
+        "typescript": "^5.2.0"
+    }
+}

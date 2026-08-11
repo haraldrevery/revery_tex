@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>Revery TeX — engine smoke</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+/* Revery design tokens, copied from revery_notebook_style.css:136-224.
+   This harness graduates into the Phase 3 log console, so it is built in the
+   real design language rather than as throwaway scaffolding. */
+:root {
+  --font-mono: 'HaraldMono', ui-monospace, 'Courier New', monospace;
+  --tracking-wide: 0.09em; --tracking-wider: 0.16em;
+}
+[data-theme="dark"] {
+  --bg:#0a0a0a; --bg-panel:#1e1e1e; --bg-hover:#2c2c2c;
+  --border:rgba(255,255,255,0.08); --border-md:rgba(255,255,255,0.14);
+  --theme-divider:rgb(30,30,30);
+  --text:#f5f5f5; --text-muted:rgba(255,255,255,0.46); --text-dim:rgba(255,255,255,0.18);
+  --accent:rgba(255,255,255,0.58); --scrollbar:rgba(255,255,255,0.1);
+  --ok:#7fc97f; --warn:#e2c46a; --err:#e08a7a;
+}
+* { box-sizing: border-box; }
+html, body { height:100%; margin:0; overflow:hidden; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: var(--font-mono); font-size: 0.75rem;
+  display: flex; flex-direction: column;
+}
+
+#topbar {
+  height: 2.4rem; flex: none; display: flex; align-items: center; gap: .5rem;
+  padding: 0 .9rem; border-bottom: 1px solid var(--border); background: var(--bg);
+}
+.lbl {
+  font-size: .62rem; letter-spacing: var(--tracking-wider);
+  text-transform: uppercase; color: var(--text-dim); margin-right: .15rem;
+}
+select, button {
+  font-family: var(--font-mono); font-size: .7rem; text-transform: uppercase;
+  letter-spacing: var(--tracking-wide); color: var(--text-muted);
+  background: none; border: 1px solid var(--border-md); border-radius: 2px;
+  padding: .375rem .75rem .1875rem .75rem; line-height: 1; cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+select { padding: .3rem .4rem; }
+select option { background: var(--bg-panel); color: var(--text); }
+button:hover:not(:disabled), select:hover { color: var(--text); border-color: var(--accent); background: var(--bg-hover); }
+button:disabled { opacity: .35; cursor: default; }
+button.primary { color: var(--text); border-color: var(--accent); }
+.spacer { flex: 1; }
+
+#status {
+  font-size: .66rem; letter-spacing: var(--tracking-wide);
+  text-transform: uppercase; color: var(--text-muted); white-space: nowrap;
+}
+#status.ok { color: var(--ok); } #status.err { color: var(--err); } #status.warn { color: var(--warn); }
+
+#main { flex: 1; display: flex; min-height: 0; }
+#logpane { flex: 1 1 55%; display: flex; flex-direction: column; min-width: 0; }
+#divider { width: 1px; background: var(--theme-divider); flex: none; }
+#pdfpane { flex: 1 1 45%; display: flex; flex-direction: column; min-width: 0; background: var(--bg-panel); }
+
+.panehead {
+  flex: none; display: flex; align-items: center; gap: .5rem;
+  padding: 8px 14px 6px; border-bottom: 1px solid var(--border);
+  font-size: .62rem; letter-spacing: var(--tracking-wider);
+  text-transform: uppercase; color: var(--text-dim);
+  background: color-mix(in srgb, var(--bg-panel) 40%, transparent);
+}
+.panehead button { padding: .2rem .45rem .1rem; font-size: .6rem; }
+
+#log {
+  flex: 1; overflow-y: auto; overflow-x: auto; padding: 8px 14px;
+  white-space: pre; font-size: .7rem; line-height: 1.45; tab-size: 4;
+}
+#log::-webkit-scrollbar { width: 8px; height: 8px; }
+#log::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 2px; }
+.l-inf { color: var(--text-muted); }
+.l-dbg { color: var(--text); }
+.l-wrn { color: var(--warn); }
+.l-err { color: var(--err); }
+.l-hdr { color: var(--accent); text-transform: uppercase; letter-spacing: var(--tracking-wide); }
+.l-meta { color: var(--text-dim); }
+
+#pdf { flex: 1; border: 0; width: 100%; background: #222; }
+#pdfempty {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  color: var(--text-dim); font-size: .66rem; letter-spacing: var(--tracking-wider);
+  text-transform: uppercase;
+}
+#assets { padding: 8px 14px; font-size: .66rem; color: var(--text-muted); border-bottom: 1px solid var(--border); white-space: pre; overflow-x: auto; }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <span class="lbl">Project</span>
+  <select id="project"></select>
+  <span class="lbl">Engine</span>
+  <select id="engine">
+    <option value="combined">combined</option>
+    <option value="pdftex">pdftex</option>
+    <option value="xetex">xetex</option>
+    <option value="luahbtex">luahbtex</option>
+  </select>
+  <span class="lbl">texmf</span>
+  <select id="texmf">
+    <option value="slim" selected>slim (repacked)</option>
+    <option value="basic">basic</option>
+    <option value="basic+rec">basic + recommended</option>
+    <option value="all">basic + rec + extra</option>
+  </select>
+  <button id="compile" class="primary">Compile</button>
+  <button id="clearcache">Clear cache</button>
+  <div class="spacer"></div>
+  <span id="status">idle</span>
+</div>
+
+<div id="assets">engine assets: loading…</div>
+
+<div id="main">
+  <div id="logpane">
+    <div class="panehead">
+      <span>Raw log</span>
+      <div class="spacer" style="flex:1"></div>
+      <span id="logcount" class="l-meta"></span>
+      <button id="copylog">Copy</button>
+      <button id="savelog">Download .log</button>
+      <button id="clearlog">Clear</button>
+    </div>
+    <div id="log"></div>
+  </div>
+  <div id="divider"></div>
+  <div id="pdfpane">
+    <div class="panehead">
+      <span>PDF</span>
+      <div class="spacer" style="flex:1"></div>
+      <span id="pdfmeta" class="l-meta"></span>
+      <button id="savepdf" disabled>Download</button>
+    </div>
+    <div id="pdfempty">no output</div>
+    <iframe id="pdf" style="display:none"></iframe>
+  </div>
+</div>
+
+<script type="module">
+// The harness now drives the real TexEngine wrapper rather than the vendored
+// API directly -- so the gate exercises the code the app will actually ship.
+import { WasmTexEngine } from '../www/jvscrpt_and_css_extra/tex_engine_wasm.js';
+
+const $ = (id) => document.getElementById(id);
+const ENGINE_BASE = '/www/engine/busytex';
+const SLIM_BASE = '/www/engine/slim';
+
+// ---------------------------------------------------------------- log pane
+// The whole point of Phase 0: output must stream while the engine runs, not
+// arrive as a dump at the end. texlyre-busytex has no onLog callback -- live
+// output only reaches runner.logger.debug() -- so we replace the logger with
+// our own sink. This is exactly what TexEngine.compile({onLog}) will normalise.
+const logEl = $('log');
+let logLines = [];
+let pinned = true;
+
+logEl.addEventListener('scroll', () => {
+  pinned = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
+});
+
+function log(kind, msg, ...args) {
+  const text = args.length
+    ? `${msg} ${args.map(a => typeof a === 'string' ? a : safeJson(a)).join(' ')}`
+    : String(msg);
+  for (const line of text.split('\n')) {
+    logLines.push({ kind, line });
+    const div = document.createElement('div');
+    div.className = 'l-' + kind;
+    div.textContent = line;
+    logEl.appendChild(div);
+  }
+  $('logcount').textContent = `${logLines.length} lines`;
+  if (pinned) logEl.scrollTop = logEl.scrollHeight;
+}
+
+function safeJson(v) { try { return JSON.stringify(v); } catch { return String(v); } }
+const base = (p) => p.split('/').pop().replace(/\.js$/, '');
+
+function clearLog() { logLines = []; logEl.textContent = ''; $('logcount').textContent = ''; pinned = true; }
+
+function setStatus(text, cls = '') { const s = $('status'); s.textContent = text; s.className = cls; }
+
+$('clearlog').onclick = clearLog;
+$('copylog').onclick = () => navigator.clipboard.writeText(logLines.map(l => l.line).join('\n'));
+$('savelog').onclick = () => download(new Blob([logLines.map(l => l.line).join('\n')], { type: 'text/plain' }), 'compile.log');
+
+function download(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// ------------------------------------------------------------ asset survey
+let assetFiles = [];
+async function loadAssets() {
+  const r = await fetch('/api/engine-assets').then(r => r.json());
+  assetFiles = r.files || [];
+  if (!r.present || !assetFiles.length) {
+    $('assets').textContent = 'engine assets: MISSING — extract busytex-assets.tar.gz into www/engine/';
+    return;
+  }
+  const mb = (b) => (b / 1024 / 1024).toFixed(1) + ' MB';
+  const total = assetFiles.reduce((n, f) => n + f.bytes, 0);
+  const big = assetFiles.filter(f => f.bytes > 1e6)
+    .map(f => `${f.path} ${mb(f.bytes)}`).join('   ');
+  const over = assetFiles.filter(f => f.bytes > 25 * 1024 * 1024);
+  $('assets').textContent =
+    `engine assets: ${assetFiles.length} files, ${mb(total)} total\n${big}` +
+    (over.length ? `\n⚠ over Cloudflare's 25 MiB/file cap: ${over.map(f => f.path).join(', ')}` : '');
+}
+
+function hasAsset(name) { return assetFiles.some(f => f.path === name); }
+
+// --------------------------------------------------------------- projects
+let projects = [];
+async function loadProjects() {
+  projects = await fetch('/api/projects').then(r => r.json());
+  const sel = $('project');
+  sel.innerHTML = '';
+  for (const p of projects) {
+    const o = document.createElement('option');
+    o.value = p.key;
+    o.textContent = `${p.key} — ${p.main}${p.expectPages ? ` (${p.expectPages}pp)` : ''}`;
+    sel.appendChild(o);
+  }
+  sel.onchange = syncEngine;
+  syncEngine();
+}
+
+function syncEngine() {
+  const p = projects.find(x => x.key === $('project').value);
+  if (!p) return;
+  // combined is the only build shipped in the asset release; prefer it.
+  $('engine').value = hasAsset('busytex.wasm') ? 'combined' : p.engine;
+}
+
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+// ---------------------------------------------------------------- compile
+// preload = always mounted. catalog = searchable, mounted only when the
+// pipeline finds an unresolved \usepackage that the bundle provides.
+// Putting everything in preload leaves the resolver with nothing to search,
+// which is what made enumitem.sty "not found" while extra sat unused.
+// The slim tree is emitted as several data packages, each under Cloudflare's
+// 25 MiB per-file cap. The manifest says which are preloaded and which are
+// catalog-only, so the split can change without touching this file.
+let slimManifest = null;
+async function loadSlimManifest() {
+  try {
+    slimManifest = await fetch(`${SLIM_BASE}/texlive-slim.manifest.json`).then(r => r.ok ? r.json() : null);
+  } catch { slimManifest = null; }
+}
+
+function dataPackages() {
+  const mode = $('texmf').value;
+  if (mode === 'slim') {
+    if (!slimManifest) throw new Error('slim manifest missing — run: node build_tools/build_slim_texmf.js');
+    return {
+      preload: slimManifest.preload.map(f => `${SLIM_BASE}/${f}`),
+      catalog: slimManifest.catalog.map(f => `${SLIM_BASE}/${f}`)
+    };
+  }
+  const preload = [`${ENGINE_BASE}/texlive-basic.js`];
+  const catalog = [];
+  if (mode !== 'basic') catalog.push(`${ENGINE_BASE}/texlive-recommended.js`);
+  if (mode === 'all') catalog.push(`${ENGINE_BASE}/texlive-extra.js`);
+  return { preload, catalog };
+}
+
+let engine = null;
+let lastPdf = null;
+let lastMissing = [];
+
+async function getEngine() {
+  if (engine) return engine;
+  engine = new WasmTexEngine({
+    basePath: ENGINE_BASE,
+    texmfPath: SLIM_BASE,
+    onLog: (line, level) => log({ debug: 'dbg', info: 'inf', warn: 'wrn', error: 'err' }[level] || 'dbg', line)
+  });
+  setStatus('initializing engine…', 'warn');
+  await engine.init();
+  log('meta', `capabilities: ${JSON.stringify(engine.capabilities)}`);
+  return engine;
+}
+
+async function compile() {
+  const key = $('project').value;
+  const spec = projects.find(p => p.key === key);
+
+  $('compile').disabled = true;
+  lastPdf = null;
+  $('savepdf').disabled = true;
+  $('pdfmeta').textContent = '';
+  $('pdf').style.display = 'none';
+  $('pdfempty').style.display = 'flex';
+  clearLog();
+
+  try {
+    log('hdr', `═ ${key} — ${spec.main}`);
+    if (spec.note) log('meta', `note: ${spec.note}`);
+
+    setStatus('fetching project…', 'warn');
+    const manifest = await fetch(`/api/project/${key}`).then(r => r.json());
+    log('inf', `project: ${manifest.stats.count} files (${(manifest.stats.bytes / 1024 / 1024).toFixed(2)} MB payload), ${manifest.stats.skipped} build artifacts skipped`);
+    for (const p of manifest.patchLog || []) log('wrn', `patched ${p}`);
+
+    const files = manifest.files.map(f => ({
+      path: f.path,
+      content: f.encoding === 'base64' ? b64ToBytes(f.content) : f.content
+    }));
+
+    const eng = await getEngine();
+    const engineName = { pdftex: 'pdflatex', xetex: 'xelatex', luahbtex: 'lualatex' }[spec.engine] || 'xelatex';
+
+    setStatus('compiling…', 'warn');
+    const r = await eng.compile({
+      files,
+      mainFile: manifest.main,
+      engine: engineName,
+      passes: !!manifest.rerun,
+      bibtex: false,
+      makeindex: !!manifest.makeindex
+    });
+
+    log('hdr', `— engine log`);
+    if (r.log) log(r.success ? 'dbg' : 'err', r.log);
+
+    const secs = r.seconds.toFixed(1);
+    if (r.success) {
+      lastPdf = r.pdf;
+      $('pdfempty').style.display = 'none';
+      $('pdf').style.display = 'block';
+      $('pdf').src = URL.createObjectURL(new Blob([r.pdf], { type: 'application/pdf' }));
+      $('savepdf').disabled = false;
+      $('pdfmeta').textContent = `${r.pages ?? '?'} pages · ${(r.pdf.length / 1024).toFixed(0)} KB`;
+
+      const expected = spec.expectPages;
+      const match = expected == null ? null : r.pages === expected;
+      const verdict = match === null ? `${r.pages} pages (no expectation)`
+        : match ? `${r.pages} pages — MATCHES expected ${expected}`
+        : `${r.pages} pages — EXPECTED ${expected}`;
+      const diag = r.diagnostics.filter(d => d.severity === 'warning').length;
+      log('hdr', `✓ compiled in ${secs}s · ${verdict} · ${diag} warnings`);
+      setStatus(`✓ ${verdict} · ${secs}s`, match === false ? 'warn' : 'ok');
+    } else {
+      log('err', `✗ ${r.error} (after ${secs}s)`);
+      lastMissing = r.missingPackages;
+      if (r.missingPackages.length) {
+        log('hdr', '— missing from this texmf bundle');
+        for (const m of r.missingPackages) log('wrn', `  ${m}`);
+      }
+      setStatus(`✗ ${r.error}`, 'err');
+    }
+  } catch (err) {
+    log('err', `✗ ${err.message}`);
+    console.error(err);
+    setStatus(`✗ ${err.message}`, 'err');
+  } finally {
+    $('compile').disabled = false;
+  }
+}
+
+// Programmatic entry point so the same harness drives both by hand and from
+// test/run_phase0.js over CDP. Returns a summary rather than the PDF bytes.
+window.__reveryTex = {
+  async run({ project, engineMode, texmf }) {
+    $('project').value = project;
+    if (engineMode) $('engine').value = engineMode; else syncEngine();
+    if (texmf) $('texmf').value = texmf;
+    await compile();
+    const spec = projects.find(p => p.key === project);
+    const pages = /(\d+) pages/.exec($('pdfmeta').textContent || '');
+    return {
+      project,
+      engineMode: $('engine').value,
+      texmf: $('texmf').value,
+      status: $('status').textContent,
+      ok: $('status').className === 'ok',
+      pages: pages ? Number(pages[1]) : null,
+      expectPages: spec ? spec.expectPages : null,
+      expectFailure: spec ? spec.expectFailure : null,
+      missingPackages: lastMissing,
+      referencePages: spec ? spec.referencePages : null,
+      expectPagesWhy: spec ? spec.expectPagesWhy : null,
+      pdfBytes: lastPdf ? lastPdf.length : 0,
+      log: logLines.map(l => l.line).join('\n')
+    };
+  },
+  get assets() { return assetFiles; },
+  get ready() { return true; }
+};
+
+$('compile').onclick = compile;
+$('savepdf').onclick = () => lastPdf && download(new Blob([lastPdf], { type: 'application/pdf' }), 'output.pdf');
+$('clearcache').onclick = async () => {
+  if (engine) await engine.clearCache();
+  engine = null;
+  log('inf', 'cleared EM_PRELOAD_CACHE; next compile will re-download texmf');
+};
+
+await loadAssets();
+await loadSlimManifest();
+await loadProjects();
+log('meta', 'ready — pick a project and press Compile');
+setStatus('idle');
+</script>
+</body>
+</html>
