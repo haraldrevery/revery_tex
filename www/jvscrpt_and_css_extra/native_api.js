@@ -8,6 +8,7 @@
 // Only this file may ask which shell it is running in.
 
 const isTauri = typeof window !== 'undefined' && typeof window.__TAURI__ !== 'undefined';
+const isElectron = typeof window !== 'undefined' && typeof window.electronAPI !== 'undefined';
 const invoke = isTauri ? window.__TAURI__.core.invoke : null;
 
 function b64ToBytes(b64) {
@@ -46,6 +47,27 @@ const webImpl = {
   isDesktop: false
 };
 
-export const NativeAPI = isTauri ? tauriImpl : webImpl;
+/**
+ * Electron: identical surface, different transport. The preload bridge already
+ * unwraps errors, so these are plain promises — and base64 decoding stays here
+ * rather than in the bridge so both desktop shells hand callers the same types.
+ */
+const electronImpl = isElectron ? {
+  env: 'electron',
+  isDesktop: true,
+
+  openFolder: () => window.electronAPI.openFolder(),
+  currentRoot: () => window.electronAPI.currentRoot(),
+  readDirectory: () => window.electronAPI.readDirectory(),
+  readTextFile: (path) => window.electronAPI.readTextFile(path),
+  readBinaryFile: (path) => window.electronAPI.readBinaryFile(path).then(b64ToBytes),
+  writeFile: (path, content) => window.electronAPI.writeFile(path, content),
+
+  writeBackup: (path, content) => window.electronAPI.writeBackup(path, content),
+  listStaleBackups: () => window.electronAPI.listStaleBackups(),
+  discardBackup: (path) => window.electronAPI.discardBackup(path)
+} : null;
+
+export const NativeAPI = isTauri ? tauriImpl : (isElectron ? electronImpl : webImpl);
 if (typeof window !== 'undefined') window.NativeAPI = NativeAPI;
 export default NativeAPI;

@@ -434,6 +434,26 @@ async function openFolder() {
   await loadFromDisk(root);
 }
 
+/**
+ * Which engine a document wants.
+ *
+ * fontspec and unicode-math require XeTeX or LuaTeX — but a well-written
+ * preamble loads them *conditionally*:
+ *
+ *     \ifPDFTeX \usepackage[utf8]{inputenc} \else \usepackage{fontspec} \fi
+ *
+ * Matching \usepackage{fontspec} anywhere therefore picks XeTeX for documents
+ * designed to run under pdfLaTeX, which then fail on fonts the pdfTeX path
+ * never needed. A document that branches on the engine runs under either, so
+ * pdfLaTeX wins: it is faster and needs fewer font files.
+ */
+function inferEngine(src) {
+  const branches = /\\(?:ifPDFTeX|ifpdftex|ifxetex|ifXeTeX|ifluatex|ifLuaTeX|RequirePackage\{iftex\}|usepackage\{iftex\})/.test(src);
+  if (branches) return 'pdftex';
+  return /\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{(?:fontspec|unicode-math)\}/.test(src)
+    ? 'xetex' : 'pdftex';
+}
+
 async function loadFromDisk(root) {
   setStatus('reading folder…', 'warn');
   const entries = await NativeAPI.readDirectory();
@@ -472,9 +492,8 @@ async function loadFromDisk(root) {
   });
   project.main = mainCandidates[0];
 
-  // Engine choice follows the document: fontspec/unicode-math need XeTeX.
   const mainSrc = project.files.get(project.main)?.content || '';
-  project.engine = /\\usepackage(\[[^\]]*\])?\{(fontspec|unicode-math)\}/.test(mainSrc) ? 'xetex' : 'pdftex';
+  project.engine = inferEngine(mainSrc);
   project.makeindex = /\\makeindex/.test(mainSrc);
 
   $('docname').textContent = project.main;

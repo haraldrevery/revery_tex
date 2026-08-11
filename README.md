@@ -20,8 +20,9 @@ npm install --prefix build_tools  # esbuild, CodeMirror, pdf.js
 # Browser (fastest loop — has test fixtures built in)
 npm run serve                     # http://localhost:8777/www/index.html
 
-# Desktop
+# Desktop — Tauri (small bundle, WebKitGTK) or Electron (Chromium)
 npm run start:tauri               # first Rust build takes ~1 min
+npm run start:electron
 REVERY_TEX_OPEN=/path/to/project npm run start:tauri   # open straight into a folder
 ```
 
@@ -54,8 +55,8 @@ rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-t
         │                                    │
         │ TexEngine.compile()                │ NativeAPI.readTextFile() …
         ▼                                    ▼
-   WASM TeX Live 2026                  tauri/src/main.rs
-   (Web Worker)                        (9 commands, path-validated)
+   WASM TeX Live 2026            tauri/src/main.rs  ·  electron/fs_core.js
+   (Web Worker)                  same 9 operations, same containment rule
 ```
 
 ### Two abstractions, and the rule they share
@@ -152,8 +153,14 @@ compared byte-for-byte before the build is called a success.
 ```bash
 npm run serve &                                  # required by the gate
 npm run gate                                     # the invariant: must stay 5/5
-cargo test --manifest-path tauri/Cargo.toml      # path safety, atomic writes
+npm test                                         # electron/fs_core.js (13)
+cargo test --manifest-path tauri/Cargo.toml      # tauri/src/main.rs (14)
 ```
+
+The two desktop backends are held to the **same** cases — path traversal,
+symlink escape, creating through an escaping symlink, atomic overwrite, repeated
+saves leaving no junk. Two shells writing to disk differently is two sets of
+bugs.
 
 **The gate is the project's contract.** It drives real Chrome over the DevTools
 Protocol and compiles four real LaTeX projects, asserting exact page counts:
@@ -193,10 +200,10 @@ match Revery Notebook's zero-test-dependency convention.
   highlight would need.
 - **Browser has no filesystem yet** — it loads test fixtures only. The File
   System Access API backend is the next piece of `native_api.js`.
-- **Desktop save is not covered by an automated test.** The Rust write path is
-  unit-tested and the IPC is thin, but nothing drives the WebKitGTK window
-  headlessly (our CDP client speaks Chrome's protocol, which WebKit does not
-  implement). Verify by hand after touching the save path.
+- **Tauri has no headless driver.** Our CDP client speaks Chrome's protocol,
+  which WebKitGTK does not implement, so Tauri is verified by screenshot.
+  Electron *does* speak CDP (`--remote-debugging-port`), and the full app —
+  compile and save through the real IPC — is driven end to end there.
 
 ---
 
@@ -217,6 +224,13 @@ Each of these cost real debugging time:
   if you still need them.
 - **Never `pkill -f <pattern>`.** The pattern matches the invoking shell's own
   command line and kills your session. Resolve a PID and check it first.
+- **VS Code terminals export `ELECTRON_RUN_AS_NODE=1`**, under which
+  `electron .` boots as plain Node and every Electron API is `undefined`. The
+  npm script unsets it; `main.js` also fails with the fix rather than a
+  `Cannot read properties of undefined`.
+- **Electron must serve the app over a custom protocol**, not `loadFile()`.
+  Chromium refuses `fetch()` on `file://`, and the engine fetches its wasm and
+  every data package, so a `file://` window cannot start the compiler at all.
 - **`tauri build` (release) is memory-hungry** — LTO over 425 crates while
   embedding 97 MB. Use `tauri build --debug --no-bundle` and run nothing else.
 

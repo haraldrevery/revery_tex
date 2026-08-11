@@ -10,9 +10,13 @@
     "serve": "node test/serve.js",
     "gate": "node test/run_phase0.js",
     "build:texmf": "node build_tools/build_slim_texmf.js",
-    "test": "node --test \"test/**/*.test.js\""
+    "test": "node --test \"test/**/*.test.js\"",
+    "start:electron": "env -u ELECTRON_RUN_AS_NODE electron .",
+    "build:electron": "electron-builder"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.0.0"
-  }
+    "@tauri-apps/cli": "^2.0.0",
+    "electron": "^33.0.0"
+  },
+  "main": "electron/main.js"
 }
