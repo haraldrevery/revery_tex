@@ -187,6 +187,10 @@ match Revery Notebook's zero-test-dependency convention.
 - **No EPS.** That needs Ghostscript. Convert to PDF or PNG first.
 - **Slim bundle**: a package outside it fails, by name, with a pointer to the
   fuller distribution. Widen `COMMON_PACKAGES` in the repacker and re-run the gate.
+- **SyncTeX** is wired both ways (click the PDF, Ctrl+click the source) but has
+  no highlighting of the matched region — it places the cursor and flashes a
+  marker. Box nesting is parsed but discarded; restoring it is what a precise
+  highlight would need.
 - **Browser has no filesystem yet** — it loads test fixtures only. The File
   System Access API backend is the next piece of `native_api.js`.
 - **Desktop save is not covered by an automated test.** The Rust write path is
