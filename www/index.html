@@ -15,11 +15,12 @@
 <body>
 
 <div id="topbar">
-  <span class="lbl">Project</span>
+  <button id="open">Open folder</button>
   <select id="project"></select>
   <span class="lbl">Engine</span>
   <select id="engine"></select>
-  <button id="compile" class="primary">Compile</button>
+  <button id="save" disabled title="Ctrl+S">Save</button>
+  <button id="compile" class="primary" title="Ctrl+Enter">Compile</button>
   <span id="docname" class="docname"></span>
   <div class="spacer"></div>
   <button id="status" class="statusline">idle</button>

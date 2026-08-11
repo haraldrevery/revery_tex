@@ -1,6 +1,11 @@
 {
   "identifier": "default",
   "description": "Capability for Revery TeX",
-  "windows": ["main"],
-  "permissions": ["core:default"]
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open"
+  ]
 }

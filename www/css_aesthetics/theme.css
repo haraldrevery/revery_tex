@@ -123,6 +123,8 @@ button.primary { color:var(--text); border-color:var(--accent) }
             margin-top:.35rem; cursor:default }
 .node.dir:hover { background:none; color:var(--text-dim) }
 .node.main::after { content:' ■'; color:var(--accent) }
+.node.dirty::after { content:' •'; color:var(--warn) }
+.node.main.dirty::after { content:' ■ •'; color:var(--warn) }
 
 /* ── editor ─────────────────────────────────────────────────────────── */
 #editor { flex:1; min-height:0; overflow:hidden }

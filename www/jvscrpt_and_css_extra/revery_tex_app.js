@@ -4,12 +4,15 @@
 // interface. Knows nothing about BusyTeX, data packages, or which shell it is
 // running in.
 //
-// Project loading is still the dev server (/api/project/:key). That is Phase B's
-// remaining piece: a trimmed NativeAPI backed by Tauri commands on desktop and
-// the File System Access API in the browser. Everything else here is final.
+// Two project sources, both behind the same in-memory shape:
+//   - NativeAPI (desktop): a real folder on disk, editable and saveable
+//   - the dev server (/api/project/:key): fixtures, for the Chrome test loop
+// Whether a project can be saved is a property of where it came from, tracked
+// as `project.onDisk`, not of which shell is running.
 
 import { WasmTexEngine } from './tex_engine_wasm.js';
 import { PdfPreview } from './pdf_preview.js';
+import { NativeAPI } from './native_api.js';
 
 const $ = (id) => document.getElementById(id);
 const CM = window.CM;
@@ -23,6 +26,12 @@ let lastPdf = null;
 let preview = null;
 let rawLines = [];
 let diagnostics = [];
+let backupTimer = null;
+// Set while openFile() replaces the document. Without it, loading a file marks
+// it modified — the update listener cannot tell a programmatic replacement from
+// typing — which would enable Save and schedule a crash backup for a file the
+// user never touched.
+let loadingDoc = false;
 
 const THEMES = ['dark', 'light', 'paper', 'forest'];
 const SETTINGS_KEY = 'revery_tex_settings';
@@ -167,14 +176,17 @@ function makeEditor() {
         ...CM.defaultKeymap, ...CM.historyKeymap,
         ...CM.searchKeymap, ...CM.completionKeymap, ...CM.foldKeymap,
         CM.indentWithTab,
-        { key: 'Mod-s', preventDefault: true, run: () => { compile(); return true; } }
+        // Ctrl+S must mean save. Compile moves to Ctrl+Enter.
+        { key: 'Mod-s', preventDefault: true, run: () => { saveAll(); return true; } },
+        { key: 'Mod-Enter', preventDefault: true, run: () => { compile(); return true; } }
       ]),
       CM.EditorView.updateListener.of(u => {
-        if (!u.docChanged || !currentPath || !project) return;
+        if (loadingDoc || !u.docChanged || !currentPath || !project) return;
         const f = project.files.get(currentPath);
         f.content = u.state.doc.toString();
         f.dirty = true;
-        $('dirty').textContent = 'modified';
+        refreshDirty();
+        scheduleBackup();
       })
     ]
   });
@@ -187,9 +199,97 @@ function openFile(path) {
   if (!f || f.binary) return;
   currentPath = path;
   $('editortitle').textContent = path;
-  $('dirty').textContent = f.dirty ? 'modified' : '';
-  view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: f.content } });
+  refreshDirty();
+  loadingDoc = true;
+  try {
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: f.content } });
+  } finally {
+    loadingDoc = false;
+  }
   for (const n of document.querySelectorAll('.node')) n.classList.toggle('active', n.dataset.path === path);
+}
+
+// ── save, dirty state, crash backup ────────────────────────────────────
+function dirtyCount() {
+  if (!project) return 0;
+  let n = 0;
+  for (const f of project.files.values()) if (f.dirty) n++;
+  return n;
+}
+
+function refreshDirty() {
+  const n = dirtyCount();
+  const f = currentPath && project ? project.files.get(currentPath) : null;
+  $('dirty').textContent = f && f.dirty ? 'modified' : '';
+  $('save').disabled = !project?.onDisk || n === 0;
+  $('save').textContent = n > 1 ? `Save (${n})` : 'Save';
+  for (const node of document.querySelectorAll('.node[data-path]')) {
+    const nf = project?.files.get(node.dataset.path);
+    node.classList.toggle('dirty', !!(nf && nf.dirty));
+  }
+}
+
+async function saveAll() {
+  if (!project?.onDisk) return;
+  const pending = [...project.files].filter(([, f]) => f.dirty && !f.binary);
+  if (!pending.length) return;
+
+  setStatus(`saving ${pending.length} file(s)…`, 'warn');
+  try {
+    for (const [path, f] of pending) {
+      await NativeAPI.writeFile(path, f.content);
+      f.dirty = false;
+      // The backup exists to cover the window between edits and a save; once
+      // the file is on disk it is noise, and would otherwise be offered for
+      // recovery forever.
+      await NativeAPI.discardBackup?.(path).catch(() => {});
+    }
+    refreshDirty();
+    setStatus(`saved ${pending.length} file(s)`, 'ok');
+  } catch (err) {
+    setStatus(`✗ save failed: ${err}`, 'err');
+    rawLog('err', `save failed: ${err}`);
+  }
+}
+
+// Debounced, and only for the file being edited: this is a crash net, not a
+// save. It writes outside the project so recovery files never pollute git or
+// get swept into a compile.
+function scheduleBackup() {
+  if (!project?.onDisk || !NativeAPI.writeBackup) return;
+  clearTimeout(backupTimer);
+  backupTimer = setTimeout(async () => {
+    const f = currentPath && project.files.get(currentPath);
+    if (!f || !f.dirty) return;
+    try { await NativeAPI.writeBackup(currentPath, f.content); } catch { /* best effort */ }
+  }, 2000);
+}
+
+async function offerRecovery() {
+  if (!project?.onDisk || !NativeAPI.listStaleBackups) return;
+  let stale = [];
+  try { stale = await NativeAPI.listStaleBackups(); } catch { return; }
+  if (!stale.length) return;
+
+  const names = stale.map(b => b.path).join(', ');
+  const ok = confirm(
+    `Unsaved changes from a previous session were found in:\n\n${names}\n\n` +
+    `Restore them into the editor? (Choosing Cancel discards them.)`
+  );
+  for (const b of stale) {
+    const f = project.files.get(b.path);
+    if (ok && f) {
+      f.content = b.content;
+      f.dirty = true;
+    } else {
+      await NativeAPI.discardBackup(b.path).catch(() => {});
+    }
+  }
+  if (ok) {
+    rawLog('wrn', `restored ${stale.length} file(s) from crash backup — unsaved`);
+    if (currentPath) openFile(currentPath);
+  }
+  refreshDirty();
 }
 
 // ── file tree ──────────────────────────────────────────────────────────
@@ -248,6 +348,13 @@ function syncEngineSelect() {
 }
 
 async function loadProjects() {
+  // Desktop has no dev server to talk to; it opens real folders instead.
+  if (NativeAPI.openFolder) {
+    const root = await NativeAPI.currentRoot().catch(() => null);
+    if (root) { await loadFromDisk(root); return; }
+    setStatus('open a folder to begin');
+    return;
+  }
   let list = [];
   try {
     list = await fetch('/api/projects').then(r => r.json());
@@ -267,11 +374,90 @@ async function loadProjects() {
   if (sel.value) await loadProject(sel.value);
 }
 
+const TEXT_EXT_RE = /\.(tex|bib|cls|sty|bbl|ind|def|cfg|txt|clo|ltx)$/i;
+
+/** Open a real folder through NativeAPI. Desktop only for now. */
+async function openFolder() {
+  if (!NativeAPI.openFolder) return;
+  let root;
+  try {
+    root = await NativeAPI.openFolder();
+  } catch (err) {
+    setStatus(`✗ ${err}`, 'err');
+    return;
+  }
+  if (!root) return;                      // user cancelled
+  await loadFromDisk(root);
+}
+
+async function loadFromDisk(root) {
+  setStatus('reading folder…', 'warn');
+  const entries = await NativeAPI.readDirectory();
+  const files = entries.filter(e => e.type === 'file');
+
+  // Pick the main file: a .tex containing \documentclass, preferring main.tex.
+  const texFiles = files.filter(f => /\.tex$/i.test(f.path));
+  if (!texFiles.length) {
+    setStatus('✗ no .tex files in that folder', 'err');
+    return;
+  }
+
+  project = { key: root.split('/').pop(), root, onDisk: true, engine: 'xetex',
+              rerun: true, makeindex: false, files: new Map() };
+
+  let mainCandidates = [];
+  for (const f of files) {
+    const isText = TEXT_EXT_RE.test(f.path);
+    try {
+      const content = isText
+        ? await NativeAPI.readTextFile(f.path)
+        : await NativeAPI.readBinaryFile(f.path);
+      project.files.set(f.path, { content, binary: !isText, dirty: false });
+      if (isText && /\.tex$/i.test(f.path) && /\\documentclass/.test(content)) {
+        mainCandidates.push(f.path);
+      }
+    } catch (err) {
+      rawLog('wrn', `skipped ${f.path}: ${err}`);
+    }
+  }
+
+  if (!mainCandidates.length) mainCandidates = texFiles.map(f => f.path);
+  mainCandidates.sort((a, b) => {
+    const score = (p) => (/^main\.tex$/i.test(p) ? 0 : p.includes('/') ? 2 : 1);
+    return score(a) - score(b) || a.localeCompare(b);
+  });
+  project.main = mainCandidates[0];
+
+  // Engine choice follows the document: fontspec/unicode-math need XeTeX.
+  const mainSrc = project.files.get(project.main)?.content || '';
+  project.engine = /\\usepackage(\[[^\]]*\])?\{(fontspec|unicode-math)\}/.test(mainSrc) ? 'xetex' : 'pdftex';
+  project.makeindex = /\\makeindex/.test(mainSrc);
+
+  $('docname').textContent = project.main;
+  $('project').innerHTML = '';
+  const o = document.createElement('option');
+  o.value = project.key; o.textContent = project.key;
+  $('project').appendChild(o);
+
+  syncEngineSelect();
+  renderTree();
+  openFile(project.main);
+  clearLog();
+  diagnostics = []; renderIssues();
+  rawLog('inf', `opened ${root} — ${project.files.size} files, main = ${project.main}`);
+  refreshDirty();
+  await offerRecovery();
+  setStatus(`ready · ${project.files.size} files`);
+}
+
 async function loadProject(key) {
   setStatus('loading project…', 'warn');
   const m = await fetch(`/api/project/${key}`).then(r => r.json());
 
-  project = { key, main: m.main, engine: m.engine, rerun: m.rerun, makeindex: m.makeindex, files: new Map() };
+  // Fixtures come from the dev server and have no disk backing, so they cannot
+  // be saved. onDisk is what gates saving, not which shell is running.
+  project = { key, main: m.main, engine: m.engine, rerun: m.rerun,
+              makeindex: m.makeindex, onDisk: false, files: new Map() };
   for (const f of m.files) {
     const binary = f.encoding === 'base64' && !TEXT_RE.test(f.path);
     project.files.set(f.path, {
@@ -281,6 +467,7 @@ async function loadProject(key) {
     });
   }
   $('docname').textContent = m.main;
+  refreshDirty();
   syncEngineSelect();
   renderTree();
   openFile(project.main);
@@ -392,6 +579,11 @@ async function showPdf(bytes, pages) {
 }
 
 $('compile').onclick = compile;
+$('save').onclick = saveAll;
+$('open').onclick = openFolder;
+// Hidden in the browser until the File System Access backend exists — the
+// absence of the method is the signal, not a check on the environment name.
+if (!NativeAPI.openFolder) $('open').style.display = 'none';
 $('savepdf').onclick = () => lastPdf && download(new Blob([lastPdf], { type: 'application/pdf' }), 'output.pdf');
 
 // ── pane resizing ──────────────────────────────────────────────────────

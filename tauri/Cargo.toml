@@ -4,14 +4,19 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
-# Phase A is an engine spike: a window and nothing else. Revery Notebook's
-# 134 KB main.rs and its filesystem command set arrive in Phase B, trimmed.
+# A deliberately small filesystem surface (Phase C): open a folder, list it,
+# read, write atomically, crash backups. Revery Notebook's main.rs is ~40
+# commands; a LaTeX editor needs nine.
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
 
 [profile.release]
 opt-level = "s"

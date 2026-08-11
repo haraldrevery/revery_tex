@@ -12,7 +12,7 @@
       {
         "label": "main",
         "title": "Revery TeX",
-        "url": "engine_check.html?autorun=1",
+        "url": "index.html",
         "width": 1280,
         "height": 800,
         "minWidth": 640,
