@@ -226,15 +226,35 @@ function buildManifest(key) {
 }
 
 function send(res, status, body, type, extraHeaders = {}) {
+  if (res.__accountPath) account(res.__accountPath, Buffer.byteLength(body));
   const headers = { 'Content-Type': type, 'Cache-Control': 'no-store', ...extraHeaders };
   if (APPLY_CSP) headers['Content-Security-Policy'] = ACTIVE_CSP();
   res.writeHead(status, headers);
   res.end(body);
 }
 
+// Authoritative request accounting. CDP cannot see worker fetches reliably --
+// preload data packages complete before Network.enable lands on the child
+// session -- so byte counts are measured here, at the source, instead.
+const netStats = { requests: 0, bytes: 0, byPath: {} };
+function account(pathname, bytes) {
+  netStats.requests++;
+  netStats.bytes += bytes;
+  const e = netStats.byPath[pathname] || (netStats.byPath[pathname] = { n: 0, bytes: 0 });
+  e.n++; e.bytes += bytes;
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const pathname = decodeURIComponent(url.pathname);
+
+  if (pathname === '/api/netstats') {
+    const body = JSON.stringify(netStats);
+    if (url.searchParams.get('reset')) {
+      netStats.requests = 0; netStats.bytes = 0; netStats.byPath = {};
+    }
+    return send(res, 200, body, MIME['.json']);
+  }
 
   if (pathname === '/api/projects') {
     const list = Object.entries(PROJECTS).map(([key, s]) => ({
@@ -281,6 +301,7 @@ const server = http.createServer((req, res) => {
     const type = MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
     const headers = { 'Content-Type': type, 'Content-Length': stat.size, 'Cache-Control': 'no-store' };
     if (APPLY_CSP) headers['Content-Security-Policy'] = ACTIVE_CSP();
+    account(rel, stat.size);
     res.writeHead(200, headers);
     fs.createReadStream(filePath).pipe(res);
   });

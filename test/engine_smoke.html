@@ -149,6 +149,7 @@ button.primary { color: var(--text); border-color: var(--accent); }
 // API directly -- so the gate exercises the code the app will actually ship.
 import { WasmTexEngine } from '../www/jvscrpt_and_css_extra/tex_engine_wasm.js';
 
+let booted = false;
 const $ = (id) => document.getElementById(id);
 const ENGINE_BASE = '/www/engine/busytex';
 const SLIM_BASE = '/www/engine/slim';
@@ -402,7 +403,11 @@ window.__reveryTex = {
     };
   },
   get assets() { return assetFiles; },
-  get ready() { return true; }
+  // Must reflect *actual* readiness. It previously returned a constant true,
+  // which is set before the init awaits below complete -- on localhost those
+  // finish faster than the driver's first poll, so the race only opened up
+  // under network throttling, as "cannot read properties of undefined".
+  get ready() { return booted; }
 };
 
 $('compile').onclick = compile;
@@ -416,6 +421,7 @@ $('clearcache').onclick = async () => {
 await loadAssets();
 await loadSlimManifest();
 await loadProjects();
+booted = true;
 log('meta', 'ready — pick a project and press Compile');
 setStatus('idle');
 </script>
