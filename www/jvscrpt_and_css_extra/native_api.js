@@ -7,6 +7,8 @@
 //
 // Only this file may ask which shell it is running in.
 
+import { webFsImpl, webFsSupported } from './native_api_web.js';
+
 const isTauri = typeof window !== 'undefined' && typeof window.__TAURI__ !== 'undefined';
 const isElectron = typeof window !== 'undefined' && typeof window.electronAPI !== 'undefined';
 const invoke = isTauri ? window.__TAURI__.core.invoke : null;
@@ -68,6 +70,12 @@ const electronImpl = isElectron ? {
   discardBackup: (path) => window.electronAPI.discardBackup(path)
 } : null;
 
-export const NativeAPI = isTauri ? tauriImpl : (isElectron ? electronImpl : webImpl);
+// Chromium browsers get real folder access; everything else falls through to
+// the capability-free backend, and the UI hides what it cannot do.
+export const NativeAPI =
+  isTauri ? tauriImpl :
+  isElectron ? electronImpl :
+  webFsSupported ? webFsImpl :
+  webImpl;
 if (typeof window !== 'undefined') window.NativeAPI = NativeAPI;
 export default NativeAPI;

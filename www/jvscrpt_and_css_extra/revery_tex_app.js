@@ -429,20 +429,33 @@ function syncEngineSelect() {
 }
 
 async function loadProjects() {
-  // Desktop has no dev server to talk to; it opens real folders instead.
-  if (NativeAPI.openFolder) {
+  // Order matters. Chromium always has openFolder, so checking that first would
+  // mean the dev server could never be used — which silently broke the entire
+  // Chrome test loop. Probe for fixtures first: their presence is what says
+  // "this is a development server", and on a static host the probe just fails.
+  let list = null;
+  try {
+    const res = await fetch('/api/projects');
+    if (res.ok) list = await res.json();
+  } catch { /* no dev server: the normal case for a real user */ }
+
+  if (!list) {
+    if (!NativeAPI.openFolder) {
+      setStatus('this browser cannot open local folders — use Chrome, or the desktop app', 'warn');
+      return;
+    }
     const root = await NativeAPI.currentRoot().catch(() => null);
     if (root) { await loadFromDisk(root); return; }
+    // A browser can remember the folder but cannot re-request permission
+    // without a click, so offer it rather than reopening silently.
+    if (NativeAPI.reopenRemembered) {
+      $('open').textContent = 'Reopen folder';
+      $('open').title = 'Reopen the last folder, or pick a different one';
+    }
     setStatus('open a folder to begin');
     return;
   }
-  let list = [];
-  try {
-    list = await fetch('/api/projects').then(r => r.json());
-  } catch {
-    setStatus('no project source — start test/serve.js', 'warn');
-    return;
-  }
+
   const sel = $('project');
   sel.textContent = '';
   for (const p of list.filter(p => !p.expectFailure)) {
@@ -791,7 +804,9 @@ window.addEventListener('unhandledrejection', (e) => {
 view = makeEditor();
 renderIssues();
 await loadProjects();
-setStatus('ready');
+// Only claim ready if something actually opened — otherwise loadProjects has
+// already said what the user needs to do, and overwriting it says nothing.
+if (project) setStatus('ready');
 
 // Test hook for the editor extensions: completion and auto-close are hard to
 // exercise through the UI without a keystroke driver.
