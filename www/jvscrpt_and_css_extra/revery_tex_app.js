@@ -56,6 +56,22 @@ applyTheme(settings.theme || 'dark');
 $('theme').onclick = () =>
   applyTheme(THEMES[(THEMES.indexOf(settings.theme) + 1) % THEMES.length]);
 
+// Compile after save, on by default. Off is for very large documents where a
+// 20-second recompile on every Ctrl+S is worse than pressing Ctrl+Enter.
+function refreshAutoCompile() {
+  const on = settings.autoCompile !== false;
+  $('autocompile').textContent = on ? 'Auto ✓' : 'Auto';
+  $('autocompile').title = on
+    ? 'Compiling after each save — click to turn off'
+    : 'Not compiling after save — click to turn on';
+}
+$('autocompile').onclick = () => {
+  settings.autoCompile = settings.autoCompile === false;
+  saveSettings();
+  refreshAutoCompile();
+};
+refreshAutoCompile();
+
 // ── log console ────────────────────────────────────────────────────────
 function rawLog(kind, msg) {
   const body = $('raw');
@@ -256,6 +272,7 @@ async function saveAll() {
     }
     refreshDirty();
     setStatus(`saved ${pending.length} file(s)`, 'ok');
+    if (settings.autoCompile !== false) await compile();
   } catch (err) {
     setStatus(`✗ save failed: ${err}`, 'err');
     rawLog('err', `save failed: ${err}`);
@@ -578,8 +595,11 @@ async function showPdf(bytes, pages) {
   $('pdfempty').style.display = 'none';
   $('pdf').style.display = 'block';
   if (!preview) preview = new PdfPreview($('pdf'));
+  // Stay where the reader was looking, rather than snapping to page 1 on every
+  // recompile.
+  const where = preview.scrollFraction();
   try {
-    const n = await preview.load(bytes);
+    const n = await preview.load(bytes, where);
     $('pdfmeta').textContent = `${n} pages · ${(bytes.length / 1024).toFixed(0)} KB`;
   } catch (err) {
     // A render failure must not read as a compile failure: the PDF is valid.

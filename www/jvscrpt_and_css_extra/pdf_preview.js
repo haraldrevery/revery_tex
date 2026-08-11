@@ -30,13 +30,36 @@ export class PdfPreview {
     // without re-render leaves the page blurry.
     this._onResize = () => {
       clearTimeout(this._resizeTimer);
-      this._resizeTimer = setTimeout(() => this.render(), 150);
+      const where = this.scrollFraction();
+      this._resizeTimer = setTimeout(async () => {
+        await this.render();
+        this.restoreScroll(where);
+      }, 150);
     };
     window.addEventListener('resize', this._onResize);
   }
 
-  /** @param {Uint8Array} bytes */
-  async load(bytes) {
+  /**
+   * Where the viewer is currently looking, as a fraction of total height.
+   * Recompiling a 49-page document and being thrown back to page 1 every time
+   * makes the edit-compile loop unusable, and a fraction survives the document
+   * changing length in a way an absolute offset does not.
+   */
+  scrollFraction() {
+    const el = this.container;
+    const range = el.scrollHeight - el.clientHeight;
+    return range > 0 ? el.scrollTop / range : 0;
+  }
+
+  restoreScroll(fraction) {
+    if (!fraction) return;
+    const el = this.container;
+    const range = el.scrollHeight - el.clientHeight;
+    if (range > 0) el.scrollTop = fraction * range;
+  }
+
+  /** @param {Uint8Array} bytes @param {number} [keepScroll] 0..1 */
+  async load(bytes, keepScroll = 0) {
     await this.destroyDoc();
     // pdf.js takes ownership of the buffer it is given and detaches it, which
     // would corrupt the caller's copy (the app keeps the bytes for Download).
@@ -50,6 +73,7 @@ export class PdfPreview {
     }).promise;
     this.pageCount = this.doc.numPages;
     await this.render();
+    this.restoreScroll(keepScroll);
     return this.pageCount;
   }
 

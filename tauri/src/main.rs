@@ -283,11 +283,27 @@ fn walk(dir: &Path, root: &Path, out: &mut Vec<DirEntry>, depth: usize) -> Resul
     Ok(())
 }
 
+/* The command bodies below delegate to plain functions taking an explicit root.
+   That is what makes the real read/write paths testable: a #[tauri::command]
+   needs a live State and an AppHandle, so anything left inside one is only ever
+   exercised by hand. What remains untested is Tauri's own IPC serialisation. */
+
+fn read_text_impl(path: &str, root: &Path) -> Result<String, String> {
+    let abs = safe_path_inside(&root.join(path).to_string_lossy(), root)?;
+    fs::read_to_string(&abs).map_err(|e| format!("Cannot read {path}: {e}"))
+}
+
+fn write_file_impl(path: &str, content: &str, root: &Path) -> Result<(), String> {
+    let abs = safe_path_inside(&root.join(path).to_string_lossy(), root)?;
+    if let Some(parent) = abs.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
+    }
+    atomic_write_file(&tmp_for(&abs), &abs, content.as_bytes())
+}
+
 #[tauri::command]
 fn read_text_file(path: String, state: State<'_, RootPath>) -> Result<String, String> {
-    let root = get_root(&state)?;
-    let abs = safe_path_inside(&root.join(&path).to_string_lossy(), &root)?;
-    fs::read_to_string(&abs).map_err(|e| format!("Cannot read {path}: {e}"))
+    read_text_impl(&path, &get_root(&state)?)
 }
 
 /// Base64 so binary assets (images, fonts) survive the IPC boundary intact.
@@ -302,12 +318,7 @@ fn read_binary_file(path: String, state: State<'_, RootPath>) -> Result<String, 
 
 #[tauri::command]
 fn write_file(path: String, content: String, state: State<'_, RootPath>) -> Result<(), String> {
-    let root = get_root(&state)?;
-    let abs = safe_path_inside(&root.join(&path).to_string_lossy(), &root)?;
-    if let Some(parent) = abs.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
-    }
-    atomic_write_file(&tmp_for(&abs), &abs, content.as_bytes())
+    write_file_impl(&path, &content, &get_root(&state)?)
 }
 
 /* ── crash backups ───────────────────────────────────────────────────── */
@@ -527,6 +538,68 @@ mod tests {
         assert!(is_cross_device_err(&exdev));
         let enoent = std::io::Error::from_raw_os_error(2);
         assert!(!is_cross_device_err(&enoent));
+    }
+
+    // ── the save path a Ctrl+S actually takes ──────────────────────────
+    #[test]
+    fn write_then_read_round_trips() {
+        let root = tmpdir("save");
+        fs::write(root.join("main.tex"), b"original").unwrap();
+
+        write_file_impl("main.tex", "edited by the user", &root).unwrap();
+        assert_eq!(read_text_impl("main.tex", &root).unwrap(), "edited by the user");
+        // Bytes on disk, not just what we read back through our own code.
+        assert_eq!(fs::read_to_string(root.join("main.tex")).unwrap(), "edited by the user");
+        assert!(!root.join("main.tex.revery_tmp").exists(), "temp must not survive");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn write_creates_missing_subdirectories() {
+        let root = tmpdir("save-nested");
+        write_file_impl("chapters/new/intro.tex", "hello", &root).unwrap();
+        assert_eq!(fs::read_to_string(root.join("chapters/new/intro.tex")).unwrap(), "hello");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn write_refuses_to_escape_the_root() {
+        let root = tmpdir("save-escape");
+        let outside = tmpdir("save-escape-outside");
+        fs::write(outside.join("victim.tex"), b"do not touch").unwrap();
+
+        let rel = format!("../{}/victim.tex", outside.file_name().unwrap().to_string_lossy());
+        assert!(write_file_impl(&rel, "pwned", &root).is_err());
+        assert_eq!(fs::read_to_string(outside.join("victim.tex")).unwrap(), "do not touch");
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn read_refuses_to_escape_the_root() {
+        let root = tmpdir("read-escape");
+        let outside = tmpdir("read-escape-outside");
+        fs::write(outside.join("secret.tex"), b"secret").unwrap();
+        let rel = format!("../{}/secret.tex", outside.file_name().unwrap().to_string_lossy());
+        assert!(read_text_impl(&rel, &root).is_err());
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn repeated_saves_keep_the_last_write() {
+        let root = tmpdir("save-repeat");
+        for i in 0..5 {
+            write_file_impl("main.tex", &format!("revision {i}"), &root).unwrap();
+        }
+        assert_eq!(read_text_impl("main.tex", &root).unwrap(), "revision 4");
+        // No .revery_tmp or .revery_bak left lying around after five writes.
+        let junk: Vec<_> = fs::read_dir(&root).unwrap().flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains("revery_tmp") || n.contains("revery_bak"))
+            .collect();
+        assert!(junk.is_empty(), "left behind: {junk:?}");
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
