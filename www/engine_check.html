@@ -41,8 +41,13 @@ button:disabled { opacity:.35; cursor:default }
 #verdict.ok { color:var(--ok) } #verdict.err { color:var(--err) } #verdict.warn { color:var(--warn) }
 #env { padding:6px 14px; font-size:.64rem; color:var(--text-dim);
        border-bottom:1px solid var(--border); white-space:pre-wrap }
-#log { flex:1; overflow:auto; padding:8px 14px; white-space:pre; font-size:.7rem;
-       line-height:1.45 }
+#split { flex:1; display:flex; min-height:0 }
+#log { flex:1 1 55%; overflow:auto; padding:8px 14px; white-space:pre; font-size:.7rem;
+       line-height:1.45; min-width:0 }
+#pdf { flex:1 1 45%; overflow:auto; padding:12px; background:var(--bg-panel);
+       border-left:1px solid var(--border); min-width:0 }
+.pdfpage { display:block; margin:0 auto 12px; background:#fff;
+           border:1px solid var(--border); border-radius:2px; max-width:100% }
 #log::-webkit-scrollbar { width:8px; height:8px }
 #log::-webkit-scrollbar-thumb { background:var(--scrollbar); border-radius:2px }
 .l-inf { color:var(--text-muted) } .l-dbg { color:var(--text) }
@@ -61,13 +66,19 @@ button:disabled { opacity:.35; cursor:default }
   <span id="verdict">idle</span>
 </div>
 <div id="env">probing…</div>
-<div id="log"></div>
+<div id="split">
+  <div id="log"></div>
+  <div id="pdf"></div>
+</div>
 
 <script type="module">
 // Deliberately self-contained: no dev server, no /api, no project fixtures.
 // The same file is opened by the browser (via test/serve.js) and by the Tauri
 // window, so a difference in result is a difference in the browser engine.
 import { WasmTexEngine } from './jvscrpt_and_css_extra/tex_engine_wasm.js';
+// Also exercises pdf.js here: WebKitGTK has no built-in PDF viewer, so canvas
+// rendering is the only way the desktop build shows a document at all.
+import { PdfPreview } from './jvscrpt_and_css_extra/pdf_preview.js';
 
 const $ = id => document.getElementById(id);
 const logEl = $('log');
@@ -149,8 +160,16 @@ async function run() {
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
 
     if (r.success && r.pages === 2) {
-      log('hdr', `✓ PASS — ${r.pages} pages, ${(r.pdf.length / 1024).toFixed(0)} KB, ${secs}s total`);
-      verdict(`✓ pass · ${r.pages} pages · ${secs}s`, 'ok');
+      let rendered = 0;
+      try {
+        rendered = await new PdfPreview($('pdf')).load(r.pdf);
+        log('inf', `pdf.js rendered ${rendered} page(s) to canvas`);
+      } catch (e) {
+        log('err', `pdf.js FAILED: ${e.message}`);
+      }
+      const ok = rendered === r.pages;
+      log('hdr', `${ok ? '✓ PASS' : '⚠ engine ok, preview failed'} — ${r.pages} pages, ${(r.pdf.length / 1024).toFixed(0)} KB, ${secs}s total`);
+      verdict(ok ? `✓ pass · ${r.pages} pages · ${secs}s` : `⚠ preview failed`, ok ? 'ok' : 'warn');
     } else if (r.success) {
       log('wrn', `⚠ compiled but produced ${r.pages} pages, expected 2`);
       verdict(`⚠ ${r.pages} pages, expected 2`, 'warn');
