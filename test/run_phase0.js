@@ -153,13 +153,13 @@ async function evaluate(cdp, expression, awaitPromise = true) {
     }
     if (!ready) throw new Error(`harness never became ready. Browser errors:\n${pageErrors.join('\n') || '(none)'}\nChrome stderr:\n${chromeStderr.slice(-2000)}`);
 
+    // This lists the *upstream* release in engine_upstream/busytex/, which is
+    // gitignored and never ships — so a size warning here would be about files
+    // nobody downloads. The real cap (50 MB, git's) is enforced on the files
+    // that do ship by build_slim_texmf.js, where it fails the build rather
+    // than printing a warning nobody reads.
     const assets = await evaluate(cdp, 'window.__reveryTex.assets', false);
-    const over = assets.filter(a => a.bytes > 25 * 1024 * 1024);
-    console.log(`engine assets: ${assets.length} files`);
-    for (const a of over) {
-      console.log(`  ⚠ ${a.path} is ${(a.bytes / 1024 / 1024).toFixed(1)} MB — over Cloudflare's 25 MiB/file cap`);
-    }
-    console.log('');
+    console.log(`upstream engine assets present: ${assets.length} files (source only, not shipped)\n`);
 
     const results = [];
     for (const project of wanted) {

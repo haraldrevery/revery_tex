@@ -30,6 +30,14 @@ REVERY_TEX_OPEN=/path/to/project npm run start:tauri   # open straight into a fo
 clone runs immediately. You only need the 649 MB upstream release if you want to
 rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-the-tex-distribution).
 
+> **`www/` contains only what ships.** Every shell loads that folder, and Tauri
+> embeds *all* of it into the binary with no whitelist — so anything placed
+> there reaches every user. Build inputs live beside it (`engine_upstream/`),
+> never inside. This is enforced by a size ceiling in
+> `test/frontend_payload.test.js`, because it has already gone wrong once: the
+> upstream tree sat in `www/engine/busytex/` and the Tauri `.deb` came out at
+> 471 MB instead of ~120 MB.
+
 ### Prerequisites
 
 - **Node 22+**
@@ -148,7 +156,7 @@ produces byte-identical output, so committed binaries do not bloat history.
 
 ```bash
 curl -L https://github.com/TeXlyre/texlyre-busytex/releases/download/assets-v1.2.3/busytex-assets.tar.gz \
-  | tar xz -C www/engine                      # 649 MB, gitignored
+  | tar xz -C engine_upstream                     # 649 MB, gitignored
 node build_tools/extract_traces.js            # logs → texmf_trace.json
 node build_tools/build_slim_texmf.js --report # dry run: sizes, no writes
 node build_tools/build_slim_texmf.js          # writes www/engine/dist/
@@ -172,9 +180,36 @@ npm test                                         # fs_core (18) + zip_core (13)
 cargo test --manifest-path tauri/Cargo.toml      # tauri/src/main.rs (19)
 
 # The browser build, on a server that behaves like a real static host
-REVERY_TEX_STATIC=1 PORT=8778 npm run serve &    # /api/* returns 404
-node test/run_web_backends.js                         # import → edit → compile → export
+npm run serve:static &                           # /api/* returns 404
+npm run test:web                                 # web-fs, web-zip and web (33)
+
+# The Electron shell, over the real IPC
+npm run test:electron                            # open → save → conflict → compile (14)
+REVERY_TEX_BIN=dist-electron/linux-unpacked/revery-tex npm run test:electron
 ```
+
+`test:electron` is the only automated proof that the desktop save path works.
+Pointed at `REVERY_TEX_BIN` it runs against the **packaged** app rather than the
+repo checkout, which is what catches a file the installer's whitelist dropped.
+
+```bash
+npm run build:tauri && npm run build:electron
+npm run verify:installers                        # no upstream tree, engine present, size sane
+npm run test:tauri:engine                        # release build compiles over tauri://localhost
+```
+
+`test:tauri:engine` deserves a note. WebKitGTK has no DevTools protocol, so
+there is no driver and no way to click Compile. It instead builds a variant
+whose window opens `engine_check.html?autorun=1` — a self-contained page that
+compiles an inline document and prints a verdict — and screenshots it. Look for
+`✓ PASS · 2 PAGES`. The variant is a `--config` override, so no production code
+carries test scaffolding, but **it leaves the release binary as the self-check
+variant**; re-run `npm run build:tauri` afterwards.
+
+This matters because `tauri dev` serves the frontend from a local http server
+while a release build serves it from `tauri://localhost` with everything
+embedded in the binary. Only the second is what users get, and until this
+existed only the first had ever been exercised.
 
 The two desktop backends are held to the **same** cases — path traversal,
 symlink escape, creating through an escaping symlink, atomic overwrite, repeated
@@ -266,7 +301,7 @@ Each of these cost real debugging time:
 |---|---|
 | `www/` | the entire app — every shell loads this folder |
 | `www/engine/dist/` | TeX Live WASM + slim texmf, committed build output |
-| `www/engine/busytex/` | 649 MB upstream release, gitignored |
+| `engine_upstream/busytex/` | 649 MB upstream release, gitignored — **outside `www/` on purpose** |
 | `build_tools/` | texmf repacker, CodeMirror bundler, LZ4 codec extractor |
 | `tauri/` | desktop shell; `src/main.rs` is the whole backend |
 | `test/` | dev server, the gate, CDP client |

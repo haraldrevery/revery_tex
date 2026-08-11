@@ -18,7 +18,9 @@
     "build:electron": "env -u ELECTRON_RUN_AS_NODE electron-builder --linux deb rpm",
     "version:check": "node build_tools/sync_version.js --check",
     "version:set": "node build_tools/sync_version.js",
-    "verify:installers": "node test/verify_installers.js"
+    "verify:installers": "node test/verify_installers.js",
+    "test:tauri": "node test/run_tauri.js",
+    "test:tauri:engine": "bash test/run_tauri_engine.sh"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

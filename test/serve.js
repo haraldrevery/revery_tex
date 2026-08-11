@@ -278,7 +278,7 @@ const server = http.createServer((req, res) => {
   // Lets the harness discover which engine builds and data packages actually
   // got extracted, instead of hardcoding names that may drift with the release.
   if (pathname === '/api/engine-assets') {
-    const dir = path.join(ROOT, 'www', 'engine', 'busytex');
+    const dir = path.join(ROOT, 'engine_upstream', 'busytex');
     if (!fs.existsSync(dir)) {
       return send(res, 200, JSON.stringify({ present: false, files: [] }), MIME['.json']);
     }

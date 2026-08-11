@@ -2,11 +2,15 @@
 //
 //   node test/verify_installers.js
 //
-// The thing this exists to catch: www/engine/busytex/ is 649 MB of upstream
-// release sitting directly beside the 97 MB that ships. It is gitignored, so
-// git will never warn about it — but a packager's default is "include
-// everything", and one wrong glob turns a 144 MB download into a 790 MB one.
-// A whitelist prevents that; this proves the whitelist is still working.
+// The thing this exists to catch, which has already happened once: the 649 MB
+// upstream release used to live in www/engine/busytex/, and Tauri embeds all of
+// www/ into the binary with no whitelist. The .deb came out at 471 MB. It is
+// gitignored, so git never warned; and the Tauri release build had never
+// completed, so nothing else did either.
+//
+// The structural fix is that build inputs now live outside www/. This checks
+// the result anyway, from the other end, because a packager's default is
+// "include everything" and one wrong glob undoes it.
 //
 // Also verifies the engine is actually present, because the opposite mistake —
 // a whitelist so tight the app ships without its compiler — fails at runtime in
@@ -29,29 +33,52 @@ function have(cmd) {
   try { execFileSync('which', [cmd], { stdio: 'ignore' }); return true; } catch { return false; }
 }
 
-/** Engine files that must be inside any installer, or it cannot compile. */
+/** Engine files that must be present when the shell ships them as files. */
 const REQUIRED = ['busytex.wasm', 'texlive-slim-core.data', 'texlive-slim-icu.data'];
 
-function verify(label, file, listing) {
-  console.log(`\n${label}  ${(fs.statSync(file).size / 1e6).toFixed(0)} MB  ${path.basename(file)}`);
+/**
+ * The two shells package the engine differently, and a single check cannot
+ * cover both.
+ *
+ * Electron ships www/ as plain files beside the executable, so the engine is
+ * findable by name. Tauri **embeds** all of frontendDist into the binary and
+ * brotli-compresses it, so there is no busytex.wasm entry to look for — 97 MB
+ * of assets become part of a 60 MB executable. Asserting the filename there
+ * would fail on a perfectly good package.
+ *
+ * What is checkable in both cases is that the payload is big enough to contain
+ * a TeX distribution at all: an installer that lost the engine is dramatically
+ * smaller, whichever way it was packed.
+ */
+function verify(label, file, listing, installedKb) {
+  const mb = fs.statSync(file).size / 1e6;
+  const embedded = !listing.some(l => l.includes('/www/'));
+  console.log(`\n${label}  ${mb.toFixed(0)} MB  ${path.basename(file)}  ` +
+    `(${embedded ? 'engine embedded in the binary' : 'engine as files'})`);
   checked++;
 
-  const leaked = listing.filter(l => l.includes('engine/busytex'));
+  const leaked = listing.filter(l => /engine\/busytex|engine_upstream/.test(l));
   check('no upstream busytex tree', leaked.length === 0,
     leaked.length ? `${leaked.length} entries leaked — the installer is ~650 MB too big` : '');
 
-  for (const want of REQUIRED) {
-    check(`ships ${want}`, listing.some(l => l.endsWith(want)));
+  if (embedded) {
+    // Tauri: one executable carrying everything.
+    check('ships an executable', listing.some(l => /(^|\/)(usr\/)?bin\//.test(l)));
+    check('payload is large enough to hold the engine', installedKb > 40_000,
+      `${(installedKb / 1000).toFixed(0)} MB installed`);
+  } else {
+    for (const want of REQUIRED) {
+      check(`ships ${want}`, listing.some(l => l.endsWith(want)));
+    }
   }
 
   check('no source maps', !listing.some(l => l.endsWith('.map')));
   check('no tarballs', !listing.some(l => l.endsWith('.tar.gz')));
   check('has a desktop entry', listing.some(l => l.endsWith('.desktop')));
 
-  // A package far off the expected size means the file list changed in a way
-  // no single assertion above happened to cover.
-  const mb = fs.statSync(file).size / 1e6;
-  check('size is in the expected range', mb > 80 && mb < 300, `${mb.toFixed(0)} MB`);
+  // Wide, because the two shells legitimately differ by 3x. This is here to
+  // catch a package that grew by a whole directory, not to police a few MB.
+  check('size is in the expected range', mb > 40 && mb < 300, `${mb.toFixed(0)} MB`);
 }
 
 const dirs = ['dist-electron', path.join('tauri', 'target', 'release', 'bundle')];
@@ -82,12 +109,14 @@ for (const file of found) {
     if (!have('dpkg-deb')) { console.log(`\nskipping ${path.basename(file)} — dpkg-deb not installed`); continue; }
     const listing = execFileSync('dpkg-deb', ['-c', file], { encoding: 'utf8', maxBuffer: 1 << 26 })
       .split('\n').map(l => l.trim().split(/\s+/).slice(5).join(' ')).filter(Boolean);
-    verify('deb', file, listing);
+    const installedKb = Number(execFileSync('dpkg-deb', ['-f', file, 'Installed-Size'], { encoding: 'utf8' }).trim());
+    verify('deb', file, listing, installedKb);
   } else {
     if (!have('rpm')) { console.log(`\nskipping ${path.basename(file)} — rpm not installed`); continue; }
     const listing = execFileSync('rpm', ['-qlp', file], { encoding: 'utf8', maxBuffer: 1 << 26 })
       .split('\n').map(l => l.trim()).filter(Boolean);
-    verify('rpm', file, listing);
+    const bytes = Number(execFileSync('rpm', ['-qp', '--queryformat', '%{SIZE}', file], { encoding: 'utf8' }).trim());
+    verify('rpm', file, listing, bytes / 1000);
   }
 }
 

@@ -24,6 +24,21 @@ at all, because it cannot write back to the folder a project came from — the
 missing method is what makes the UI offer Import instead of a Save that would
 not have worked. Any new backend must omit what it cannot do rather than throw.
 
+## `www/` contains only what ships
+
+Every shell loads that folder, and **Tauri embeds all of it into the binary**
+with no whitelist — so anything put there reaches every user. Build inputs live
+beside it (`engine_upstream/`), never inside.
+
+This is not hypothetical. The 649 MB upstream release sat in
+`www/engine/busytex/` and rode into the Tauri binary: the `.deb` was 471 MB
+instead of 53 MB, and the release build took 7m22s instead of 20s. It was
+invisible because the directory is gitignored *and* the Tauri release build had
+never completed. `test/frontend_payload.test.js` now enforces a size ceiling.
+
+Electron survived it only because `electron-builder.yml` lists files explicitly.
+Two packagers independently excluding the same thing is not a strategy.
+
 ## Generated files — never edit directly
 
 - `www/jvscrpt_and_css_extra/codemirror-bundle.js` → edit `build_tools/cm_entry_tex.js`
@@ -40,6 +55,16 @@ not have worked. Any new backend must omit what it cannot do rather than throw.
   project. Use absolute paths.
 - `tauri build` (release) is memory-hungry enough to kill the machine when run
   alongside browser automation. Use `--debug --no-bundle`, alone.
+- **Kill the Electron binary, not `node_modules/electron/cli.js`.** cli.js is a
+  Node wrapper that spawns Electron as a child, so killing the PID `spawn`
+  returns leaves Electron alive holding the debug port. The next run then
+  attaches to the *previous* run's window, whose project directory has since
+  been deleted — which surfaces as a baffling ENOENT from inside the app.
+  `require('electron')` gives the real binary path; spawn `detached` and kill
+  the negative PID.
+- **One heavy build at a time.** `rpmbuild` on this payload peaks around 2.3 GB
+  and runs multithreaded; a Tauri build beside it is what killed the machine
+  before.
 - No long foreground `sleep`; use a backgrounded `until` loop.
 
 ## Verifying UI work
@@ -68,7 +93,18 @@ run killed by a timeout prints nothing at all — the failure looks like a hang.
 Redirect to a file and read it.
 
 Tauri: there is **no headless driver** — our CDP client speaks Chrome's protocol,
-which WebKitGTK does not implement. Screenshot the window instead:
+which WebKitGTK does not implement. For the engine, use
+`npm run test:tauri:engine`: it builds a variant whose window opens
+`engine_check.html?autorun=1` and screenshots the verdict, so nothing has to be
+clicked. It leaves the release binary as that variant — re-run
+`npm run build:tauri` afterwards.
+
+**Never send synthetic keystrokes blind.** XTEST types into whatever window has
+focus, which on this machine is the user's editor, not ours. If input is truly
+needed, verify focus is on the target window first (`test/run_tauri.js` does,
+and is opt-in behind `REVERY_TEX_ALLOW_INPUT=1`).
+
+Otherwise, screenshot the window:
 
 ```bash
 WID=$(xwininfo -root -tree | grep '"Revery TeX"' | grep -oE '0x[0-9a-f]+' | head -1)

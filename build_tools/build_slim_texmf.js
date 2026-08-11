@@ -12,7 +12,7 @@
 // the engine's own MiniLZ4 codec so the output is bit-compatible by
 // construction (see build_tools/lz4_codec.js).
 //
-// Non-destructive: reads www/engine/busytex/ (the gitignored 649 MB upstream
+// Non-destructive: reads engine_upstream/busytex/ (the gitignored 649 MB upstream
 // release), writes www/engine/dist/ (committed build output: texmf parts plus
 // the four runtime files). The originals are never modified.
 
@@ -30,7 +30,7 @@ function arg(name, fallback) {
 }
 const has = (f) => process.argv.includes(f);
 
-const SRC_DIR = path.resolve(arg('--src', path.join(ROOT, 'www/engine/busytex')));
+const SRC_DIR = path.resolve(arg('--src', path.join(ROOT, 'engine_upstream/busytex')));
 const SRC_BUNDLE = arg('--bundle', 'texlive-extra');
 const OUT_DIR = path.resolve(arg('--out', path.join(ROOT, 'www/engine/dist')));
 const OUT_NAME = arg('--name', 'texlive-slim');
