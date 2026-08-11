@@ -5,16 +5,19 @@
 // running in.
 //
 // Two project sources, both behind the same in-memory shape:
-//   - NativeAPI (desktop): a real folder on disk, editable and saveable
+//   - NativeAPI: a folder on disk (desktop, and Chromium via the File System
+//     Access API), or a zip imported into browser storage on Firefox/Safari
 //   - the dev server (/api/project/:key): fixtures, for the Chrome test loop
 // Whether a project can be saved is a property of where it came from, tracked
-// as `project.onDisk`, not of which shell is running.
+// as `project.onDisk`, not of which shell is running. The fixtures are the only
+// source that cannot be saved.
 
 import { WasmTexEngine } from './tex_engine_wasm.js';
 import { PdfPreview } from './pdf_preview.js';
 import { NativeAPI } from './native_api.js';
 import { latexEditingExtensions, setDiagnostics, beginEndInsertion } from './latex_editor.js';
 import { SyncTex } from './synctex.js';
+import { writeZip } from './zip_core.js';
 
 const $ = (id) => document.getElementById(id);
 const CM = window.CM;
@@ -266,6 +269,9 @@ function refreshDirty() {
   $('dirty').textContent = f && f.dirty ? 'modified' : '';
   $('save').disabled = !project?.onDisk || n === 0;
   $('save').textContent = n > 1 ? `Save (${n})` : 'Save';
+  // Export works from whatever is in the editor, so it needs a project and
+  // nothing else — including for the read-only dev-server fixtures.
+  $('exportzip').disabled = !project;
   for (const node of document.querySelectorAll('.node[data-path]')) {
     const nf = project?.files.get(node.dataset.path);
     node.classList.toggle('dirty', !!(nf && nf.dirty));
@@ -440,10 +446,11 @@ async function loadProjects() {
   } catch { /* no dev server: the normal case for a real user */ }
 
   if (!list) {
-    if (!NativeAPI.openFolder) {
-      setStatus('this browser cannot open local folders — use Chrome, or the desktop app', 'warn');
+    if (!NativeAPI.openFolder && !NativeAPI.importZip) {
+      setStatus('this browser cannot open or store projects — use Chrome, or the desktop app', 'warn');
       return;
     }
+    await showStorageNotice();
     const root = await NativeAPI.currentRoot().catch(() => null);
     if (root) { await loadFromDisk(root); return; }
     // A browser can remember the folder but cannot re-request permission
@@ -452,7 +459,7 @@ async function loadProjects() {
       $('open').textContent = 'Reopen folder';
       $('open').title = 'Reopen the last folder, or pick a different one';
     }
-    setStatus('open a folder to begin');
+    setStatus(NativeAPI.importZip ? 'import a zip to begin' : 'open a folder to begin');
     return;
   }
 
@@ -486,6 +493,79 @@ async function openFolder() {
   }
   if (!root) return;                      // user cancelled
   await loadFromDisk(root);
+}
+
+// ── zip import and export ──────────────────────────────────────────────
+// The only route in and out for browsers with no filesystem API, and a useful
+// "give me everything" everywhere else.
+
+/**
+ * Say where the work is being kept, when the answer is not a file on disk.
+ *
+ * A user who imports a zip, edits for an hour and closes the tab must not be
+ * surprised by where their work went. This is the one thing that makes the zip
+ * backend honest rather than a trap, so it is a standing bar rather than a
+ * message that scrolls away.
+ */
+async function showStorageNotice() {
+  if (!NativeAPI.importZip) return;
+  const persistent = await NativeAPI.isPersistent?.().catch(() => false);
+  $('notice').hidden = false;
+  $('notice').textContent = persistent
+    ? 'This browser cannot write to your files — the project is kept in browser storage. Export a zip to get it out.'
+    : 'This browser cannot write to your files — the project is kept in browser storage, which the browser may clear. Export a zip to keep your work.';
+}
+
+async function importZip(file) {
+  if (!file || !NativeAPI.importZip) return;
+  if (!confirmDiscard('Import a zip')) return;
+  if (project && !confirm(
+    `Importing replaces "${project.key}" — Revery TeX holds one project at a time.\n\n` +
+    `Export it first if you have not already. Continue?`
+  )) return;
+
+  setStatus('reading zip…', 'warn');
+  let name;
+  try {
+    name = await NativeAPI.importZip(file);
+  } catch (err) {
+    setStatus(`✗ ${err.message || err}`, 'err');
+    rawLog('err', `import failed: ${err.message || err}`);
+    return;
+  }
+  await showStorageNotice();
+  await loadFromDisk(name);
+}
+
+/**
+ * Export what is in the editor, not what is in the store.
+ *
+ * Exporting the saved copy would quietly drop unsaved edits — and the user who
+ * reaches for Export is often the one about to close the tab, which is the
+ * worst possible moment to hand them a stale archive.
+ */
+async function buildExportZip() {
+  const enc = new TextEncoder();
+  const files = [...project.files].map(([path, f]) => ({
+    path,
+    bytes: f.binary ? (f.content instanceof Uint8Array ? f.content : enc.encode(f.content))
+                    : enc.encode(f.content)
+  }));
+  return { bytes: await writeZip(files), count: files.length };
+}
+
+async function exportZip() {
+  if (!project) return;
+  setStatus('packing…', 'warn');
+  try {
+    const { bytes, count } = await buildExportZip();
+    download(new Blob([bytes], { type: 'application/zip' }), `${project.key || 'project'}.zip`);
+    const n = dirtyCount();
+    setStatus(`exported ${count} file(s)${n ? ` · including ${n} unsaved` : ''}`, 'ok');
+  } catch (err) {
+    setStatus(`✗ export failed: ${err.message || err}`, 'err');
+    rawLog('err', `export failed: ${err.message || err}`);
+  }
 }
 
 /**
@@ -723,9 +803,18 @@ async function showPdf(bytes, pages) {
 $('compile').onclick = compile;
 $('save').onclick = saveAll;
 $('open').onclick = openFolder;
-// Hidden in the browser until the File System Access backend exists — the
-// absence of the method is the signal, not a check on the environment name.
+// Presence of the method is the signal, never a check on the environment name.
+// A shell that cannot open a folder does not get a button that implies it can.
 if (!NativeAPI.openFolder) $('open').style.display = 'none';
+if (!NativeAPI.importZip) $('importzip').style.display = 'none';
+
+$('importzip').onclick = () => $('zipinput').click();
+$('zipinput').onchange = async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';   // or picking the same file twice fires no change event
+  await importZip(file);
+};
+$('exportzip').onclick = exportZip;
 $('savepdf').onclick = () => lastPdf && download(new Blob([lastPdf], { type: 'application/pdf' }), 'output.pdf');
 
 // ── pane resizing ──────────────────────────────────────────────────────
@@ -836,6 +925,16 @@ window.__reveryTexTest = {
 // Headless driver hook, same contract as the Phase 0 harness.
 window.__reveryTexApp = {
   get ready() { return !!project; },
+  /** The bytes the Export button would download — a click gives the driver nothing. */
+  async exportBytes() { return project ? (await buildExportZip()).bytes : null; },
+  setBuffer(path, text) {
+    const f = project?.files.get(path);
+    if (!f) return false;
+    f.content = text; f.dirty = true;
+    if (path === currentPath) openFile(path);
+    refreshDirty();
+    return true;
+  },
   async compile(key) {
     if (key && key !== project?.key) { $('project').value = key; await loadProject(key); }
     await compile();

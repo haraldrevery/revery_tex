@@ -19,6 +19,11 @@ Any change that breaks it is wrong. Run it before claiming anything works.
 Callers **feature-detect by method presence**, never by environment name:
 `if (NativeAPI.openFolder)`, not `if (isTauri)`.
 
+This is load-bearing, not style. The Firefox/Safari backend has no `openFolder`
+at all, because it cannot write back to the folder a project came from — the
+missing method is what makes the UI offer Import instead of a Save that would
+not have worked. Any new backend must omit what it cannot do rather than throw.
+
 ## Generated files — never edit directly
 
 - `www/jvscrpt_and_css_extra/codemirror-bundle.js` → edit `build_tools/cm_entry_tex.js`
@@ -41,6 +46,26 @@ Callers **feature-detect by method presence**, never by environment name:
 
 Chrome: drive `test/cdp.js` against `http://localhost:8777/www/index.html` and
 call `window.__reveryTexApp.compile(key)`.
+
+The browser build has three backends and Chrome would only ever pick one of
+them, so force the others:
+
+```bash
+REVERY_TEX_STATIC=1 PORT=8778 node test/serve.js &   # /api/* → 404, like a real host
+node test/run_web_backends.js                        # web-fs, web-zip and web
+```
+
+`?backend=zip|none` is honoured only by `native_api.js`, and only for the
+browser backends — a desktop shell has real files and nothing to fall back to.
+
+**Answer dialogs when driving the app.** It uses `confirm()` for anything that
+discards work, and `beforeunload` fires on navigation with unsaved edits. An
+unanswered dialog blocks headless Chrome forever, and the run looks like a hang
+with no output. Listen for `Page.javascriptDialogOpening` and reply.
+
+**Never pipe a long test through `head`/`tail`.** They buffer until EOF, so a
+run killed by a timeout prints nothing at all — the failure looks like a hang.
+Redirect to a file and read it.
 
 Tauri: there is **no headless driver** — our CDP client speaks Chrome's protocol,
 which WebKitGTK does not implement. Screenshot the window instead:

@@ -17,6 +17,11 @@ const path = require('path');
 const ROOT = path.resolve(__dirname, '..');
 const PROJECTS_DIR = path.resolve(ROOT, '..', 'latex_project_tests');
 const PORT = Number(process.env.PORT) || 8777;
+// A plain static host has no /api/* at all. Setting this makes the dev server
+// refuse those routes, so the browser build can be exercised on exactly the
+// thing it will be deployed to — the fixture loader is the one path a real user
+// never takes, and it hid a bug once already.
+const STATIC_ONLY = process.env.REVERY_TEX_STATIC === '1' || process.argv.includes('--static');
 const APPLY_CSP = process.argv.includes('--csp') || process.argv.includes('--csp-site');
 // --csp-site serves the site's CURRENT policy verbatim (no worker-src), to
 // prove whether the proposed _headers change is actually required.
@@ -248,6 +253,10 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const pathname = decodeURIComponent(url.pathname);
 
+  if (STATIC_ONLY && pathname.startsWith('/api/')) {
+    return send(res, 404, JSON.stringify({ error: 'no API on a static host' }), MIME['.json']);
+  }
+
   if (pathname === '/api/netstats') {
     const body = JSON.stringify(netStats);
     if (url.searchParams.get('reset')) {
@@ -312,4 +321,5 @@ server.listen(PORT, () => {
   console.log(`  root     ${ROOT}`);
   console.log(`  projects ${PROJECTS_DIR}`);
   console.log(`  CSP      ${APPLY_CSP ? (CSP_SITE ? "site-current (--csp-site)" : "proposed (--csp)") : "off"}`);
+  if (STATIC_ONLY) console.log('  mode     static host — /api/* returns 404');
 });

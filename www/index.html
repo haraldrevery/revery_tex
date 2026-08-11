@@ -16,6 +16,9 @@
 
 <div id="topbar">
   <button id="open">Open folder</button>
+  <button id="importzip">Import zip</button>
+  <input type="file" id="zipinput" accept=".zip,application/zip" hidden>
+  <button id="exportzip" disabled title="Download the whole project as a zip">Export zip</button>
   <select id="project"></select>
   <span class="lbl">Engine</span>
   <select id="engine"></select>
@@ -27,6 +30,8 @@
   <button id="status" class="statusline">idle</button>
   <button id="theme" title="Cycle theme">Theme</button>
 </div>
+
+<div id="notice" hidden></div>
 
 <div id="workspace">
   <aside id="sidebar">

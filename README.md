@@ -48,6 +48,9 @@ rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-t
 │    revery_tex_app.js            UI: editor, tree, compile, log console        │
 │    tex_engine_wasm.js           TexEngine  ── the only file that knows TeX    │
 │    native_api.js                NativeAPI  ── the only file that knows shells │
+│    native_api_web.js            File System Access backend (Chromium)        │
+│    native_api_zip.js            IndexedDB backend (Firefox, Safari)          │
+│    zip_core.js                  zip reader/writer, no dependencies           │
 │    pdf_preview.js               pdf.js canvas renderer                       │
 │    codemirror-bundle.js         generated — edit build_tools/cm_entry_tex.js  │
 │  engine/dist/                   TeX Live WASM + slim texmf (97 MB, committed) │
@@ -82,13 +85,25 @@ const r = await engine.compile({
 Swapping the WASM backend for a native one (Tectonic, a system TeX Live) is a
 single-file change.
 
-**`NativeAPI`** (`native_api.js`) — touches the filesystem. Nine calls. On the
-desktop they go to Rust; in the browser they are **absent**, and the UI hides
-what it cannot do:
+**`NativeAPI`** (`native_api.js`) — touches the filesystem. Nine calls, four
+backends, and the UI hides whatever a backend cannot do:
 
 ```js
 if (NativeAPI.openFolder) { /* show the Open button */ }
 ```
+
+| Backend | Where | Saving goes to |
+|---|---|---|
+| `tauri` | Tauri window | real files, via Rust |
+| `electron` | Electron window | real files, via `fs_core.js` |
+| `web-fs` | Chromium | real files, via the File System Access API |
+| `web-zip` | Firefox, Safari | IndexedDB — import a zip, export a zip |
+| `web` | no storage at all | nothing; the UI says so |
+
+`web-zip` deliberately has **no `openFolder`**. Those browsers cannot write back
+to the folder a project came from, and a method by that name which cannot save
+is exactly the half-truth that loses someone's work. The app offers Import
+instead, and shows a standing bar saying where the work is being kept.
 
 ### Why the engine is the shape it is
 
@@ -153,8 +168,12 @@ compared byte-for-byte before the build is called a success.
 ```bash
 npm run serve &                                  # required by the gate
 npm run gate                                     # the invariant: must stay 5/5
-npm test                                         # electron/fs_core.js (13)
-cargo test --manifest-path tauri/Cargo.toml      # tauri/src/main.rs (14)
+npm test                                         # fs_core (18) + zip_core (13)
+cargo test --manifest-path tauri/Cargo.toml      # tauri/src/main.rs (19)
+
+# The browser build, on a server that behaves like a real static host
+REVERY_TEX_STATIC=1 PORT=8778 npm run serve &    # /api/* returns 404
+node test/run_web_backends.js                         # import → edit → compile → export
 ```
 
 The two desktop backends are held to the **same** cases — path traversal,
@@ -198,8 +217,13 @@ match Revery Notebook's zero-test-dependency convention.
   no highlighting of the matched region — it places the cursor and flashes a
   marker. Box nesting is parsed but discarded; restoring it is what a precise
   highlight would need.
-- **Browser has no filesystem yet** — it loads test fixtures only. The File
-  System Access API backend is the next piece of `native_api.js`.
+- **Firefox and Safari cannot save to your files.** They have no File System
+  Access API, so a project is imported from a zip into browser storage and
+  exported back out as a zip. Browser storage can be cleared by the browser;
+  the app requests persistence and says so in a standing bar, but Export is the
+  only durable way out.
+- **One project at a time in the zip backend.** Importing replaces what is
+  stored, after a confirmation.
 - **Tauri has no headless driver.** Our CDP client speaks Chrome's protocol,
   which WebKitGTK does not implement, so Tauri is verified by screenshot.
   Electron *does* speak CDP (`--remote-debugging-port`), and the full app —

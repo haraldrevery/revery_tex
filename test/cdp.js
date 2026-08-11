@@ -136,7 +136,9 @@ async function launch({ url, port = 9333, chromePath, extraArgs = [] } = {}) {
   const pageErrors = [];
   cdp.on((msg) => {
     if (msg.method === 'Log.entryAdded' && msg.params.entry.level === 'error') {
-      pageErrors.push(`${msg.params.entry.source}: ${msg.params.entry.text}`);
+      const e = msg.params.entry;
+      // The URL is what makes a "Failed to load resource" entry actionable.
+      pageErrors.push(`${e.source}: ${e.text}${e.url ? ` [${e.url}]` : ''}`);
     }
   });
 

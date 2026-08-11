@@ -8,6 +8,7 @@
 // Only this file may ask which shell it is running in.
 
 import { webFsImpl, webFsSupported } from './native_api_web.js';
+import { webZipImpl, webZipSupported } from './native_api_zip.js';
 
 const isTauri = typeof window !== 'undefined' && typeof window.__TAURI__ !== 'undefined';
 const isElectron = typeof window !== 'undefined' && typeof window.electronAPI !== 'undefined';
@@ -38,11 +39,11 @@ const tauriImpl = {
 };
 
 /**
- * Browser: no filesystem yet.
+ * Browser with neither a filesystem API nor IndexedDB — a private window with
+ * storage disabled, essentially.
  *
- * Deliberately absent rather than throwing stubs — the app checks
+ * Deliberately absent methods rather than throwing stubs: the app checks
  * `NativeAPI.openFolder` before offering the button, so "missing" is the signal.
- * The File System Access API backend slots in here later; nothing else changes.
  */
 const webImpl = {
   env: 'web',
@@ -70,12 +71,32 @@ const electronImpl = isElectron ? {
   discardBackup: (path) => window.electronAPI.discardBackup(path)
 } : null;
 
-// Chromium browsers get real folder access; everything else falls through to
-// the capability-free backend, and the UI hides what it cannot do.
+/**
+ * `?backend=zip` forces the zip backend on a browser that would not otherwise
+ * pick it.
+ *
+ * Two reasons it exists. The test harness runs in Chrome, which always has the
+ * File System Access API, so without an override the Firefox/Safari path would
+ * ship untested. And a Chromium user who would rather not grant a folder
+ * permission gets a way to say so. Only the browser backends can be forced —
+ * a desktop shell has real files and there is nothing to fall back to.
+ */
+const forced = typeof location !== 'undefined'
+  ? new URLSearchParams(location.search).get('backend')
+  : null;
+
+// Chromium browsers get real folder access. Firefox and Safari get the zip
+// backend, which saves into browser storage and is explicit about it — note it
+// has no `openFolder`, so the UI offers Import rather than a button that could
+// not have saved back. Anything else falls through to the capability-free
+// backend, and the UI hides what it cannot do.
 export const NativeAPI =
   isTauri ? tauriImpl :
   isElectron ? electronImpl :
+  (forced === 'zip' && webZipSupported) ? webZipImpl :
+  forced === 'none' ? webImpl :
   webFsSupported ? webFsImpl :
+  webZipSupported ? webZipImpl :
   webImpl;
 if (typeof window !== 'undefined') window.NativeAPI = NativeAPI;
 export default NativeAPI;

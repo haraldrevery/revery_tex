@@ -96,6 +96,15 @@ button.primary { color:var(--text); border-color:var(--accent) }
 .statusline { border-color:transparent; color:var(--text-muted) }
 .statusline.ok { color:var(--ok) } .statusline.err { color:var(--err) } .statusline.warn { color:var(--warn) }
 
+/* Where the work is stored, when that is not the obvious answer. Persistent
+   rather than a toast: it is a standing property of the session, not an event. */
+#notice {
+  flex:none; padding:.4rem .9rem .3rem .9rem; font-size:.62rem;
+  letter-spacing:var(--tracking-wider); text-transform:uppercase;
+  color:var(--warn); border-bottom:1px solid var(--border); background:var(--bg);
+}
+#notice[hidden] { display:none }
+
 /* ── layout ─────────────────────────────────────────────────────────── */
 #workspace { flex:1; display:flex; min-height:0 }
 #sidebar  { width:230px; min-width:120px; display:flex; flex-direction:column; background:var(--bg-panel) }
