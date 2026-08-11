@@ -152,18 +152,48 @@ function readDirectory(root, dir = root, depth = 0, out = []) {
 
 /* ── the operations main.js exposes ──────────────────────────────────── */
 
+/**
+ * Identity of a file at a point in time, compared before a write to detect an
+ * edit made outside the app. Size alone would miss a same-length replacement;
+ * mtime alone can be too coarse on some filesystems. Both together are cheap.
+ */
+function stampOf(abs) {
+  const st = fs.statSync(abs);
+  return { mtime_ms: Math.floor(st.mtimeMs), size: st.size };
+}
+
 function readTextFile(root, rel) {
-  return fs.readFileSync(safePathInside(rel, root), 'utf8');
+  const abs = safePathInside(rel, root);
+  return { content: fs.readFileSync(abs, 'utf8'), stamp: stampOf(abs) };
 }
 
 function readBinaryFile(root, rel) {
   return fs.readFileSync(safePathInside(rel, root)).toString('base64');
 }
 
-function writeFile(root, rel, content) {
+/**
+ * Write, refusing if the file changed on disk since it was read.
+ *
+ * `expect` is the stamp taken at read time; null forces the write (the user was
+ * shown the conflict and chose to overwrite). The error is prefixed CONFLICT: so
+ * the caller can offer a real choice rather than a generic failure.
+ */
+function writeFile(root, rel, content, expect = null) {
   const abs = safePathInside(rel, root);
+
+  if (expect && fs.existsSync(abs)) {
+    const now = stampOf(abs);
+    if (now.mtime_ms !== expect.mtime_ms || now.size !== expect.size) {
+      throw new Error(
+        `CONFLICT:${rel} changed on disk since it was opened ` +
+        `(was ${expect.size} bytes, now ${now.size} bytes)`
+      );
+    }
+  }
+
   fs.mkdirSync(path.dirname(abs), { recursive: true });
   atomicWriteFile(abs, content);
+  return stampOf(abs);
 }
 
 /* ── crash backups ───────────────────────────────────────────────────── */
@@ -206,6 +236,6 @@ function discardBackup(backupDir, root, rel) {
 
 module.exports = {
   safePath, safePathInside, atomicWriteFile, isCrossDeviceErr, tmpFor,
-  readDirectory, readTextFile, readBinaryFile, writeFile,
+  readDirectory, readTextFile, readBinaryFile, writeFile, stampOf,
   writeBackup, listStaleBackups, discardBackup, backupKey
 };

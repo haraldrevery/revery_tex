@@ -280,7 +280,27 @@ async function saveAll() {
   setStatus(`saving ${pending.length} file(s)…`, 'warn');
   try {
     for (const [path, f] of pending) {
-      await NativeAPI.writeFile(path, f.content);
+      let stamp;
+      try {
+        stamp = await NativeAPI.writeFile(path, f.content, f.stamp || null);
+      } catch (err) {
+        const msg = String(err && err.message ? err.message : err);
+        if (!msg.includes('CONFLICT:')) throw err;
+        // Someone else changed this file since we opened it. Never silently
+        // pick a winner — the other copy may be the one that matters.
+        const choice = await resolveConflict(path, msg);
+        if (choice === 'cancel') { setStatus('save cancelled', 'warn'); return; }
+        if (choice === 'reload') {
+          const r = await NativeAPI.readTextFile(path);
+          f.content = r.content; f.stamp = r.stamp; f.dirty = false;
+          if (path === currentPath) openFile(path);
+          rawLog('wrn', `reloaded ${path} from disk, discarding local edits`);
+          continue;
+        }
+        stamp = await NativeAPI.writeFile(path, f.content, null);  // forced
+        rawLog('wrn', `overwrote ${path}, discarding the version on disk`);
+      }
+      f.stamp = stamp || f.stamp;
       f.dirty = false;
       // The backup exists to cover the window between edits and a save; once
       // the file is on disk it is noise, and would otherwise be offered for
@@ -294,6 +314,23 @@ async function saveAll() {
     setStatus(`✗ save failed: ${err}`, 'err');
     rawLog('err', `save failed: ${err}`);
   }
+}
+
+/**
+ * A conflict is a genuine choice, so it gets a real prompt rather than a toast.
+ * Defaulting either way loses somebody's work silently, which is the whole
+ * thing this check exists to prevent.
+ */
+async function resolveConflict(path, msg) {
+  const detail = msg.split('CONFLICT:').pop();
+  rawLog('err', `conflict: ${detail}`);
+  showTab('raw');
+  const overwrite = confirm(
+    `"${path}" changed on disk since you opened it.\n\n${detail}\n\n` +
+    `OK  — overwrite the file with your version\n` +
+    `Cancel — keep the version on disk and reload it (your edits are lost)`
+  );
+  return overwrite ? 'overwrite' : 'reload';
 }
 
 // Debounced, and only for the file being edited: this is a crash net, not a
@@ -414,7 +451,10 @@ async function loadProjects() {
     o.textContent = p.key;
     sel.appendChild(o);
   }
-  sel.onchange = () => loadProject(sel.value);
+  sel.onchange = () => {
+    if (!confirmDiscard('Switch project')) { sel.value = project ? project.key : sel.value; return; }
+    loadProject(sel.value);
+  };
   if (sel.value) await loadProject(sel.value);
 }
 
@@ -423,6 +463,7 @@ const TEXT_EXT_RE = /\.(tex|bib|cls|sty|bbl|ind|def|cfg|txt|clo|ltx)$/i;
 /** Open a real folder through NativeAPI. Desktop only for now. */
 async function openFolder() {
   if (!NativeAPI.openFolder) return;
+  if (!confirmDiscard('Open another folder')) return;
   let root;
   try {
     root = await NativeAPI.openFolder();
@@ -473,10 +514,15 @@ async function loadFromDisk(root) {
   for (const f of files) {
     const isText = TEXT_EXT_RE.test(f.path);
     try {
-      const content = isText
-        ? await NativeAPI.readTextFile(f.path)
-        : await NativeAPI.readBinaryFile(f.path);
-      project.files.set(f.path, { content, binary: !isText, dirty: false });
+      let content, stamp = null;
+      if (isText) {
+        const r = await NativeAPI.readTextFile(f.path);
+        content = r.content;
+        stamp = r.stamp;   // identity at read time; checked again before saving
+      } else {
+        content = await NativeAPI.readBinaryFile(f.path);
+      }
+      project.files.set(f.path, { content, binary: !isText, dirty: false, stamp });
       if (isText && /\.tex$/i.test(f.path) && /\\documentclass/.test(content)) {
         mainCandidates.push(f.path);
       }
@@ -692,6 +738,53 @@ draggable($('paneldiv'), (e) => {
   const h = Math.min(window.innerHeight - 160, Math.max(32, window.innerHeight - e.clientY));
   $('panel').style.height = h + 'px';
   $('panel').classList.remove('collapsed');
+});
+
+// ── unsaved-changes guard ──────────────────────────────────────────────
+// The crash backup covers a crash. It does not cover deliberately closing the
+// window or switching project, which until now discarded edits without a word.
+
+function unsavedWarning() {
+  const n = dirtyCount();
+  return n ? `${n} file${n > 1 ? 's have' : ' has'} unsaved changes.` : null;
+}
+
+window.addEventListener('beforeunload', (e) => {
+  const w = unsavedWarning();
+  if (!w) return;
+  e.preventDefault();
+  e.returnValue = w;   // browsers show their own wording; the flag is what counts
+  return w;
+});
+
+/** True if it is safe to discard the current buffers. */
+function confirmDiscard(action) {
+  const w = unsavedWarning();
+  if (!w) return true;
+  return confirm(`${w}\n\n${action} anyway? Your unsaved edits will be lost.`);
+}
+
+// ── global error surface ───────────────────────────────────────────────
+// Without this an unhandled rejection anywhere leaves the UI wedged with no
+// message: the compile button stays disabled and nothing says why.
+
+function reportCrash(kind, detail) {
+  try {
+    rawLog('err', `${kind}: ${detail}`);
+    setStatus(`✗ ${kind} — see Raw log`, 'err');
+    showTab('raw');
+  } catch {
+    // The reporter itself must never throw; fall back to the console.
+    console.error(kind, detail);
+  }
+}
+
+window.addEventListener('error', (e) => {
+  reportCrash('unexpected error', e.message + (e.filename ? ` (${e.filename}:${e.lineno})` : ''));
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const r = e.reason;
+  reportCrash('unhandled rejection', r && r.stack ? r.stack : String(r));
 });
 
 // ── boot ───────────────────────────────────────────────────────────────

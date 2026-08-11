@@ -71,7 +71,7 @@ test('write then read round-trips to disk', () => {
   const root = tmpdir('save');
   fs.writeFileSync(path.join(root, 'main.tex'), 'original');
   core.writeFile(root, 'main.tex', 'edited by the user');
-  assert.equal(core.readTextFile(root, 'main.tex'), 'edited by the user');
+  assert.equal(core.readTextFile(root, 'main.tex').content, 'edited by the user');
   // Bytes on disk, not just what our own code reads back.
   assert.equal(fs.readFileSync(path.join(root, 'main.tex'), 'utf8'), 'edited by the user');
   fs.rmSync(root, { recursive: true, force: true });
@@ -100,7 +100,7 @@ test('write refuses to escape the root, leaving the target untouched', () => {
 test('repeated saves keep the last write and leave no junk', () => {
   const root = tmpdir('save-repeat');
   for (let i = 0; i < 5; i++) core.writeFile(root, 'main.tex', `revision ${i}`);
-  assert.equal(core.readTextFile(root, 'main.tex'), 'revision 4');
+  assert.equal(core.readTextFile(root, 'main.tex').content, 'revision 4');
   const junk = fs.readdirSync(root).filter(f => /revery_(tmp|bak)/.test(f));
   assert.deepEqual(junk, [], `left behind: ${junk}`);
   fs.rmSync(root, { recursive: true, force: true });
@@ -140,6 +140,62 @@ test('backups round-trip and only surface when they differ from disk', () => {
   assert.equal(core.listStaleBackups(bdir, root).length, 0);
   fs.rmSync(root, { recursive: true, force: true });
   fs.rmSync(bdir, { recursive: true, force: true });
+});
+
+// ── conflict detection, mirroring the Rust cases exactly ────────────────
+const bump = () => { const t = Date.now(); while (Date.now() - t < 15); };
+
+test('write with a matching stamp succeeds', () => {
+  const root = tmpdir('stamp-ok');
+  fs.writeFileSync(path.join(root, 'main.tex'), 'original');
+  const r = core.readTextFile(root, 'main.tex');
+  core.writeFile(root, 'main.tex', 'mine', r.stamp);
+  assert.equal(fs.readFileSync(path.join(root, 'main.tex'), 'utf8'), 'mine');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('write refuses when the file changed underneath, and their work survives', () => {
+  const root = tmpdir('stamp-conflict');
+  fs.writeFileSync(path.join(root, 'main.tex'), 'original');
+  const r = core.readTextFile(root, 'main.tex');
+
+  bump();
+  fs.writeFileSync(path.join(root, 'main.tex'), 'their much longer edit');
+
+  assert.throws(() => core.writeFile(root, 'main.tex', 'mine', r.stamp), /^Error: CONFLICT:/);
+  assert.equal(fs.readFileSync(path.join(root, 'main.tex'), 'utf8'), 'their much longer edit');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('write with no stamp forces the overwrite', () => {
+  const root = tmpdir('stamp-force');
+  fs.writeFileSync(path.join(root, 'main.tex'), 'original');
+  core.readTextFile(root, 'main.tex');
+  bump();
+  fs.writeFileSync(path.join(root, 'main.tex'), 'theirs');
+  core.writeFile(root, 'main.tex', 'mine', null);
+  assert.equal(fs.readFileSync(path.join(root, 'main.tex'), 'utf8'), 'mine');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('a same-size edit is still caught', () => {
+  const root = tmpdir('stamp-samesize');
+  fs.writeFileSync(path.join(root, 'main.tex'), 'aaaa');
+  const r = core.readTextFile(root, 'main.tex');
+  bump();
+  fs.writeFileSync(path.join(root, 'main.tex'), 'bbbb');   // same length
+  assert.throws(() => core.writeFile(root, 'main.tex', 'cccc', r.stamp), /CONFLICT:/,
+    'size alone would have missed this');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('write returns a stamp usable for the next save', () => {
+  const root = tmpdir('stamp-chain');
+  const s1 = core.writeFile(root, 'main.tex', 'one');
+  // Or every second save would report a false conflict.
+  core.writeFile(root, 'main.tex', 'two', s1);
+  assert.equal(fs.readFileSync(path.join(root, 'main.tex'), 'utf8'), 'two');
+  fs.rmSync(root, { recursive: true, force: true });
 });
 
 test('backup keys are stable and distinct', () => {

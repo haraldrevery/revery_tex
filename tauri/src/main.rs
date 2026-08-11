@@ -288,21 +288,74 @@ fn walk(dir: &Path, root: &Path, out: &mut Vec<DirEntry>, depth: usize) -> Resul
    needs a live State and an AppHandle, so anything left inside one is only ever
    exercised by hand. What remains untested is Tauri's own IPC serialisation. */
 
-fn read_text_impl(path: &str, root: &Path) -> Result<String, String> {
-    let abs = safe_path_inside(&root.join(path).to_string_lossy(), root)?;
-    fs::read_to_string(&abs).map_err(|e| format!("Cannot read {path}: {e}"))
+/// Identity of a file at a point in time. Compared before a write to detect an
+/// edit made outside the app; mtime alone is not enough, because a same-second
+/// write of the same length is exactly the case a coarse filesystem hides.
+#[derive(Serialize, Clone, Debug)]
+struct FileStamp {
+    mtime_ms: u64,
+    size: u64,
 }
 
-fn write_file_impl(path: &str, content: &str, root: &Path) -> Result<(), String> {
+#[derive(Serialize, Debug)]
+struct FileRead {
+    content: String,
+    stamp: FileStamp,
+}
+
+fn stamp_of(abs: &Path) -> Result<FileStamp, String> {
+    let m = fs::metadata(abs).map_err(|e| format!("Cannot stat: {e}"))?;
+    let mtime_ms = m
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Ok(FileStamp { mtime_ms, size: m.len() })
+}
+
+fn read_text_impl(path: &str, root: &Path) -> Result<FileRead, String> {
     let abs = safe_path_inside(&root.join(path).to_string_lossy(), root)?;
+    let content = fs::read_to_string(&abs).map_err(|e| format!("Cannot read {path}: {e}"))?;
+    let stamp = stamp_of(&abs)?;
+    Ok(FileRead { content, stamp })
+}
+
+/// Write, refusing if the file changed on disk since it was read.
+///
+/// `expect` is the stamp taken at read time; None forces the write (the user
+/// chose "overwrite" after being told). The error is prefixed CONFLICT: so the
+/// caller can distinguish it from an IO failure and offer a real choice rather
+/// than a generic failure toast.
+fn write_file_impl(
+    path: &str,
+    content: &str,
+    root: &Path,
+    expect: Option<&FileStamp>,
+) -> Result<FileStamp, String> {
+    let abs = safe_path_inside(&root.join(path).to_string_lossy(), root)?;
+
+    if let Some(want) = expect {
+        if abs.exists() {
+            let now = stamp_of(&abs)?;
+            if now.mtime_ms != want.mtime_ms || now.size != want.size {
+                return Err(format!(
+                    "CONFLICT:{path} changed on disk since it was opened                      (was {} bytes, now {} bytes)",
+                    want.size, now.size
+                ));
+            }
+        }
+    }
+
     if let Some(parent) = abs.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
     }
-    atomic_write_file(&tmp_for(&abs), &abs, content.as_bytes())
+    atomic_write_file(&tmp_for(&abs), &abs, content.as_bytes())?;
+    stamp_of(&abs)
 }
 
 #[tauri::command]
-fn read_text_file(path: String, state: State<'_, RootPath>) -> Result<String, String> {
+fn read_text_file(path: String, state: State<'_, RootPath>) -> Result<FileRead, String> {
     read_text_impl(&path, &get_root(&state)?)
 }
 
@@ -316,9 +369,18 @@ fn read_binary_file(path: String, state: State<'_, RootPath>) -> Result<String, 
     Ok(STANDARD.encode(bytes))
 }
 
+#[derive(serde::Deserialize)]
+struct ExpectStamp { mtime_ms: u64, size: u64 }
+
 #[tauri::command]
-fn write_file(path: String, content: String, state: State<'_, RootPath>) -> Result<(), String> {
-    write_file_impl(&path, &content, &get_root(&state)?)
+fn write_file(
+    path: String,
+    content: String,
+    expect: Option<ExpectStamp>,
+    state: State<'_, RootPath>,
+) -> Result<FileStamp, String> {
+    let want = expect.map(|e| FileStamp { mtime_ms: e.mtime_ms, size: e.size });
+    write_file_impl(&path, &content, &get_root(&state)?, want.as_ref())
 }
 
 /* ── crash backups ───────────────────────────────────────────────────── */
@@ -546,8 +608,8 @@ mod tests {
         let root = tmpdir("save");
         fs::write(root.join("main.tex"), b"original").unwrap();
 
-        write_file_impl("main.tex", "edited by the user", &root).unwrap();
-        assert_eq!(read_text_impl("main.tex", &root).unwrap(), "edited by the user");
+        write_file_impl("main.tex", "edited by the user", &root, None).unwrap();
+        assert_eq!(read_text_impl("main.tex", &root).unwrap().content, "edited by the user");
         // Bytes on disk, not just what we read back through our own code.
         assert_eq!(fs::read_to_string(root.join("main.tex")).unwrap(), "edited by the user");
         assert!(!root.join("main.tex.revery_tmp").exists(), "temp must not survive");
@@ -557,7 +619,7 @@ mod tests {
     #[test]
     fn write_creates_missing_subdirectories() {
         let root = tmpdir("save-nested");
-        write_file_impl("chapters/new/intro.tex", "hello", &root).unwrap();
+        write_file_impl("chapters/new/intro.tex", "hello", &root, None).unwrap();
         assert_eq!(fs::read_to_string(root.join("chapters/new/intro.tex")).unwrap(), "hello");
         fs::remove_dir_all(&root).ok();
     }
@@ -569,7 +631,7 @@ mod tests {
         fs::write(outside.join("victim.tex"), b"do not touch").unwrap();
 
         let rel = format!("../{}/victim.tex", outside.file_name().unwrap().to_string_lossy());
-        assert!(write_file_impl(&rel, "pwned", &root).is_err());
+        assert!(write_file_impl(&rel, "pwned", &root, None).is_err());
         assert_eq!(fs::read_to_string(outside.join("victim.tex")).unwrap(), "do not touch");
         fs::remove_dir_all(&root).ok();
         fs::remove_dir_all(&outside).ok();
@@ -590,15 +652,81 @@ mod tests {
     fn repeated_saves_keep_the_last_write() {
         let root = tmpdir("save-repeat");
         for i in 0..5 {
-            write_file_impl("main.tex", &format!("revision {i}"), &root).unwrap();
+            write_file_impl("main.tex", &format!("revision {i}"), &root, None).unwrap();
         }
-        assert_eq!(read_text_impl("main.tex", &root).unwrap(), "revision 4");
+        assert_eq!(read_text_impl("main.tex", &root).unwrap().content, "revision 4");
         // No .revery_tmp or .revery_bak left lying around after five writes.
         let junk: Vec<_> = fs::read_dir(&root).unwrap().flatten()
             .map(|e| e.file_name().to_string_lossy().to_string())
             .filter(|n| n.contains("revery_tmp") || n.contains("revery_bak"))
             .collect();
         assert!(junk.is_empty(), "left behind: {junk:?}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    // ── conflict detection ─────────────────────────────────────────────
+    #[test]
+    fn write_with_matching_stamp_succeeds() {
+        let root = tmpdir("stamp-ok");
+        fs::write(root.join("main.tex"), b"original").unwrap();
+        let r = read_text_impl("main.tex", &root).unwrap();
+        write_file_impl("main.tex", "mine", &root, Some(&r.stamp)).unwrap();
+        assert_eq!(fs::read_to_string(root.join("main.tex")).unwrap(), "mine");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn write_refuses_when_the_file_changed_underneath() {
+        let root = tmpdir("stamp-conflict");
+        fs::write(root.join("main.tex"), b"original").unwrap();
+        let r = read_text_impl("main.tex", &root).unwrap();
+
+        // Someone else edits it — another editor, a git checkout, a sync client.
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        fs::write(root.join("main.tex"), b"their much longer edit").unwrap();
+
+        let err = write_file_impl("main.tex", "mine", &root, Some(&r.stamp)).unwrap_err();
+        assert!(err.starts_with("CONFLICT:"), "got: {err}");
+        // Their work must survive the refusal.
+        assert_eq!(fs::read_to_string(root.join("main.tex")).unwrap(), "their much longer edit");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn write_with_no_stamp_forces_the_overwrite() {
+        let root = tmpdir("stamp-force");
+        fs::write(root.join("main.tex"), b"original").unwrap();
+        let r = read_text_impl("main.tex", &root).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        fs::write(root.join("main.tex"), b"theirs").unwrap();
+
+        // None = the user was shown the conflict and chose to overwrite.
+        write_file_impl("main.tex", "mine", &root, None).unwrap();
+        assert_eq!(fs::read_to_string(root.join("main.tex")).unwrap(), "mine");
+        let _ = r;
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn same_size_edit_is_still_caught() {
+        let root = tmpdir("stamp-samesize");
+        fs::write(root.join("main.tex"), b"aaaa").unwrap();
+        let r = read_text_impl("main.tex", &root).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        fs::write(root.join("main.tex"), b"bbbb").unwrap();   // same length
+        let err = write_file_impl("main.tex", "cccc", &root, Some(&r.stamp)).unwrap_err();
+        assert!(err.starts_with("CONFLICT:"), "size alone would have missed this");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn write_returns_a_stamp_usable_for_the_next_save() {
+        let root = tmpdir("stamp-chain");
+        let s1 = write_file_impl("main.tex", "one", &root, None).unwrap();
+        // The returned stamp must satisfy the next write, or every second save
+        // would report a false conflict.
+        write_file_impl("main.tex", "two", &root, Some(&s1)).unwrap();
+        assert_eq!(fs::read_to_string(root.join("main.tex")).unwrap(), "two");
         fs::remove_dir_all(&root).ok();
     }
 

@@ -21,7 +21,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   readDirectory: () => call('fs:readDirectory'),
   readTextFile: (path) => call('fs:readTextFile', path),
   readBinaryFile: (path) => call('fs:readBinaryFile', path),
-  writeFile: (path, content) => call('fs:writeFile', path, content),
+  writeFile: (path, content, expect) => call('fs:writeFile', path, content, expect),
   writeBackup: (path, content) => call('fs:writeBackup', path, content),
   listStaleBackups: () => call('fs:listStaleBackups'),
   discardBackup: (path) => call('fs:discardBackup', path)
