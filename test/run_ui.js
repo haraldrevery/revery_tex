@@ -101,14 +101,28 @@ async function main() {
       };
     })()`);
 
+    // Derived from the schema rather than hardcoded: the invariant is "a row
+    // per setting", and a count that has to be bumped by hand is a count that
+    // gets bumped without anyone checking what it now means.
+    const schema = await cdp.evaluate(`(async () => {
+      const s = await import('./jvscrpt_and_css_extra/settings.js');
+      return {
+        headed: s.SCHEMA.filter(e => e.key !== 'theme' && e.key !== 'engineSource').length,
+        radios: s.SCHEMA.filter(e => e.key !== 'theme' && e.key !== 'engineSource' && !e.ui).length
+      };
+    })()`, true);
+
     check('menu opens', opened.open);
-    // Seven headed rows plus the theme submenu trigger, which has no head.
+    // One head per setting, plus the theme submenu trigger, which has none.
+    // engineSource is hidden where no process can be started, which is every
+    // browser — see settingsMenuSpec.
     check('has a row per setting',
-      opened.heads.length === 7 && opened.subTriggers === 1, opened.heads.join(' · '));
+      opened.heads.length === schema.headed && opened.subTriggers === 1,
+      `${opened.heads.length} of ${schema.headed}: ${opened.heads.join(' · ')}`);
     // Scales are steppers and theme is a submenu, so only the remaining
     // list-style settings carry a ■ in the top level.
     check('marks one choice per top-level list setting',
-      opened.checked.length === 5,
+      opened.checked.length === schema.radios,
       `${opened.checked.length} marked: ${opened.checked.join(' | ')}`);
     check('scales render as steppers', opened.steppers === 2, `${opened.steppers} steppers`);
     check('theme is a submenu', opened.subTriggers === 1, `${opened.subTriggers} triggers`);
@@ -457,6 +471,33 @@ async function main() {
       escaped.closed && escaped.unchanged, JSON.stringify(escaped));
 
     /* ── toolbox and right-click formatting ─────────────────────────── */
+    // Off by default: the browser's own menu, which carries spellcheck and
+    // clipboard, must survive until someone turns the Toolbox on.
+    const offByDefault = await cdp.evaluate(`(() => {
+      const view = window.__reveryTexTest.view();
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: 'select me' } });
+      view.dispatch({ selection: { anchor: 0, head: 6 } });
+      const target = document.querySelector('.cm-content');
+      const r = target.getBoundingClientRect();
+      const ev = new MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true, clientX: r.left + 40, clientY: r.top + 20 });
+      target.dispatchEvent(ev);
+      return { prevented: ev.defaultPrevented,
+               stored: JSON.parse(localStorage.getItem('revery_tex_settings') || '{}').contextToolbox };
+    })()`, true);
+    check('right-click gives the browser its menu by default',
+      !offByDefault.prevented, `setting: ${offByDefault.stored ?? '(default)'}`);
+
+    // Turn it on through the settings menu, the way a user would.
+    await cdp.evaluate(`(() => {
+      document.getElementById('settings').click();
+      const row = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /Toolbox$/.test(b.textContent.trim()));
+      row.click();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return !!row;
+    })()`);
+
     const fmt = await cdp.evaluate(`(async () => {
       const app = window.__reveryTexApp;
       const view = window.__reveryTexTest.view();
@@ -489,12 +530,15 @@ async function main() {
       bold()?.click();
       const twice = doc();
 
-      // With nothing selected the browser's own menu must survive.
+      // Turned on it opens with nothing selected too: the formatting rows
+      // insert an empty \\textbf{} with the cursor inside, which is what
+      // "make the next thing bold" means.
       select(3, 3);
       const ev = new MouseEvent('contextmenu', {
         bubbles: true, cancelable: true, clientX: r.left + 40, clientY: r.top + 20 });
       target.dispatchEvent(ev);
-      const suppressedWithNoSelection = ev.defaultPrevented;
+      const openedWithNoSelection = ev.defaultPrevented
+        && !!document.querySelector('.menu-container:not([hidden])');
 
       // …and so must it outside the editor entirely.
       const outside = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
@@ -515,7 +559,7 @@ async function main() {
 
       return {
         opened: !!menu, labels, once, twice,
-        suppressedWithNoSelection, suppressedOutside: outside.defaultPrevented,
+        openedWithNoSelection, suppressedOutside: outside.defaultPrevented,
         baseline, after
       };
     })()`, true);
@@ -530,7 +574,8 @@ async function main() {
       fmt.twice === 'make this bold please', JSON.stringify(fmt.twice));
     // The native menu carries spellcheck, clipboard and Look Up; replacing it
     // with four items nobody asked for is a downgrade.
-    check('the native menu survives with no selection', !fmt.suppressedWithNoSelection);
+    check('turned on, it opens with no selection too', fmt.openedWithNoSelection);
+    // Outside the editor the browser's menu is never touched, either way.
     check('the native menu survives outside the editor', !fmt.suppressedOutside);
     // A transient menu that is not removed leaves a dead <div> per right-click.
     check('context menus do not accumulate', fmt.after === fmt.baseline,

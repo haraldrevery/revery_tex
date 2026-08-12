@@ -113,6 +113,17 @@ export const SCHEMA = [
     options: [{ label: 'On', value: true }, { label: 'Off', value: false }]
   },
   {
+    // The browser's own menu by default, as in Revery Notebook. Taking it over
+    // costs spellcheck suggestions, clipboard access and Look Up — real things,
+    // and not obviously worth trading for a menu that also sits in the topbar.
+    // Off by default means nobody loses them without choosing to.
+    key: 'contextToolbox', label: 'Right-click menu', def: 'browser', appliedBy: 'app',
+    options: [
+      { label: 'Browser menu', value: 'browser' },
+      { label: 'Toolbox', value: 'toolbox' }
+    ]
+  },
+  {
     // Bundled is the default because it always works: no install, no PATH, the
     // same result on every machine. A system TeX is the escape hatch for the
     // two things WASM cannot do — biber, and packages outside the slim bundle.

@@ -66,11 +66,12 @@ rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-t
 │    document_model.js            the one index — nothing else scans the text  │
 │    latex_snippets.js            pure text transforms (wrap, insert, label)   │
 │    editor_actions.js            snippet → CodeMirror edit; shared menu rows  │
-│    outline.js                   sections → sidebar tree, in \include order   │
+│    outline.js                   sections → its own pane, in \include order  │
 │    toolbox.js                   what the Toolbox and right-click menus offer │
 │    table_builder.js             grid → tabular; pure, no DOM                 │
 │    dialog.js                    modal shell + form with a live preview       │
 │    picker.js                    lazy card strip: figures, by thumbnail       │
+│    file_tree.js                 paths → a nested tree; pure, no DOM          │
 │    math_preview.js              KaTeX, loaded on first use                   │
 │    katex/                       vendored — see build_tools/vendor_assets.js  │
 │    settings.js                  one declarative table: load, apply, menu     │

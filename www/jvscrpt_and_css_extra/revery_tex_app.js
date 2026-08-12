@@ -123,14 +123,18 @@ attachMenu($('toolbox'), () => toolboxRows({ view: () => view, project: () => pr
 /**
  * Right-click inside the editor.
  *
- * Only over the editor, and only when something is selected — everywhere else
- * the browser's own menu is better than ours, and swallowing it costs
- * spellcheck suggestions, clipboard access and Look Up. A context menu that
- * replaces those with four items nobody wanted is a downgrade.
+ * Off by default, and a setting, because taking over the context menu costs
+ * spellcheck suggestions, clipboard access and Look Up — and the same actions
+ * are already one click away in the topbar. Turned on, it opens for any
+ * right-click in the editor, selection or not: the formatting rows act on the
+ * selection when there is one, and insert an empty `\textbf{}` with the cursor
+ * inside when there is not.
+ *
+ * Outside the editor the browser's menu is never touched, either way.
  */
 document.addEventListener('contextmenu', (e) => {
+  if (settings.settings.contextToolbox !== 'toolbox') return;
   if (!view || !$('editor').contains(e.target)) return;
-  if (view.state.selection.main.empty) return;
   e.preventDefault();
   openMenuAt(e.clientX, e.clientY,
     () => contextRows({ view: () => view, project: () => project }));
