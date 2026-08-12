@@ -9,22 +9,7 @@
 // reason \underline is not silently upgraded to soul's \ul: an editor that adds
 // \usepackage lines behind your back is an editor you cannot trust with a file.
 
-/**
- * Escape the characters that are always wrong in running text.
- *
- * Only `% & # _`, and only outside `$…$`. Those four are never intended
- * literally — `%` silently comments away the rest of the caption, which is the
- * worst kind of failure because the document still compiles. `\ { } $ ^` are
- * left alone so `\emph{x}` and `$x^2$` typed into the caption box still work,
- * which is the whole reason for the maths carve-out.
- */
-export function escapeCaption(s) {
-  return String(s ?? '')
-    .split(/(\$[^$]*\$)/g)
-    // A capturing split puts the maths parts at the odd indices.
-    .map((part, i) => (i % 2 ? part : part.replace(/\\?([%&#_])/g, (_, c) => `\\${c}`)))
-    .join('');
-}
+import { escapeCaption } from './latex_snippets.js';
 
 /** `align` widened to `cols` columns, repeating its last character. */
 function columnSpec(align, cols, verticals) {

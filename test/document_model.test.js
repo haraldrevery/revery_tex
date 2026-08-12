@@ -203,6 +203,24 @@ test('\\bibitem keys count as citations', async () => {
   assert.deepEqual(ix.citations, ['manual99']);
 });
 
+/* ── graphics resolution ─────────────────────────────────────────────── */
+
+test('an \\includegraphics argument resolves to a real file', async () => {
+  const { resolveGraphic } = await mod();
+  const p = project({
+    'main.tex': 'x',
+    'img/plot.png': new Uint8Array([1]),
+    'logo/IMG-2867.JPG': new Uint8Array([2])
+  });
+  // The extension is usually left off — TeX picks it.
+  assert.equal(resolveGraphic(p, 'img/plot'), 'img/plot.png');
+  assert.equal(resolveGraphic(p, './img/plot.png'), 'img/plot.png');
+  // \graphicspath means the argument may not name the directory at all, and
+  // case differs between the source and the file on a Linux checkout.
+  assert.equal(resolveGraphic(p, 'img-2867'), 'logo/IMG-2867.JPG');
+  assert.equal(resolveGraphic(p, 'nothing-like-this'), null);
+});
+
 /* ── images and macros ───────────────────────────────────────────────── */
 
 test('binary files with image extensions are listed', async () => {

@@ -7,11 +7,12 @@
 // Everything here reads the one index and writes through editor_actions, so no
 // feature in this menu scans project text or touches CodeMirror directly.
 
-import { projectIndex, environmentsOfKind } from './document_model.js';
+import { projectIndex, environmentsOfKind, resolveGraphic } from './document_model.js';
 import { formattingRows, insertBlockAtCursor, insertReference } from './editor_actions.js';
 import { tableBlock, availableRules } from './table_builder.js';
-import { slug, uniqueLabel } from './latex_snippets.js';
+import { slug, uniqueLabel, figureBlock } from './latex_snippets.js';
 import { openDialog } from './dialog.js';
+import { openPicker } from './picker.js';
 
 /** One line of an environment's source, for the tooltip on a reference row. */
 function snippet(env, lines = 3) {
@@ -86,6 +87,132 @@ function tableReferenceRow(view, project) {
   };
 }
 
+/* ── figures ─────────────────────────────────────────────────────────── */
+
+const MIME = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  bmp: 'image/bmp', webp: 'image/webp', svg: 'image/svg+xml', pdf: 'application/pdf'
+};
+
+/** A filename as a first draft of a caption: `chalmers_logo.png` → `Chalmers logo`. */
+export function captionFromPath(path) {
+  const base = (path.split('/').pop() || '').replace(/\.[^.]+$/, '');
+  const words = base.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return words ? words[0].toUpperCase() + words.slice(1) : '';
+}
+
+/**
+ * The images worth offering as figures.
+ *
+ * A `.pdf` beside a `.tex` of the same name is that document's own compiled
+ * output — every fixture here has several — and offering `main.pdf` as an
+ * illustration for `main.tex` is never what anyone meant.
+ */
+export function figureCandidates(project, index) {
+  return index.images.filter(img => {
+    if (!/\.pdf$/i.test(img.path)) return true;
+    return !project.files.has(img.path.replace(/\.pdf$/i, '.tex'));
+  });
+}
+
+/** Draw an image file into a card, from the bytes already in memory. */
+function paintThumb(project, path, mount, blobUrl) {
+  const file = project.files.get(path);
+  const ext = (path.split('.').pop() || '').toLowerCase();
+  // A PDF figure cannot go in an <img>. Rendering it would mean a second pdf.js
+  // instance for a thumbnail; the extension is more honest than a broken image.
+  if (!file || ext === 'pdf' || !file.content || typeof file.content === 'string') {
+    mount.classList.add('picker-noimage');
+    mount.textContent = ext.toUpperCase() || 'FILE';
+    return;
+  }
+  const img = document.createElement('img');
+  img.loading = 'lazy';
+  img.alt = path;
+  img.src = blobUrl(file.content, MIME[ext] || 'application/octet-stream');
+  img.onerror = () => { mount.classList.add('picker-noimage'); mount.textContent = ext.toUpperCase(); };
+  mount.appendChild(img);
+}
+
+function insertFigurePicker(view, project) {
+  const p = project();
+  const ix = projectIndex(p);
+  const images = figureCandidates(p, ix);
+
+  openPicker({
+    title: 'Insert figure',
+    items: images,
+    text: (img) => img.path,
+    label: (img) => img.path.split('/').pop(),
+    preview: (img, mount, { blobUrl }) => paintThumb(p, img.path, mount, blobUrl),
+    empty: 'no image files in this project',
+    onPick: (img) => {
+      const caption = captionFromPath(img.path);
+      insertBlockAtCursor(view(), figureBlock({
+        path: img.path,
+        caption,
+        label: uniqueLabel(`fig:${slug(img.path)}`, ix.labels)
+      }));
+    }
+  });
+}
+
+function referenceFigurePicker(view, project) {
+  const p = project();
+  const figures = environmentsOfKind(p, 'figure').filter(f => f.label);
+
+  openPicker({
+    title: 'Reference a figure',
+    items: figures,
+    text: (f) => `${f.caption ? f.caption.replace(/\s+/g, ' ') : ''} ${f.label}`.trim(),
+    label: (f) => (f.caption ? f.caption.replace(/\s+/g, ' ') : f.label),
+    preview: (f, mount, { blobUrl }) => {
+      const path = resolveGraphic(p, f.graphic);
+      if (!path) { mount.classList.add('picker-noimage'); mount.textContent = 'no image'; return; }
+      paintThumb(p, path, mount, blobUrl);
+    },
+    empty: 'no labelled figures to reference',
+    onPick: (f) => insertReference(view(), 'figure', f.label)
+  });
+}
+
+/* ── citations ───────────────────────────────────────────────────────── */
+
+/** `Smith, Jane and Doe, John` → `Smith et al.` — enough to tell entries apart. */
+export function citationRowLabel(entry) {
+  const first = (entry.author || '').split(' and ')[0].split(',')[0].trim();
+  const many = (entry.author || '').includes(' and ');
+  const who = first ? `${first}${many ? ' et al.' : ''}` : entry.key;
+  const year = entry.year ? ` ${entry.year}` : '';
+  const title = (entry.title || '').replace(/\s+/g, ' ');
+  const head = `${who}${year}`;
+  return title ? `${head} — ${title.slice(0, 40)}${title.length > 40 ? '…' : ''}` : head;
+}
+
+function citationRow(view, project) {
+  const ix = projectIndex(project());
+  // Entries with parsed fields first; a \bibitem key with no metadata is still
+  // citable, so keys without an entry are appended rather than dropped.
+  const known = new Set(ix.bib.map(b => b.key));
+  const entries = [
+    ...ix.bib,
+    ...ix.citations.filter(k => !known.has(k)).map(key => ({ key, author: '', title: '', year: '' }))
+  ];
+
+  if (!entries.length) return { type: 'note', label: 'no bibliography entries found' };
+
+  return {
+    type: 'submenu',
+    label: 'Insert citation',
+    hint: String(entries.length),
+    actions: entries.map(e => ({
+      label: citationRowLabel(e),
+      title: `${e.key}${e.title ? `\n\n${e.title}` : ''}${e.author ? `\n${e.author}` : ''}`,
+      run: () => insertReference(view(), 'citation', e.key)
+    }))
+  };
+}
+
 /**
  * The insert half of the menu — everything that puts new LaTeX in the document.
  *
@@ -93,8 +220,11 @@ function tableReferenceRow(view, project) {
  */
 export function insertRows({ view, project }) {
   return [
+    { type: 'action', label: 'Insert figure…', run: () => insertFigurePicker(view, project) },
+    { type: 'action', label: 'Reference a figure…', run: () => referenceFigurePicker(view, project) },
     { type: 'action', label: 'Insert table…', run: () => insertTableDialog(view, project) },
-    tableReferenceRow(view, project)
+    tableReferenceRow(view, project),
+    citationRow(view, project)
   ];
 }
 

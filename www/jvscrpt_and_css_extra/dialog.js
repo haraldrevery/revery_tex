@@ -30,27 +30,26 @@ export function dialogIsOpen() {
 }
 
 /**
- * @param {object} opts
- * @param {string} opts.title
- * @param {Array<object>} opts.fields
- * @param {(values: object) => string} [opts.preview]  text shown, live
- * @param {string} [opts.submitLabel]
- * @param {(values: object) => void} opts.onSubmit
- * @param {(values: object, key: string) => object} [opts.onChange]  derive fields
- *        from each other — the label field following the caption, say
+ * The modal shell: backdrop, title, Escape, focus trap, focus restored on close.
+ *
+ * Everything modal in the app goes through this — the table form below and the
+ * figure picker in picker.js — so there is one answer to "what does Escape do"
+ * and one place that remembers where focus came from.
+ *
+ * @param {{title: string, className?: string, onClose?: () => void,
+ *          onKey?: (e: KeyboardEvent) => boolean}} opts
+ *        onKey returns true when it has handled the key.
+ * @returns {{panel: HTMLElement, body: HTMLElement, foot: HTMLElement, close: () => void}}
  */
-export function openDialog({ title, fields, preview, submitLabel = 'Insert', onSubmit, onChange }) {
+export function openModal({ title, className = 'dlg', onClose, onKey }) {
   closeDialog();
   closeAllMenus();
-
-  const values = {};
-  for (const f of fields) values[f.key] = f.def;
 
   const back = document.createElement('div');
   back.className = 'dlg-backdrop';
 
   const panel = document.createElement('div');
-  panel.className = 'dlg';
+  panel.className = className;
   panel.setAttribute('role', 'dialog');
   panel.setAttribute('aria-modal', 'true');
   panel.setAttribute('aria-label', title);
@@ -63,6 +62,75 @@ export function openDialog({ title, fields, preview, submitLabel = 'Insert', onS
   const body = document.createElement('div');
   body.className = 'dlg-body';
   panel.appendChild(body);
+
+  const foot = document.createElement('div');
+  foot.className = 'dlg-foot';
+
+  back.appendChild(panel);
+  document.body.appendChild(back);
+
+  // Where focus was, so it can go back. A dialog that dumps you on <body> when
+  // it closes costs a keyboard user their place in the document.
+  const returnTo = document.activeElement;
+
+  function close() {
+    if (current !== api) return;
+    current = null;
+    document.removeEventListener('keydown', keyHandler, true);
+    back.remove();
+    if (onClose) onClose();
+    if (returnTo && returnTo.isConnected) returnTo.focus();
+  }
+
+  function keyHandler(e) {
+    if (onKey && onKey(e)) return;
+    if (e.key === 'Escape') { e.stopPropagation(); close(); return; }
+    if (e.key !== 'Tab') return;
+    // Trap: Tab out of the last control goes to the first, not to the page
+    // behind the backdrop, which is inert but still focusable.
+    const focusable = [...panel.querySelectorAll('input, button')].filter(n => !n.disabled);
+    if (!focusable.length) return;
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  }
+
+  // Capture, so Escape reaches this before CodeMirror's own key handling.
+  document.addEventListener('keydown', keyHandler, true);
+  back.addEventListener('mousedown', (e) => { if (e.target === back) close(); });
+
+  const api = { panel, body, foot, close };
+  current = api;
+  return api;
+}
+
+/**
+ * A form.
+ *
+ * @param {object} opts
+ * @param {string} opts.title
+ * @param {Array<object>} opts.fields
+ * @param {(values: object) => string} [opts.preview]  text shown, live
+ * @param {string} [opts.submitLabel]
+ * @param {(values: object) => void} opts.onSubmit
+ * @param {(values: object, key: string) => object} [opts.onChange]  derive fields
+ *        from each other — the label field following the caption, say
+ */
+export function openDialog({ title, fields, preview, submitLabel = 'Insert', onSubmit, onChange }) {
+  const values = {};
+  for (const f of fields) values[f.key] = f.def;
+
+  const modal = openModal({
+    title,
+    onKey: (e) => {
+      // Enter in a text box means "do it", the way it does in every other form.
+      if (e.key === 'Enter' && e.target.tagName === 'INPUT' && e.target.type !== 'checkbox') {
+        e.preventDefault(); submit.click(); return true;
+      }
+      return false;
+    }
+  });
+  const { panel, body, foot, close } = modal;
 
   const pre = preview ? document.createElement('pre') : null;
   if (pre) pre.className = 'dlg-preview';
@@ -146,8 +214,6 @@ export function openDialog({ title, fields, preview, submitLabel = 'Insert', onS
     panel.appendChild(pre);
   }
 
-  const foot = document.createElement('div');
-  foot.className = 'dlg-foot';
   const cancel = document.createElement('button');
   cancel.type = 'button';
   cancel.textContent = 'Cancel';
@@ -160,42 +226,6 @@ export function openDialog({ title, fields, preview, submitLabel = 'Insert', onS
   foot.append(cancel, submit);
   panel.appendChild(foot);
 
-  back.appendChild(panel);
-  document.body.appendChild(back);
-
-  // Where focus was, so it can go back. A dialog that dumps you on <body> when
-  // it closes costs a keyboard user their place in the document.
-  const returnTo = document.activeElement;
-
-  function close() {
-    if (current !== api) return;
-    current = null;
-    document.removeEventListener('keydown', onKey, true);
-    back.remove();
-    if (returnTo && returnTo.isConnected) returnTo.focus();
-  }
-
-  function onKey(e) {
-    if (e.key === 'Escape') { e.stopPropagation(); close(); return; }
-    if (e.key === 'Enter' && e.target.tagName === 'INPUT' && e.target.type !== 'checkbox') {
-      e.preventDefault(); submit.click(); return;
-    }
-    if (e.key !== 'Tab') return;
-    // Trap: Tab out of the last control goes to the first, not to the page
-    // behind the backdrop, which is inert but still focusable.
-    const focusable = [...panel.querySelectorAll('input, button')].filter(n => !n.disabled);
-    if (!focusable.length) return;
-    const first = focusable[0], last = focusable[focusable.length - 1];
-    if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-    else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-  }
-
-  // Capture, so Escape reaches this before CodeMirror's own key handling.
-  document.addEventListener('keydown', onKey, true);
-  back.addEventListener('mousedown', (e) => { if (e.target === back) close(); });
-
-  const api = { close, panel, values };
-  current = api;
   panel.querySelector('input, button')?.focus();
-  return api;
+  return modal;
 }

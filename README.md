@@ -69,7 +69,8 @@ rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-t
 │    outline.js                   sections → sidebar tree, in \include order   │
 │    toolbox.js                   what the Toolbox and right-click menus offer │
 │    table_builder.js             grid → tabular; pure, no DOM                 │
-│    dialog.js                    modal form with a live preview               │
+│    dialog.js                    modal shell + form with a live preview       │
+│    picker.js                    lazy card strip: figures, by thumbnail       │
 │    settings.js                  one declarative table: load, apply, menu     │
 │    menus.js                     dropdown component (radio, stepper, action)  │
 │    settings_boot.js             pre-paint theme, so there is no flash        │

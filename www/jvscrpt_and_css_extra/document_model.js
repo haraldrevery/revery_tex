@@ -307,6 +307,31 @@ export function projectIndex(project) {
   return cache.data;
 }
 
+/**
+ * The project file an `\includegraphics{…}` argument refers to, or null.
+ *
+ * The extension is usually omitted — TeX picks it — and `\graphicspath` can put
+ * the file somewhere the argument does not name, so a basename match is the
+ * last resort. Getting this wrong costs a missing thumbnail, never a wrong
+ * document: nothing here decides what is compiled.
+ */
+export function resolveGraphic(project, ref) {
+  if (!project || !ref) return null;
+  const cleaned = String(ref).replace(/^\.\//, '').trim();
+  if (!cleaned) return null;
+  for (const ext of ['', '.png', '.jpg', '.jpeg', '.pdf', '.gif', '.bmp', '.webp', '.svg']) {
+    if (project.files.has(cleaned + ext)) return cleaned + ext;
+  }
+  // Case matters on Linux and not on macOS, and fixtures contain both
+  // `img-2867.JPG` and `logo.png`, so the fallback compares case-insensitively.
+  const base = (cleaned.split('/').pop() || '').toLowerCase();
+  for (const path of project.files.keys()) {
+    const name = (path.split('/').pop() || '').toLowerCase();
+    if (name === base || name.replace(/\.[^.]+$/, '') === base) return path;
+  }
+  return null;
+}
+
 /** Environments of one kind, in document order. */
 export const environmentsOfKind = (project, kind) =>
   projectIndex(project).environments.filter(e => e.kind === kind);

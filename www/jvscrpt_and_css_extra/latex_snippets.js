@@ -122,6 +122,23 @@ export function reference(kind, key, at) {
 }
 
 /**
+ * Escape the characters that are always wrong in running text.
+ *
+ * Only `% & # _`, and only outside `$…$`. Those four are never intended
+ * literally — `%` silently comments away the rest of the caption, which is the
+ * worst kind of failure because the document still compiles. `\ { } $ ^` are
+ * left alone so `\emph{x}` and `$x^2$` typed into the caption box still work,
+ * which is the whole reason for the maths carve-out.
+ */
+export function escapeCaption(s) {
+  return String(s ?? '')
+    .split(/(\$[^$]*\$)/g)
+    // A capturing split puts the maths parts at the odd indices.
+    .map((part, i) => (i % 2 ? part : part.replace(/\\?([%&#_])/g, (_, c) => `\\${c}`)))
+    .join('');
+}
+
+/**
  * A figure block around an image file.
  * `width=0.8\linewidth` rather than a bare include: an unscaled photograph
  * overflowing the text block is the single most common LaTeX surprise.
@@ -131,7 +148,7 @@ export function figureBlock({ path, caption = '', label }) {
     '\\begin{figure}[htbp]',
     '  \\centering',
     `  \\includegraphics[width=0.8\\linewidth]{${path}}`,
-    `  \\caption{${caption}}`,
+    `  \\caption{${escapeCaption(caption)}}`,
     `  \\label{${label}}`,
     '\\end{figure}'
   ].join('\n');

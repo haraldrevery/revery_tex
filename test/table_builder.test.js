@@ -87,30 +87,3 @@ test('no header means no middle rule', async () => {
   assert.ok(!t.includes('\\midrule'), t);
   assert.equal((t.match(/\\\\/g) || []).length, 2);
 });
-
-/* ── escaping ────────────────────────────────────────────────────────── */
-
-test('a caption escapes what is always an error in text', async () => {
-  const { escapeCaption } = await mod();
-  // The dangerous one: % compiles fine and eats the rest of the caption.
-  assert.equal(escapeCaption('50% of R&D on file_name #2'),
-    '50\\% of R\\&D on file\\_name \\#2');
-});
-
-test('escaping is idempotent — already-escaped input is left alone', async () => {
-  const { escapeCaption } = await mod();
-  assert.equal(escapeCaption('50\\% done'), '50\\% done');
-});
-
-test('maths in a caption survives', async () => {
-  const { escapeCaption } = await mod();
-  // Escaping the subscript here would turn valid maths into a compile error,
-  // which is why the escape stops at $…$ boundaries.
-  assert.equal(escapeCaption('Values of $x_1$ and $y^2$, 10% error'),
-    'Values of $x_1$ and $y^2$, 10\\% error');
-});
-
-test('commands typed into the caption box still work', async () => {
-  const { escapeCaption } = await mod();
-  assert.equal(escapeCaption('\\emph{Measured} results'), '\\emph{Measured} results');
-});

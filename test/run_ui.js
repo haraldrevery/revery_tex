@@ -638,6 +638,148 @@ async function main() {
     check('picking one inserts a \\ref', /\\ref\{[^}]+\}$/.test(ref.tail || ''), ref.tail);
     check('and closes the menu', ref.menusClosed === true);
 
+    /* ── citations ──────────────────────────────────────────────────── */
+    const cite = await cdp.evaluate(`(() => {
+      const view = window.__reveryTexTest.view();
+      view.dispatch({ selection: { anchor: view.state.doc.length } });
+      document.getElementById('toolbox').click();
+      const trigger = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /insert citation/i.test(b.textContent));
+      if (!trigger) return { found: false };
+      trigger.click();
+      const panel = [...document.querySelectorAll('.submenu')].find(p => !p.hidden);
+      const rows = panel ? [...panel.querySelectorAll('.menu-item')] : [];
+      const labels = rows.map(b => b.textContent.trim());
+      rows[0]?.click();
+      const text = view.state.doc.toString();
+      return { found: true, count: rows.length, labels, tail: text.slice(-30) };
+    })()`, true);
+    check('citations are listed from the bibliography',
+      cite.found && cite.count > 0, `${cite.count} entr(ies)`);
+    // Author and year, not the key: "smith2020" is what goes in the document,
+    // not what you scan a list for.
+    check('entries are named by author and year',
+      cite.labels?.some(l => /\d{4}/.test(l)), (cite.labels || []).slice(0, 2).join(' | '));
+    check('picking one inserts a \\cite', /\\cite\{[^}]+\}$/.test(cite.tail || ''), cite.tail);
+
+    const refFig = await cdp.evaluate(`(() => {
+      const view = window.__reveryTexTest.view();
+      view.dispatch({ selection: { anchor: view.state.doc.length } });
+      document.getElementById('toolbox').click();
+      [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /reference a figure/i.test(b.textContent)).click();
+      const panel = document.querySelector('.dlg.picker');
+      const cards = panel ? [...panel.querySelectorAll('.picker-card')] : [];
+      const labels = cards.map(c => c.querySelector('.picker-caption').textContent);
+      cards[0]?.click();
+      return { count: cards.length, labels, tail: view.state.doc.toString().slice(-24) };
+    })()`, true);
+    check('labelled figures can be referenced',
+      refFig.count > 0, `${refFig.count}: ${(refFig.labels || []).join(' | ').slice(0, 70)}`);
+    check('picking one inserts a \\ref', /\\ref\{[^}]+\}$/.test(refFig.tail || ''), refFig.tail);
+
+    /* ── the figure picker ──────────────────────────────────────────── */
+    // On the homework fixture: it is the one with a folder of graphs. The book
+    // has the bibliography but no images, which is why the two blocks run on
+    // different projects.
+    await cdp.evaluate(`(() => {
+      document.getElementById('project').click();
+      const it = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => b.textContent.trim().replace(/^[■□]\\s*/, '') === 'homework');
+      it && it.click();
+      return !!it;
+    })()`);
+    await cdp.waitFor(
+      `!!window.__reveryTexTest.view() &&
+       window.__reveryTexTest.view().state.doc.toString().includes('documentclass')`,
+      { what: 'the homework project', timeoutMs: 30000 });
+
+    const pick = await cdp.evaluate(`(async () => {
+      document.getElementById('toolbox').click();
+      [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /^insert figure/i.test(b.textContent.trim())).click();
+      const panel = document.querySelector('.dlg.picker');
+      if (!panel) return { opened: false };
+
+      const cards = [...panel.querySelectorAll('.picker-card')];
+      // The observer needs a frame to run before anything has been painted.
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const painted = () => cards.filter(c => c.querySelector('.picker-thumb').children.length
+        || c.querySelector('.picker-thumb').textContent).length;
+      const paintedEarly = painted();
+
+      const filterBox = panel.querySelector('.picker-filter');
+      filterBox.value = 'zzz-nothing-matches';
+      filterBox.dispatchEvent(new Event('input', { bubbles: true }));
+      const afterFilter = cards.filter(c => !c.hidden).length;
+      const countText = panel.querySelector('.picker-count').textContent;
+      filterBox.value = '';
+      filterBox.dispatchEvent(new Event('input', { bubbles: true }));
+
+      // Every blob URL the picker made must be handed back on close.
+      const live = new Set();
+      const realCreate = URL.createObjectURL, realRevoke = URL.revokeObjectURL;
+      URL.createObjectURL = (b) => { const u = realCreate.call(URL, b); live.add(u); return u; };
+      URL.revokeObjectURL = (u) => { live.delete(u); return realRevoke.call(URL, u); };
+      // Scroll to the end so more cards render, then close.
+      const strip = panel.querySelector('.picker-strip');
+      strip.scrollLeft = strip.scrollWidth;
+      await new Promise(r => setTimeout(r, 250));
+      const madeMore = live.size;
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      const leaked = live.size;
+      URL.createObjectURL = realCreate; URL.revokeObjectURL = realRevoke;
+
+      return {
+        opened: true, total: cards.length, paintedEarly, afterFilter, countText,
+        madeMore, leaked, closed: !document.querySelector('.dlg.picker'),
+        labels: cards.slice(0, 3).map(c => c.querySelector('.picker-caption').textContent),
+        tips: cards.slice(0, 3).map(c => c.title)
+      };
+    })()`, true);
+
+    check('the figure picker opens with the project images',
+      pick.opened && pick.total > 0, `${pick.total} image(s)`);
+    // The whole point of the observer: a project with 25 images must not build
+    // 25 thumbnails to show six.
+    check('cards render lazily', pick.paintedEarly > 0 && pick.paintedEarly < pick.total,
+      `${pick.paintedEarly} of ${pick.total} painted before scrolling`);
+    check('cards are named by file, not by path',
+      pick.labels?.every(l => !l.includes('/')), (pick.labels || []).join(' | '));
+    check('the full path is still what the filter and tooltip see',
+      pick.tips?.some(t => t.includes('/')), (pick.tips || [])[0]);
+    check('filtering hides the cards that do not match',
+      pick.afterFilter === 0 && /^0 of/.test(pick.countText || ''), pick.countText);
+    // A leaked object URL pins the image bytes for the life of the page.
+    check('blob URLs are revoked when the picker closes',
+      pick.madeMore > 0 && pick.leaked === 0,
+      `${pick.madeMore} created after scrolling, ${pick.leaked} left live`);
+    check('Escape closes the picker', pick.closed);
+
+    const figure = await cdp.evaluate(`(() => {
+      const view = window.__reveryTexTest.view();
+      view.dispatch({ selection: { anchor: view.state.doc.length } });
+      const before = view.state.doc.length;
+      document.getElementById('toolbox').click();
+      [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /^insert figure/i.test(b.textContent.trim())).click();
+      document.querySelector('.dlg.picker .picker-card').click();
+      const text = view.state.doc.toString();
+      return {
+        added: text.length > before,
+        block: text.slice(text.lastIndexOf('\\\\begin{figure}')),
+        closed: !document.querySelector('.dlg.picker')
+      };
+    })()`, true);
+    check('picking an image inserts a figure block',
+      figure.added && /\\begin\{figure\}/.test(figure.block || ''),
+      (figure.block || '').split('\n').slice(0, 2).join(' ⏎ '));
+    check('the block carries a caption, a label and a width',
+      /\\caption\{.+\}/.test(figure.block || '') &&
+      /\\label\{fig:[^}]+\}/.test(figure.block || '') &&
+      /width=0\.8\\linewidth/.test(figure.block || ''),
+      (figure.block || '').replace(/\n\s*/g, ' ').slice(0, 120));
+
     const expected = /favicon|\/api\/projects/i;
     const real = pageErrors.filter(e => !expected.test(e));
     check('no unexpected page errors', real.length === 0, real.slice(0, 2).join(' | '));
