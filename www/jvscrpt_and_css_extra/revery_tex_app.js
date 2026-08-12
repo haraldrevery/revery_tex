@@ -22,7 +22,7 @@ import { writeZip } from './zip_core.js';
 import * as settings from './settings.js';
 import { attachMenu, openMenuAt, SelectMenu } from './menus.js';
 import { toolboxRows, contextRows } from './toolbox.js';
-import { initOutline, refreshOutline, scheduleOutline } from './outline.js';
+import { initOutline, refreshOutline, scheduleOutline, applyOutlineVisibility } from './outline.js';
 import { $, download } from './dom.js';
 import { readProjectFromDisk, readProjectFromFixture } from './project_store.js';
 import {
@@ -66,7 +66,7 @@ $('autocompile').onclick = () => settings.set('autoCompile', !settings.settings.
 // One listener rather than each control refreshing itself: a setting changed
 // from the menu and the same setting changed from its button must look the
 // same afterwards, and that is only guaranteed if there is one path.
-settings.onChange(() => { refreshAutoCompile(); refreshEditorMetrics(); });
+settings.onChange(() => { refreshAutoCompile(); refreshEditorMetrics(); applyOutlineVisibility(); });
 refreshAutoCompile();
 
 /**
@@ -237,6 +237,12 @@ function gotoSection(file, line) {
   if (!project) return;
   if (file !== currentPath && project.files.has(file)) openFile(file);
   gotoLine(line);
+  // …and take the preview with it. Same call Ctrl+click in the editor makes.
+  // Null when nothing has been compiled yet, or when this file emitted no
+  // SyncTeX records — in which case only the cursor moves, which is still the
+  // useful half.
+  const hit = syncTex.fromSource(file, line);
+  if (hit && preview) preview.scrollToPosition(hit.page, hit.x, hit.y);
   // Directly, not through the debounce: the row you just clicked should be
   // marked as you release the button, not a third of a second later.
   refreshOutline();
@@ -741,14 +747,25 @@ function draggable(el, onMove) {
     document.addEventListener('mouseup', up);
   });
 }
-const divs = document.querySelectorAll('.vdiv');
-draggable(divs[0], (e) => { $('sidebar').style.width = Math.max(120, e.clientX) + 'px'; });
-draggable(divs[1], (e) => {
+// By attribute, not by index: `divs[0]` and `divs[1]` silently reassign
+// themselves the moment a divider is added anywhere in the markup.
+const divider = (name) => document.querySelector(`.vdiv[data-resize="${name}"]`);
+
+draggable(divider('sidebar'), (e) => { $('sidebar').style.width = Math.max(120, e.clientX) + 'px'; });
+draggable(divider('editor'), (e) => {
   const ws = $('workspace').getBoundingClientRect();
   const left = $('sidebar').getBoundingClientRect().width;
-  const frac = Math.min(0.85, Math.max(0.15, (e.clientX - ws.left - left) / (ws.width - left)));
+  const right = $('outlinepane').hidden ? 0 : $('outlinepane').getBoundingClientRect().width;
+  const span = ws.width - left - right;
+  const frac = Math.min(0.85, Math.max(0.15, (e.clientX - ws.left - left) / span));
   $('editorpane').style.flex = `1 1 ${frac * 100}%`;
   $('pdfpane').style.flex = `1 1 ${(1 - frac) * 100}%`;
+});
+// The outline is measured from the right edge, so its width does not change
+// when the panes to its left are dragged.
+draggable(divider('outline'), (e) => {
+  const w = Math.min(window.innerWidth - 320, Math.max(140, window.innerWidth - e.clientX));
+  $('outlinepane').style.width = w + 'px';
 });
 draggable($('paneldiv'), (e) => {
   const h = Math.min(window.innerHeight - 160, Math.max(32, window.innerHeight - e.clientY));

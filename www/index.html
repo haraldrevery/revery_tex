@@ -34,6 +34,7 @@
   <span id="docname" class="docname"></span>
   <div class="spacer"></div>
   <button id="status" class="statusline">idle</button>
+  <button id="outlinetoggle" title="Show the document outline">Outline</button>
   <button id="toolbox" title="Insert and format">Toolbox ▾</button>
   <button id="settings" title="Appearance and behaviour">Settings ▾</button>
 </div>
@@ -44,11 +45,6 @@
   <aside id="sidebar">
     <div class="panehead"><span>Files</span><div class="spacer"></div><span id="filecount" class="dim"></span></div>
     <div id="filetree"></div>
-    <div id="outlinepane">
-      <div class="panehead"><span>Outline</span><div class="spacer"></div><span id="outlinecount" class="dim"></span>
-        <button id="toggleoutline" title="Collapse the outline">Hide</button></div>
-      <div id="outline"></div>
-    </div>
   </aside>
   <div class="vdiv" data-resize="sidebar"></div>
 
@@ -64,6 +60,15 @@
     <div id="pdfempty">no output yet</div>
     <div id="pdf" role="document" aria-label="PDF preview"></div>
   </section>
+
+  <!-- Right of the PDF on purpose: clicking a heading moves the cursor *and*
+       the preview, so the two want to be next to each other. Toggled from the
+       topbar; the pane and its divider are hidden together. -->
+  <div class="vdiv" data-resize="outline"></div>
+  <aside id="outlinepane">
+    <div class="panehead"><span>Outline</span><div class="spacer"></div><span id="outlinecount" class="dim"></span></div>
+    <div id="outline"></div>
+  </aside>
 </div>
 
 <div class="hdiv" id="paneldiv"></div>

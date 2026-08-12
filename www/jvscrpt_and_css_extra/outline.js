@@ -90,6 +90,9 @@ function markActive() {
 
 /** Rebuild if the headings changed; always refresh the active mark. */
 export function refreshOutline() {
+  // Nothing to keep current while the pane is not on screen. The signature is
+  // deliberately not updated either, so showing it again rebuilds.
+  if ($('outlinepane').hidden) return;
   const sections = outlineOf(getProject());
   const sig = signature(sections);
   if (sig !== lastSig) {
@@ -109,15 +112,23 @@ export function scheduleOutline(delay = 300) {
   timer = setTimeout(refreshOutline, delay);
 }
 
-export function toggleOutline(open) {
-  const pane = $('outlinepane');
-  const collapsed = open === undefined ? !pane.classList.contains('collapsed') : !open;
-  pane.classList.toggle('collapsed', collapsed);
-  $('toggleoutline').textContent = collapsed ? 'Show' : 'Hide';
-  // Remembered layout, not a preference with choices — same treatment as the
-  // log panel: it rides along in the settings store without a menu row.
-  settings.settings.outlineCollapsed = collapsed;
-  settings.save();
+/**
+ * Show or hide the pane and its divider.
+ *
+ * Reads the setting rather than a local flag, so the topbar button and the
+ * Settings row cannot disagree about whether the outline is showing. The
+ * divider goes with the pane — leaving it behind is a drag handle for
+ * something that is not there.
+ */
+export function applyOutlineVisibility() {
+  const on = settings.settings.showOutline !== false;
+  $('outlinepane').hidden = !on;
+  document.querySelector('.vdiv[data-resize="outline"]').hidden = !on;
+  const btn = $('outlinetoggle');
+  btn.textContent = on ? 'Outline ✓' : 'Outline';
+  btn.title = on ? 'Hide the document outline' : 'Show the document outline';
+  btn.setAttribute('aria-pressed', String(on));
+  if (on) refreshOutline();
 }
 
 /**
@@ -130,7 +141,7 @@ export function initOutline({ project, position, onJump }) {
   getProject = project;
   getPosition = position;
   jump = onJump;
-  $('toggleoutline').onclick = () => toggleOutline();
-  toggleOutline(!settings.settings.outlineCollapsed);
-  refreshOutline();
+  $('outlinetoggle').onclick =
+    () => settings.set('showOutline', settings.settings.showOutline === false);
+  applyOutlineVisibility();
 }

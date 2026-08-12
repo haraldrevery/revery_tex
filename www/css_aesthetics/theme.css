@@ -300,10 +300,17 @@ button.primary { color:var(--text); border-color:var(--accent) }
 #workspace { flex:1; display:flex; min-height:0 }
 
 /* Panel order is a setting. The divider between editor and PDF has to move
-   with them or it ends up on the wrong side of the pair. */
+   with them or it ends up on the wrong side of the pair.
+   Every child needs an explicit order once any of them has one: a flex item
+   with no `order` sorts as 0, so the sidebar and the outline would otherwise
+   jump in front of the pane given order:1. */
+[data-panel-order="pdf-first"] #sidebar { order:0 }
+[data-panel-order="pdf-first"] .vdiv[data-resize="sidebar"] { order:0 }
 [data-panel-order="pdf-first"] #pdfpane { order:1 }
-[data-panel-order="pdf-first"] #workspace .vdiv:nth-of-type(2) { order:2 }
+[data-panel-order="pdf-first"] #workspace .vdiv[data-resize="editor"] { order:2 }
 [data-panel-order="pdf-first"] #editorpane { order:3 }
+[data-panel-order="pdf-first"] .vdiv[data-resize="outline"] { order:4 }
+[data-panel-order="pdf-first"] #outlinepane { order:5 }
 #sidebar  { width:230px; min-width:120px; display:flex; flex-direction:column; background:var(--bg-panel) }
 #editorpane { flex:1 1 55%; display:flex; flex-direction:column; min-width:0 }
 #pdfpane  { flex:1 1 45%; display:flex; flex-direction:column; min-width:0; background:var(--bg-panel) }
@@ -337,12 +344,14 @@ button.primary { color:var(--text); border-color:var(--accent) }
 .node.main.dirty::after { content:' ■ •'; color:var(--warn) }
 
 /* ── outline ────────────────────────────────────────────────────────── */
-/* Files and outline share the sidebar's height. Both scroll, so a project with
-   200 files and one with 200 headings both behave. */
-#filetree { flex:1 1 40% }
-#outlinepane { flex:1 1 60%; display:flex; flex-direction:column; min-height:0; border-top:1px solid var(--border) }
-#outlinepane.collapsed { flex:none }
-#outlinepane.collapsed #outline { display:none }
+/* Its own pane, right of the PDF, toggled from the topbar. Fixed width like
+   the sidebar rather than a flex share: it is a list of headings, and the two
+   panes that need the room are the editor and the preview. */
+#outlinepane {
+  width:250px; min-width:140px; flex:none; display:flex; flex-direction:column;
+  min-height:0; background:var(--bg-panel);
+}
+#outlinepane[hidden], .vdiv[hidden] { display:none }
 #outline { flex:1; overflow:auto; padding:4px 0 }
 .node.sec { font-size:.68rem }
 /* An inset shadow rather than a border: the indent is set inline per level, so

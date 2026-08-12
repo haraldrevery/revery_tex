@@ -102,13 +102,13 @@ async function main() {
     })()`);
 
     check('menu opens', opened.open);
-    // Six headed rows plus the theme submenu trigger, which has no head.
+    // Seven headed rows plus the theme submenu trigger, which has no head.
     check('has a row per setting',
-      opened.heads.length === 6 && opened.subTriggers === 1, opened.heads.join(' · '));
+      opened.heads.length === 7 && opened.subTriggers === 1, opened.heads.join(' · '));
     // Scales are steppers and theme is a submenu, so only the remaining
     // list-style settings carry a ■ in the top level.
     check('marks one choice per top-level list setting',
-      opened.checked.length === 4,
+      opened.checked.length === 5,
       `${opened.checked.length} marked: ${opened.checked.join(' | ')}`);
     check('scales render as steppers', opened.steppers === 2, `${opened.steppers} steppers`);
     check('theme is a submenu', opened.subTriggers === 1, `${opened.subTriggers} triggers`);
@@ -629,17 +629,93 @@ async function main() {
       /^\\(chapter|section|subsection|part)\*?[[{]/.test(jumped.text || ''), jumped.text);
     check('the outline marks where the cursor is', jumped.marked === true);
 
-    const collapsed = await cdp.evaluate(`(() => {
-      document.getElementById('toggleoutline').click();
-      const hidden = getComputedStyle(document.getElementById('outline')).display === 'none';
-      const stored = JSON.parse(localStorage.getItem('revery_tex_settings') || '{}');
-      document.getElementById('toggleoutline').click();
-      return { hidden, stored: stored.outlineCollapsed,
-               shownAgain: getComputedStyle(document.getElementById('outline')).display !== 'none' };
+    const place = await cdp.evaluate(`(() => {
+      const pane = document.getElementById('outlinepane');
+      const pdf = document.getElementById('pdfpane');
+      const div = document.querySelector('.vdiv[data-resize="outline"]');
+      const order = [...document.getElementById('workspace').children].map(n => n.id || n.dataset.resize);
+      const at = (el) => el.getBoundingClientRect();
+
+      const before = { pane: at(pane).left, pdf: at(pdf).right };
+      // …and under the reversed panel order it must still be the rightmost
+      // thing, not sorted to the front for having no explicit order.
+      document.documentElement.setAttribute('data-panel-order', 'pdf-first');
+      const flipped = { pane: at(pane).left, editor: at(document.getElementById('editorpane')).right };
+      document.documentElement.setAttribute('data-panel-order', 'editor-first');
+      return { order, before, flipped, dividerBeforePane: at(div).left <= at(pane).left };
     })()`, true);
-    check('the outline collapses and the state is remembered',
-      collapsed.hidden && collapsed.stored === true && collapsed.shownAgain,
-      JSON.stringify(collapsed));
+    check('the outline sits right of the PDF',
+      place.before.pane >= place.before.pdf - 2 && place.dividerBeforePane,
+      place.order.join(' → '));
+    check('and stays rightmost when the panes are reversed',
+      place.flipped.pane >= place.flipped.editor - 2,
+      `pane at ${place.flipped.pane.toFixed(0)}, editor ends ${place.flipped.editor.toFixed(0)}`);
+
+    const toggled = await cdp.evaluate(`(() => {
+      const pane = document.getElementById('outlinepane');
+      const div = document.querySelector('.vdiv[data-resize="outline"]');
+      document.getElementById('outlinetoggle').click();
+      const off = { pane: pane.hidden, divider: div.hidden,
+                    label: document.getElementById('outlinetoggle').textContent.trim(),
+                    stored: JSON.parse(localStorage.getItem('revery_tex_settings') || '{}').showOutline };
+      document.getElementById('outlinetoggle').click();
+      return { off, onAgain: !pane.hidden && !div.hidden,
+               label: document.getElementById('outlinetoggle').textContent.trim() };
+    })()`, true);
+    check('the topbar button hides the pane and its divider',
+      toggled.off.pane && toggled.off.divider, JSON.stringify(toggled.off));
+    // A divider left behind is a drag handle for something that is not there.
+    check('the button says which state it is in',
+      toggled.off.label === 'Outline' && toggled.label === 'Outline ✓',
+      `${toggled.off.label} → ${toggled.label}`);
+    check('the choice is persisted as a setting', toggled.off.stored === false,
+      String(toggled.off.stored));
+    check('turning it back on restores the pane', toggled.onAgain);
+
+    // The PDF is right there, so a heading should move it too. The cv was
+    // compiled earlier in this run, but this is the book — compile it so there
+    // is SyncTeX data for the file the outline points into.
+    await cdp.evaluate(`window.__reveryTexApp.compile()`, true);
+    const synced = await cdp.evaluate(`(async () => {
+      const box = document.getElementById('pdf');
+      // Which page is under the point scrollToPosition aims for.
+      const pageAtTop = () => {
+        const cs = [...box.querySelectorAll('canvas.pdfpage')];
+        const y = box.scrollTop + box.clientHeight / 3;
+        let hit = cs[0];
+        for (const c of cs) if (c.offsetTop <= y) hit = c;
+        return hit ? Number(hit.dataset.page) : null;
+      };
+      const rows = [...document.querySelectorAll('#outline .node.sec')];
+      const seen = [];
+      let marked = false;
+      for (const label of ['Introduction', 'Tables', 'Figures']) {
+        const r = rows.find(x => x.textContent.trim() === label);
+        if (!r) { seen.push({ label, page: null }); continue; }
+        r.click();
+        // The mark is dropped at the target and removed after 1.6s; catching it
+        // proves the jump ran before the smooth scroll has even finished.
+        marked = marked || !!box.querySelector('.pdf-syncmark');
+        // Wait for the smooth scroll to settle rather than for a fixed delay:
+        // how long it takes depends on how far it has to go, and a jump caught
+        // mid-animation reports the page it was passing through.
+        for (let last = -1, still = 0; still < 3; ) {
+          await new Promise(res => setTimeout(res, 100));
+          if (box.scrollTop === last) still++; else { still = 0; last = box.scrollTop; }
+        }
+        seen.push({ label, page: pageAtTop(), file: r.title });
+      }
+      return { seen, marked, pages: box.querySelectorAll('canvas').length };
+    })()`, true);
+    const pages = synced.seen.map(s => s.page);
+    check('clicking a heading scrolls the PDF to it', synced.pages > 1 && synced.marked,
+      `${synced.pages} pages rendered`);
+    // Not just "it moved": each heading must land later than the one before it,
+    // which is the difference between a working SyncTeX lookup and a scroll to
+    // an arbitrary offset.
+    check('each heading lands on its own page, in order',
+      pages.every(p => p !== null) && pages[0] < pages[1] && pages[1] < pages[2],
+      synced.seen.map(s => `${s.label}→p${s.page}`).join(' · '));
 
     /* ── referencing an existing table ──────────────────────────────── */
     // The book fixture has a chapter of them, which is why this runs here and
@@ -756,10 +832,15 @@ async function main() {
       if (!panel) return { opened: false };
 
       const cards = [...panel.querySelectorAll('.picker-card')];
-      // The observer needs a frame to run before anything has been painted.
-      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
       const painted = () => cards.filter(c => c.querySelector('.picker-thumb').children.length
         || c.querySelector('.picker-thumb').textContent).length;
+      // IntersectionObserver delivery is not tied to a frame, so wait for the
+      // first card rather than for a fixed number of rAFs — the assertion is
+      // that *not all* of them render, and a race on when the first one does
+      // would make this pass or fail for reasons unrelated to laziness.
+      for (let i = 0; i < 40 && painted() === 0; i++) {
+        await new Promise(r => setTimeout(r, 25));
+      }
       const paintedEarly = painted();
 
       const filterBox = panel.querySelector('.picker-filter');

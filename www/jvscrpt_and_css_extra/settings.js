@@ -107,6 +107,12 @@ export const SCHEMA = [
     options: [{ label: 'On', value: true }, { label: 'Off', value: false }]
   },
   {
+    // A declared setting rather than a remembered-layout key, because it has a
+    // control of its own in the topbar and belongs in the reset.
+    key: 'showOutline', label: 'Outline panel', def: true, appliedBy: 'app',
+    options: [{ label: 'On', value: true }, { label: 'Off', value: false }]
+  },
+  {
     // Bundled is the default because it always works: no install, no PATH, the
     // same result on every machine. A system TeX is the escape hatch for the
     // two things WASM cannot do — biber, and packages outside the slim bundle.
