@@ -20,9 +20,13 @@ import { latexEditingExtensions, setDiagnostics, beginEndInsertion } from './lat
 import { SyncTex } from './synctex.js';
 import { writeZip } from './zip_core.js';
 import * as settings from './settings.js';
-import { attachMenu, closeAllMenus, SelectMenu } from './menus.js';
+import { attachMenu, SelectMenu } from './menus.js';
+import { $, download } from './dom.js';
+import {
+  initLogConsole, rawLog, clearLog, setStatus, showTab, togglePanel,
+  setIssues, getIssues, hasErrors, logText
+} from './log_console.js';
 
-const $ = (id) => document.getElementById(id);
 const CM = window.CM;
 
 // Topbar drop-downs. Same .value / .onchange surface a <select> had, so the
@@ -37,8 +41,6 @@ let currentPath = null;
 let view = null;             // CodeMirror EditorView
 let lastPdf = null;
 let preview = null;
-let rawLines = [];
-let diagnostics = [];
 let backupTimer = null;
 const syncTex = new SyncTex();
 // Set while openFile() replaces the document. Without it, loading a file marks
@@ -109,88 +111,11 @@ function settingsMenuSpec() {
 }
 attachMenu($('settings'), settingsMenuSpec, { align: 'right' });
 
-// ── log console ────────────────────────────────────────────────────────
-function rawLog(kind, msg) {
-  const body = $('raw');
-  for (const line of String(msg).split('\n')) {
-    rawLines.push(line);
-    const d = document.createElement('div');
-    d.className = 'l-' + kind;
-    d.textContent = line;
-    body.appendChild(d);
-  }
-  $('logmeta').textContent = `${rawLines.length} lines`;
-  // Stream, do not dump: keep pinned to the bottom while a compile runs so a
-  // stall is visible at the point it happens.
-  body.scrollTop = body.scrollHeight;
-}
-
-function clearLog() {
-  rawLines = [];
-  $('raw').textContent = '';
-  $('logmeta').textContent = '';
-}
-
-function showTab(name) {
-  for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.dataset.tab === name);
-  $('issues').classList.toggle('hidden', name !== 'issues');
-  $('raw').classList.toggle('hidden', name !== 'raw');
-  if ($('panel').classList.contains('collapsed')) togglePanel(true);
-}
-for (const t of document.querySelectorAll('.tab')) t.onclick = () => showTab(t.dataset.tab);
-
-function togglePanel(open) {
-  const p = $('panel');
-  const collapsed = open === undefined ? !p.classList.contains('collapsed') : !open;
-  p.classList.toggle('collapsed', collapsed);
-  $('togglepanel').textContent = collapsed ? 'Show' : 'Hide';
-  // Not in SCHEMA: this is remembered layout, not a user preference with
-  // choices, so it rides along in the same store without a menu row.
-  settings.settings.panelCollapsed = collapsed;
-  settings.save();
-}
-$('togglepanel').onclick = () => togglePanel();
-togglePanel(!settings.settings.panelCollapsed);
-
-function renderIssues() {
-  const body = $('issues');
-  body.textContent = '';
-  const errs = diagnostics.filter(d => d.severity === 'error').length;
-  const warns = diagnostics.filter(d => d.severity === 'warning').length;
-  $('issuecount').textContent = diagnostics.length ? `${errs}/${warns}` : '';
-
-  if (!diagnostics.length) {
-    const e = document.createElement('div');
-    e.className = 'empty';
-    e.textContent = 'no issues';
-    body.appendChild(e);
-    return;
-  }
-  for (const d of diagnostics) {
-    const row = document.createElement('div');
-    row.className = `issue ${d.severity}`;
-    const sev = document.createElement('span');
-    sev.className = 'sev';
-    sev.textContent = d.severity;
-    row.appendChild(sev);
-    row.appendChild(document.createTextNode(
-      (d.package ? `[${d.package}] ` : '') + d.message));
-    if (d.line) {
-      const w = document.createElement('span');
-      w.className = 'where';
-      w.textContent = `  line ${d.line}`;
-      row.appendChild(w);
-      row.onclick = () => gotoLine(d.line);
-    }
-    body.appendChild(row);
-  }
-}
-
 // Diagnostics carry a line number only when the log gave one; the gutter shows
 // just those, and the Issues tab remains the complete list.
 function pushDiagnosticsToGutter() {
   if (!view) return;
-  view.dispatch({ effects: setDiagnostics.of(diagnostics.filter(d => d.line)) });
+  view.dispatch({ effects: setDiagnostics.of(getIssues().filter(d => d.line)) });
 }
 
 function gotoLine(n) {
@@ -199,23 +124,6 @@ function gotoLine(n) {
   view.dispatch({ selection: { anchor: line.from }, scrollIntoView: true });
   view.focus();
 }
-
-$('copylog').onclick = () => navigator.clipboard?.writeText(rawLines.join('\n'));
-$('savelog').onclick = () => download(new Blob([rawLines.join('\n')], { type: 'text/plain' }), 'compile.log');
-
-function download(blob, name) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = name; a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function setStatus(text, cls = '') {
-  const s = $('status');
-  s.textContent = text;
-  s.className = 'statusline ' + cls;
-}
-$('status').onclick = () => showTab(diagnostics.some(d => d.severity === 'error') ? 'issues' : 'raw');
 
 // ── editor ─────────────────────────────────────────────────────────────
 function makeEditor() {
@@ -703,7 +611,7 @@ async function loadFromDisk(root) {
   renderTree();
   openFile(project.main);
   clearLog();
-  diagnostics = []; renderIssues();
+  setIssues([]);
   rawLog('inf', `opened ${root} — ${project.files.size} files, main = ${project.main}`);
   refreshDirty();
   await offerRecovery();
@@ -733,8 +641,7 @@ async function loadProject(key) {
   renderTree();
   openFile(project.main);
   clearLog();
-  diagnostics = [];
-  renderIssues();
+  setIssues([]);
   for (const p of m.patchLog || []) rawLog('wrn', `patched ${p}`);
   setStatus('ready');
 }
@@ -806,8 +713,7 @@ async function compile() {
   if (btn.disabled) return;
   btn.disabled = true;
   clearLog();
-  diagnostics = [];
-  renderIssues();
+  setIssues([]);
 
   try {
     const eng = await getEngine();
@@ -835,8 +741,7 @@ async function compile() {
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
 
     if (r.log) rawLog(r.success ? 'dbg' : 'err', r.log);
-    diagnostics = r.diagnostics || [];
-    renderIssues();
+    setIssues(r.diagnostics || []);
     pushDiagnosticsToGutter();
 
     if (r.success) {
@@ -848,18 +753,19 @@ async function compile() {
         rawLog('wrn', `synctex unavailable: ${e.message}`);
       }
       await showPdf(r.pdf, r.pages);
-      const errs = diagnostics.filter(d => d.severity === 'error').length;
-      const warns = diagnostics.filter(d => d.severity === 'warning').length;
+      const errs = getIssues().filter(d => d.severity === 'error').length;
+      const warns = getIssues().filter(d => d.severity === 'warning').length;
       setStatus(`✓ ${r.pages} pages · ${errs} errors, ${warns} warnings · ${secs}s`, errs ? 'warn' : 'ok');
       rawLog('hdr', `✓ ${r.pages} pages in ${secs}s`);
     } else {
       setStatus(`✗ ${r.error}`, 'err');
       rawLog('err', `✗ ${r.error}`);
-      for (const m of r.missingPackages) {
-        rawLog('wrn', `  not in this texmf bundle: ${m}`);
-        diagnostics.unshift({ severity: 'error', package: null, message: `missing from bundle: ${m}` });
-      }
-      renderIssues();
+      // A slim texmf makes "package not in the bundle" the most likely failure,
+      // so it goes to the top of Issues rather than only into the raw log.
+      const named = r.missingPackages.map(
+        (m) => ({ severity: 'error', package: null, message: `missing from bundle: ${m}` }));
+      for (const m of r.missingPackages) rawLog('wrn', `  not in this texmf bundle: ${m}`);
+      setIssues([...named, ...getIssues()]);
       showTab('issues');   // a failed compile should land on what went wrong
     }
   } catch (err) {
@@ -989,8 +895,10 @@ window.addEventListener('unhandledrejection', (e) => {
 });
 
 // ── boot ───────────────────────────────────────────────────────────────
+// The panel first: it owns the status line, and everything below reports
+// through it.
+initLogConsole({ onGotoLine: gotoLine });
 view = makeEditor();
-renderIssues();
 await loadProjects();
 // Only claim ready if something actually opened — otherwise loadProjects has
 // already said what the user needs to do, and overwriting it says nothing.
@@ -1041,8 +949,8 @@ window.__reveryTexApp = {
       status: $('status').textContent,
       ok: $('status').classList.contains('ok'),
       pages: lastPdf ? Number(/(\d+) pages/.exec($('pdfmeta').textContent)?.[1] ?? 0) : null,
-      issues: diagnostics.length,
-      rawLines: rawLines.length
+      issues: getIssues().length,
+      rawLines: logText().split('\n').length
     };
   }
 };
