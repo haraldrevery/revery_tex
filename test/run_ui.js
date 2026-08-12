@@ -1292,6 +1292,70 @@ async function main() {
       texture.backToNone === 'none' && texture.paneBack === texture.opaquePane,
       `${texture.backToNone} · ${texture.paneBack}`);
 
+    /* ── an imported image ──────────────────────────────────────────── */
+    const custom = await cdp.evaluate(`(async () => {
+      const bg = await import('./jvscrpt_and_css_extra/background_image.js');
+      const s = await import('./jvscrpt_and_css_extra/settings.js');
+
+      const menuFor = () => {
+        document.getElementById('settings').click();
+        const trigger = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+          .find(b => /Background/.test(b.textContent) && b.classList.contains('has-submenu'));
+        trigger.click();
+        const panel = [...document.querySelectorAll('.submenu')].find(p => !p.hidden);
+        const rows = [...panel.querySelectorAll('.menu-item')].map(b => b.textContent.trim());
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        return rows;
+      };
+      const before = menuFor();
+
+      // Stand in for the file picker: the same store path, with an image made
+      // here. What is being checked is that an imported picture reaches the
+      // page, not that Chrome can open a file dialog.
+      const c = document.createElement('canvas');
+      c.width = 8; c.height = 8;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#c04030'; ctx.fillRect(0, 0, 8, 8);
+      localStorage.setItem('revery_tex_custom_bg', c.toDataURL('image/jpeg', 0.7));
+      bg.applyCustomBackground();
+      s.set('background', 'custom');
+
+      const painted = getComputedStyle(document.body).backgroundImage;
+      const after = menuFor();
+
+      // Choosing None must stop painting it, even though the image is still
+      // stored and still on the custom property.
+      s.set('background', 'none');
+      const off = getComputedStyle(document.body).backgroundImage;
+      s.set('background', 'custom');
+
+      bg.forgetCustomBackground();
+      s.set('background', 'none');
+      return {
+        before, after, painted: painted.slice(0, 24), off,
+        gone: getComputedStyle(document.body).backgroundImage,
+        stored: localStorage.getItem('revery_tex_custom_bg')
+      };
+    })()`, true);
+
+    // Offering "Your image" before there is one selects a background that
+    // paints nothing.
+    check('your image is offered only once there is one',
+      !custom.before.some(r => /your image/i.test(r))
+      && custom.after.some(r => /your image/i.test(r)),
+      `${custom.before.filter(r => /image/i.test(r)).join(' | ')} → ${custom.after.filter(r => /image/i.test(r)).join(' | ')}`);
+    check('the menu offers importing and forgetting',
+      custom.before.some(r => /choose image/i.test(r))
+      && custom.after.some(r => /replace image/i.test(r))
+      && custom.after.some(r => /forget image/i.test(r)),
+      custom.after.join(' | '));
+    check('an imported image is painted', /^url\("data:image/.test(custom.painted), custom.painted);
+    // The image stays stored while None is chosen; the attribute is what
+    // decides whether anything is painted.
+    check('choosing None stops painting it', custom.off === 'none', custom.off);
+    check('forgetting it removes both the picture and the storage',
+      custom.gone === 'none' && custom.stored === null, `${custom.gone} · ${custom.stored}`);
+
     // The pre-paint script has to know about it too, or a stored background
     // arrives a frame late — the flash this app already avoids for themes.
     await cdp.evaluate(`(async () => {

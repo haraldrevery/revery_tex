@@ -72,6 +72,7 @@ rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-t
 │    dialog.js                    modal shell + form with a live preview       │
 │    picker.js                    lazy card strip: figures, by thumbnail       │
 │    file_tree.js                 paths → a nested tree; pure, no DOM          │
+│    background_image.js          your own picture, resized into a data URL   │
 │  image_assets/                  background photographs — proprietary        │
 │    math_preview.js              KaTeX, loaded on first use                   │
 │    katex/                       vendored — see build_tools/vendor_assets.js  │

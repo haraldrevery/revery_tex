@@ -23,6 +23,10 @@ import * as settings from './settings.js';
 import { attachMenu, openMenuAt, SelectMenu } from './menus.js';
 import { toolboxRows, contextRows } from './toolbox.js';
 import { openDialog } from './dialog.js';
+import {
+  CUSTOM, applyCustomBackground, hasCustomBackground,
+  chooseCustomBackground, forgetCustomBackground
+} from './background_image.js';
 import { initOutline, refreshOutline, scheduleOutline, applyOutlineVisibility } from './outline.js';
 import { buildTree, flattenTree, normalizePath } from './file_tree.js';
 import { $, download } from './dom.js';
@@ -56,6 +60,9 @@ let loadingDoc = false;
 // Settings live in settings.js as one declarative table; this file only reads
 // values and wires the two shortcut buttons in the topbar.
 settings.applyAll();
+// The stored image, if there is one. settings.applyAll() has just set
+// data-background; this supplies the picture that attribute refers to.
+applyCustomBackground();
 
 function refreshAutoCompile() {
   const on = settings.settings.autoCompile;
@@ -80,6 +87,21 @@ function refreshEditorMetrics() {
   if (view) requestAnimationFrame(() => view.requestMeasure());
 }
 
+/**
+ * Importing your own background.
+ *
+ * The substance is in background_image.js; this is the menu half, and the
+ * reporting, which is the app's job because it owns the status line.
+ */
+async function pickBackgroundImage() {
+  const r = await chooseCustomBackground();
+  if (!r) return;                                   // cancelled
+  if (!r.ok) { setStatus(`✗ ${r.message}`, 'err'); return; }
+  applyCustomBackground();
+  settings.set('background', CUSTOM);
+  setStatus(`background set — ${r.width}×${r.height}`, 'ok');
+}
+
 /** Build the settings menu from the schema, so a new setting needs no wiring. */
 function settingsMenuSpec() {
   const rows = [];
@@ -87,7 +109,7 @@ function settingsMenuSpec() {
     // Offering a system TeX where no process can be started would be a control
     // that silently does nothing. Hide it instead of letting it lie.
     if (s.key === 'engineSource' && !NativeTexEngine.available(NativeAPI)) continue;
-    rows.push({
+    const row = {
       // The schema says how a setting is rendered — `submenu` for the ones with
       // enough choices to crowd the menu (theme, background), `stepper` for
       // scales, a flat list otherwise.
@@ -96,7 +118,25 @@ function settingsMenuSpec() {
       options: s.options,
       get: () => settings.settings[s.key],
       set: (v) => settings.set(s.key, v)
-    });
+    };
+    if (s.key === 'background') {
+      // "Your image" is a choice only once there is one; before that it would
+      // select a background that paints nothing.
+      const stored = hasCustomBackground();
+      row.options = s.options.filter(o => o.value !== CUSTOM || stored);
+      row.actions = [
+        { label: stored ? 'Replace image…' : 'Choose image…', run: pickBackgroundImage },
+        ...(stored ? [{
+          label: 'Forget image',
+          run: () => {
+            forgetCustomBackground();
+            if (settings.settings.background === CUSTOM) settings.set('background', 'none');
+            setStatus('background image removed');
+          }
+        }] : [])
+      ];
+    }
+    rows.push(row);
     rows.push({ type: 'divider' });
   }
   rows.push({

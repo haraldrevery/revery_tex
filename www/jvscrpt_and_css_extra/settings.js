@@ -73,7 +73,12 @@ export const SCHEMA = [
       { label: 'Alpern', value: 'bg_4' },
       { label: 'Grass', value: 'bg_5' },
       { label: 'Tree', value: 'bg_6' },
-      { label: 'Tjurpannan', value: 'bg_7' }
+      { label: 'Tjurpannan', value: 'bg_7' },
+      // Only offered once an image has been imported — see background_image.js.
+      // Declared here regardless, because a stored value that is not among the
+      // declared options is discarded on load, and forgetting the option would
+      // silently reset anyone using their own picture.
+      { label: 'Your image', value: 'custom' }
     ],
     effect: (v) => root.setAttribute('data-background', v)
   },

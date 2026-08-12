@@ -41,6 +41,18 @@
     var p = stored[r];
     if (typeof p === 'number' && p >= 0 && p <= 100) root.style.setProperty(RATIO[r], String(p / 100));
   }
+
+  // An imported background lives in its own key, because it is hundreds of
+  // kilobytes and the settings blob is rewritten on every change. Same strict
+  // shape check as background_image.js: this string goes into a CSS url(), and
+  // localStorage is editable by hand.
+  if (stored.background === 'custom') {
+    var img;
+    try { img = localStorage.getItem('revery_tex_custom_bg'); } catch (e) { img = null; }
+    if (img && /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(img)) {
+      root.style.setProperty('--texture-image', 'url("' + img + '")');
+    }
+  }
   if (stored.theme === 'light' || stored.theme === 'paper') root.style.colorScheme = 'light';
   else if (stored.theme === 'dark' || stored.theme === 'forest') root.style.colorScheme = 'dark';
 })();

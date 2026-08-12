@@ -79,15 +79,21 @@ html,body { height:100%; margin:0; overflow:hidden }
 body {
   background-color:var(--bg); color:var(--text); font-family:var(--font-mono);
   font-size:.75rem; display:flex; flex-direction:column;
-  /* The texture, when one is chosen. Paths live here rather than in JS so the
-     pre-paint script can apply a stored choice by attribute alone, knowing
-     nothing about what any value means — the same rule the font stacks follow,
-     and the reason there is no second copy of anything to drift. */
-  background-image:var(--texture-image, none);
   background-size:cover; background-position:center; background-attachment:fixed;
 }
 
 /* ── background texture ─────────────────────────────────────────────── */
+/* Paths live here rather than in JS so the pre-paint script can apply a stored
+   choice by attribute alone, knowing nothing about what any value means — the
+   same rule the font stacks follow, and the reason there is no second copy of
+   anything to drift.
+
+   The attribute decides whether anything is painted at all. An imported image
+   sets --texture-image inline on <html>, which body inherits, so without this
+   gate choosing "None" would leave it showing. */
+[data-background]:not([data-background="none"]) body {
+  background-image:var(--texture-image, none);
+}
 [data-background="bg_1"] body { --texture-image:url('../image_assets/bg_1_web.jpg') }
 [data-background="bg_2"] body { --texture-image:url('../image_assets/bg_2_web.jpg') }
 [data-background="bg_3"] body { --texture-image:url('../image_assets/bg_3_web.jpg') }
