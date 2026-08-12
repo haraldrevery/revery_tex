@@ -42,7 +42,7 @@ const PERCENT = (from, to, step) => {
 /** @type {Setting[]} */
 export const SCHEMA = [
   {
-    key: 'theme', label: 'Theme', def: 'dark',
+    key: 'theme', label: 'Theme', def: 'dark', ui: 'submenu',
     options: [
       { label: 'Dark', value: 'dark' },
       { label: 'Light', value: 'light' },
@@ -54,6 +54,37 @@ export const SCHEMA = [
       // Tells the browser which scrollbars and form controls to draw.
       root.style.colorScheme = (v === 'dark' || v === 'forest') ? 'dark' : 'light';
     }
+  },
+  {
+    // A photograph behind the whole interface, veiled almost to nothing — the
+    // same idea as Revery Notebook's. Off by default: a texture nobody chose is
+    // one more thing between the reader and the text.
+    //
+    // The value is an identifier, never a URL. The stylesheet holds the paths,
+    // keyed off [data-background], so settings_boot.js can apply the choice
+    // before first paint without knowing what any of them mean — the same rule
+    // the font stacks follow.
+    key: 'background', label: 'Background', def: 'none', ui: 'submenu',
+    options: [
+      { label: 'None', value: 'none' },
+      { label: 'Galdhøpiggen', value: 'bg_1' },
+      { label: 'Rocks', value: 'bg_2' },
+      { label: 'Matterhorn', value: 'bg_3' },
+      { label: 'Alpern', value: 'bg_4' },
+      { label: 'Grass', value: 'bg_5' },
+      { label: 'Tree', value: 'bg_6' },
+      { label: 'Tjurpannan', value: 'bg_7' }
+    ],
+    effect: (v) => root.setAttribute('data-background', v)
+  },
+  {
+    // How much of the photograph gets through. A stepper, and it stops at 40%:
+    // this is a texture behind text, and past about a third the text is what
+    // suffers. The stylesheet veils the image with the theme's own background
+    // colour at 1 − this, so the value means what it says on every theme.
+    key: 'backgroundOpacity', label: 'Background strength', def: 8, ui: 'stepper',
+    options: PERCENT(2, 40, 2),
+    css: '--texture-opacity', format: (v) => String(v / 100)
   },
   {
     // Scales every chrome measurement at once, because the whole stylesheet is

@@ -106,9 +106,12 @@ async function main() {
     // gets bumped without anyone checking what it now means.
     const schema = await cdp.evaluate(`(async () => {
       const s = await import('./jvscrpt_and_css_extra/settings.js');
+      const shown = s.SCHEMA.filter(e => e.key !== 'engineSource');
       return {
-        headed: s.SCHEMA.filter(e => e.key !== 'theme' && e.key !== 'engineSource').length,
-        radios: s.SCHEMA.filter(e => e.key !== 'theme' && e.key !== 'engineSource' && !e.ui).length
+        headed: shown.filter(e => e.ui !== 'submenu').length,
+        radios: shown.filter(e => !e.ui).length,
+        steppers: shown.filter(e => e.ui === 'stepper').length,
+        submenus: shown.filter(e => e.ui === 'submenu').length
       };
     })()`, true);
 
@@ -117,15 +120,19 @@ async function main() {
     // engineSource is hidden where no process can be started, which is every
     // browser — see settingsMenuSpec.
     check('has a row per setting',
-      opened.heads.length === schema.headed && opened.subTriggers === 1,
+      opened.heads.length === schema.headed,
       `${opened.heads.length} of ${schema.headed}: ${opened.heads.join(' · ')}`);
     // Scales are steppers and theme is a submenu, so only the remaining
     // list-style settings carry a ■ in the top level.
     check('marks one choice per top-level list setting',
       opened.checked.length === schema.radios,
       `${opened.checked.length} marked: ${opened.checked.join(' | ')}`);
-    check('scales render as steppers', opened.steppers === 2, `${opened.steppers} steppers`);
-    check('theme is a submenu', opened.subTriggers === 1, `${opened.subTriggers} triggers`);
+    check('scales render as steppers', opened.steppers === schema.steppers,
+      `${opened.steppers} of ${schema.steppers}`);
+    // Theme and background: the two settings with enough choices to crowd the
+    // menu as a flat list.
+    check('the long lists are submenus', opened.subTriggers === schema.submenus,
+      `${opened.subTriggers} of ${schema.submenus} triggers`);
     check('the standalone Theme button is gone', !opened.themeButton);
     check('no native <select> in the topbar', opened.selects === 0, `${opened.selects} selects`);
     check('button reports expanded', opened.expanded === 'true');
@@ -143,12 +150,18 @@ async function main() {
       // Theme lives behind a submenu now: open it, then pick.
       document.querySelector('.menu-item.has-submenu')?.click();
       const okTheme = pick('Forest');
-      // UI size is the first stepper; three clicks of + walks 100 -> 130%.
-      const plus = document.querySelectorAll('.menu-stepper')[0].querySelector('[data-step="1"]');
-      for (let i = 0; i < 3; i++) {
-        document.querySelectorAll('.menu-stepper')[0].querySelector('[data-step="1"]').click();
-      }
-      const okSize = !!plus;
+      // By label, not by position: the schema's order is not this test's
+      // business, and a stepper added above UI size would silently retarget it.
+      const stepperFor = (label) => {
+        const head = [...document.querySelectorAll('.menu-head')]
+          .find(h => h.textContent.trim() === label);
+        return head && head.nextElementSibling?.classList.contains('menu-stepper')
+          ? head.nextElementSibling : null;
+      };
+      // Re-found each time: the menu re-renders after every step, so a handle
+      // taken once is detached by the second click.
+      const okSize = !!stepperFor('UI size');
+      for (let i = 0; i < 3; i++) stepperFor('UI size')?.querySelector('[data-step="1"]').click();
       const cs = getComputedStyle(document.documentElement);
       return {
         okTheme, okSize,
@@ -1233,6 +1246,72 @@ async function main() {
     })()`, true);
     // The harness answers confirm() with OK, so this is the confirmed path.
     check('delete removes the file', !deleted.paths.includes('notes/renamed.tex'), deleted.status);
+
+    /* ── background texture ─────────────────────────────────────────── */
+    const texture = await cdp.evaluate(`(async () => {
+      const s = await import('./jvscrpt_and_css_extra/settings.js');
+      const body = () => getComputedStyle(document.body);
+      const paneAlpha = () => getComputedStyle(document.getElementById('sidebar')).backgroundColor;
+
+      const noneImage = body().backgroundImage;
+      const opaquePane = paneAlpha();
+
+      s.set('background', 'bg_3');
+      s.set('backgroundOpacity', 20);
+      const on = {
+        image: body().backgroundImage,
+        size: body().backgroundSize,
+        attr: document.documentElement.getAttribute('data-background'),
+        opacity: getComputedStyle(document.documentElement).getPropertyValue('--texture-opacity').trim(),
+        veil: getComputedStyle(document.body, '::before').opacity,
+        pane: paneAlpha()
+      };
+
+      s.set('background', 'none');
+      return { noneImage, opaquePane, on, backToNone: body().backgroundImage,
+               paneBack: paneAlpha() };
+    })()`, true);
+
+    check('no texture by default', texture.noneImage === 'none', texture.noneImage);
+    check('choosing one paints it behind the interface',
+      /image_assets\/bg_3_web\.jpg/.test(texture.on.image) && texture.on.size === 'cover',
+      `${texture.on.image.slice(0, 52)} · ${texture.on.size}`);
+    // Strength is a veil of the theme's own background colour at 1 − strength,
+    // so the number means the same thing on every theme.
+    check('strength veils it by the same amount on any theme',
+      texture.on.opacity === '0.2' && Math.abs(Number(texture.on.veil) - 0.8) < 0.01,
+      `--texture-opacity ${texture.on.opacity}, veil ${texture.on.veil}`);
+    // Opaque panes would leave the texture visible only in the editor, which
+    // reads as a bug rather than a choice.
+    // Computed colours come back as rgba() or color(srgb …); either way the
+    // pane must have gained an alpha it did not have.
+    check('the panes let it through',
+      /\/\s*0?\.\d+|rgba\(/.test(texture.on.pane) && texture.on.pane !== texture.opaquePane,
+      `${texture.opaquePane} → ${texture.on.pane}`);
+    check('turning it off removes it entirely',
+      texture.backToNone === 'none' && texture.paneBack === texture.opaquePane,
+      `${texture.backToNone} · ${texture.paneBack}`);
+
+    // The pre-paint script has to know about it too, or a stored background
+    // arrives a frame late — the flash this app already avoids for themes.
+    await cdp.evaluate(`(async () => {
+      const s = await import('./jvscrpt_and_css_extra/settings.js');
+      s.set('background', 'bg_6');
+      s.set('backgroundOpacity', 12);
+    })()`, true);
+    await cdp.send('Page.reload');
+    await sleep(2500);
+    await cdp.waitFor('!!document.documentElement.getAttribute("data-background")',
+      { what: 'reload with a texture', timeoutMs: 30000 });
+    const rebooted = await cdp.evaluate(`(() => ({
+      attr: document.documentElement.getAttribute('data-background'),
+      opacity: getComputedStyle(document.documentElement).getPropertyValue('--texture-opacity').trim(),
+      image: getComputedStyle(document.body).backgroundImage.slice(0, 60)
+    }))()`, true);
+    check('the texture is applied before the app module runs',
+      rebooted.attr === 'bg_6' && rebooted.opacity === '0.12'
+      && /bg_6_web\.jpg/.test(rebooted.image),
+      `${rebooted.attr} at ${rebooted.opacity}`);
 
     const expected = /favicon|\/api\/projects/i;
     const real = pageErrors.filter(e => !expected.test(e));

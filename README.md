@@ -72,6 +72,7 @@ rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-t
 │    dialog.js                    modal shell + form with a live preview       │
 │    picker.js                    lazy card strip: figures, by thumbnail       │
 │    file_tree.js                 paths → a nested tree; pure, no DOM          │
+│  image_assets/                  background photographs — proprietary        │
 │    math_preview.js              KaTeX, loaded on first use                   │
 │    katex/                       vendored — see build_tools/vendor_assets.js  │
 │    settings.js                  one declarative table: load, apply, menu     │
@@ -404,6 +405,10 @@ must be settled before any public release:
   the versions in `build_tools/`.
 - **Harald Revery fonts, logo and icons** — proprietary, not covered by
   Apache-2.0. See `font/FONT-LICENSE.txt`.
+- **`www/image_assets/`** — the background photographs, also proprietary. They
+  are the same brand assets Revery Notebook ships under its `LICENSE-ASSETS`,
+  which permits use only within that software; they are here with the copyright
+  holder's intent, and are not covered by Apache-2.0 either.
 - Do **not** copy Overleaf's `lezer-latex` grammar; it is AGPL-3.0. The editor
   uses `stex` from `@codemirror/legacy-modes` for exactly this reason, which is
   why structural features work over document text rather than a parse tree.

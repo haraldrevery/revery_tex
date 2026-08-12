@@ -77,8 +77,50 @@ html { font-size:calc(16px * var(--ui-scale, 1)) }
 
 html,body { height:100%; margin:0; overflow:hidden }
 body {
-  background:var(--bg); color:var(--text); font-family:var(--font-mono);
+  background-color:var(--bg); color:var(--text); font-family:var(--font-mono);
   font-size:.75rem; display:flex; flex-direction:column;
+  /* The texture, when one is chosen. Paths live here rather than in JS so the
+     pre-paint script can apply a stored choice by attribute alone, knowing
+     nothing about what any value means — the same rule the font stacks follow,
+     and the reason there is no second copy of anything to drift. */
+  background-image:var(--texture-image, none);
+  background-size:cover; background-position:center; background-attachment:fixed;
+}
+
+/* ── background texture ─────────────────────────────────────────────── */
+[data-background="bg_1"] body { --texture-image:url('../image_assets/bg_1_web.jpg') }
+[data-background="bg_2"] body { --texture-image:url('../image_assets/bg_2_web.jpg') }
+[data-background="bg_3"] body { --texture-image:url('../image_assets/bg_3_web.jpg') }
+[data-background="bg_4"] body { --texture-image:url('../image_assets/bg_4_web.jpg') }
+[data-background="bg_5"] body { --texture-image:url('../image_assets/bg_5_web.jpg') }
+[data-background="bg_6"] body { --texture-image:url('../image_assets/bg_6_web.jpg') }
+[data-background="bg_7"] body { --texture-image:url('../image_assets/bg_7_web.jpg') }
+
+/* The veil: the theme's own background colour at 1 − strength, over the photo.
+   A separate layer rather than opacity on the image itself, because an element
+   cannot fade its own background — and doing it with the theme variable means
+   the strength means the same thing on all four themes, with no per-theme
+   colour repeated here to fall out of step. */
+[data-background]:not([data-background="none"]) body::before {
+  content:''; position:fixed; inset:0; pointer-events:none;
+  background:var(--bg); opacity:calc(1 - var(--texture-opacity, 1));
+}
+/* Above the veil. Body's children are the whole interface. */
+body > * { position:relative }
+
+/* Panes are opaque by default; with a texture behind them they let it through.
+   Only under a chosen background, so nothing composites when none is set. */
+[data-background]:not([data-background="none"]) :is(#sidebar, #pdfpane, #outlinepane, #panel) {
+  background:color-mix(in srgb, var(--bg-panel) 62%, transparent);
+}
+[data-background]:not([data-background="none"]) :is(#topbar, #notice, #pdf) {
+  background:color-mix(in srgb, var(--bg) 62%, transparent);
+}
+/* CodeMirror paints its own surface; without this the editor is the one pane
+   the texture never reaches, which reads as a bug rather than a choice. */
+[data-background]:not([data-background="none"]) .cm-editor,
+[data-background]:not([data-background="none"]) .cm-gutters {
+  background:transparent !important;
 }
 
 /* ── chrome ─────────────────────────────────────────────────────────── */

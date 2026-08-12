@@ -16,18 +16,30 @@
   try { stored = JSON.parse(localStorage.getItem('revery_tex_settings')) || {}; } catch (e) { return; }
 
   var root = document.documentElement;
-  var ATTR = { theme: 'data-theme', editorFont: 'data-editor-font', panelOrder: 'data-panel-order' };
+  var ATTR = {
+    theme: 'data-theme', editorFont: 'data-editor-font', panelOrder: 'data-panel-order',
+    // The background is an identifier here and a URL only in the stylesheet, so
+    // this stays free of anything that could be pointed somewhere else.
+    background: 'data-background'
+  };
   var SCALE = { uiSize: '--ui-scale', editorSize: '--editor-scale', editorLineHeight: '--editor-line-height' };
+  // Ratios that are not sizes, so they get their own bounds: a background at
+  // 300% would be a photograph with the interface behind it.
+  var RATIO = { backgroundOpacity: '--texture-opacity' };
 
   for (var key in ATTR) {
     var v = stored[key];
     // Attribute values reach CSS selectors, so accept only a plain identifier.
     // localStorage is user-editable and this runs before anything else.
-    if (typeof v === 'string' && /^[a-z-]{1,24}$/.test(v)) root.setAttribute(ATTR[key], v);
+    if (typeof v === 'string' && /^[a-z0-9_-]{1,24}$/.test(v)) root.setAttribute(ATTR[key], v);
   }
   for (var k in SCALE) {
     var n = stored[k];
     if (typeof n === 'number' && n >= 50 && n <= 300) root.style.setProperty(SCALE[k], String(n / 100));
+  }
+  for (var r in RATIO) {
+    var p = stored[r];
+    if (typeof p === 'number' && p >= 0 && p <= 100) root.style.setProperty(RATIO[r], String(p / 100));
   }
   if (stored.theme === 'light' || stored.theme === 'paper') root.style.colorScheme = 'light';
   else if (stored.theme === 'dark' || stored.theme === 'forest') root.style.colorScheme = 'dark';

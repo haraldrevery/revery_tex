@@ -88,10 +88,10 @@ function settingsMenuSpec() {
     // that silently does nothing. Hide it instead of letting it lie.
     if (s.key === 'engineSource' && !NativeTexEngine.available(NativeAPI)) continue;
     rows.push({
-      // Theme is a submenu, as in Revery Notebook: four colour schemes are the
-      // least frequently changed setting here and do not need four permanent
-      // rows at the top of the menu.
-      type: s.key === 'theme' ? 'submenu' : (s.ui || 'radio'),
+      // The schema says how a setting is rendered — `submenu` for the ones with
+      // enough choices to crowd the menu (theme, background), `stepper` for
+      // scales, a flat list otherwise.
+      type: s.ui || 'radio',
       label: s.label,
       options: s.options,
       get: () => settings.settings[s.key],
