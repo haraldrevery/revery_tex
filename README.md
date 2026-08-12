@@ -59,6 +59,9 @@ rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-t
 │    native_api_web.js            File System Access backend (Chromium)        │
 │    native_api_zip.js            IndexedDB backend (Firefox, Safari)          │
 │    zip_core.js                  zip reader/writer, no dependencies           │
+│    project_store.js             folder/fixture → project; no DOM             │
+│    engine_host.js               picks, starts and replaces the TeX engine    │
+│    log_console.js               Issues, Raw log and the status line          │
 │    settings.js                  one declarative table: load, apply, menu     │
 │    menus.js                     dropdown component (radio, stepper, action)  │
 │    settings_boot.js             pre-paint theme, so there is no flash        │
@@ -199,6 +202,12 @@ compared byte-for-byte before the build is called a success.
 ---
 
 ## Testing
+
+```bash
+npm run check                                    # all six suites, servers and all
+```
+
+Individually, when you want the detail:
 
 ```bash
 npm run serve &                                  # required by the gate

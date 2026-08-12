@@ -12,8 +12,8 @@
 // as `project.onDisk`, not of which shell is running. The fixtures are the only
 // source that cannot be saved.
 
-import { WasmTexEngine } from './tex_engine_wasm.js';
 import { NativeTexEngine } from './tex_engine_native.js';
+import { createEngineHost } from './engine_host.js';
 import { PdfPreview } from './pdf_preview.js';
 import { NativeAPI } from './native_api.js';
 import { latexEditingExtensions, setDiagnostics, beginEndInsertion } from './latex_editor.js';
@@ -36,7 +36,6 @@ const projectSel = new SelectMenu($('project'), { empty: 'no project' });
 const engineSel = new SelectMenu($('engine'), { empty: 'engine' });
 
 // ── state ──────────────────────────────────────────────────────────────
-let engine = null;
 let project = null;          // { key, main, engine, files: Map<path, {content, dirty}> }
 let currentPath = null;
 let view = null;             // CodeMirror EditorView
@@ -555,57 +554,17 @@ async function loadProject(key) {
 
 // ── compile ────────────────────────────────────────────────────────────
 
-/**
- * Which engine the user has asked for, narrowed to what can actually run.
- *
- * A system TeX needs two things the bundled engine does not: a shell that can
- * start a process, and files on disk. The dev-server fixtures live only in
- * memory, so "system" silently falling back is better than a compile that
- * reads whatever stale copy happens to be on disk — which would be worse than
- * failing, because it would look like it worked.
- */
-function engineSource() {
-  const want = settings.settings.engineSource;
-  if (want !== 'system') return 'bundled';
-  if (!NativeTexEngine.available(NativeAPI)) return 'bundled';
-  if (!project?.onDisk) return 'bundled';
-  return 'system';
-}
-
-const engineLog = (line, level) =>
-  rawLog({ debug: 'dbg', info: 'inf', warn: 'wrn', error: 'err', out: 'dbg', hdr: 'hdr' }[level] || 'dbg', line);
-
-async function getEngine() {
-  const want = engineSource();
-  // Switching source throws the old engine away rather than keeping both: the
-  // WASM heap is ~500 MB and holding it for an engine nobody is using is the
-  // difference between a comfortable machine and a swapping one.
-  if (engine && engine.__source !== want) { try { engine.dispose(); } catch {} engine = null; }
-  if (engine) return engine;
-
-  engine = want === 'system'
-    ? new NativeTexEngine({ onLog: engineLog, api: NativeAPI })
-    : new WasmTexEngine({ onLog: engineLog });
-  engine.__source = want;
-
-  setStatus(want === 'system' ? 'looking for your TeX installation…' : 'starting engine…', 'warn');
-  try {
-    await engine.init();
-  } catch (err) {
-    // A missing or broken system TeX must not leave the app with no engine at
-    // all; say so and fall back to the one that is always there.
-    if (want === 'system') {
-      rawLog('err', String(err.message || err));
-      rawLog('wrn', 'falling back to the bundled engine');
-      engine = new WasmTexEngine({ onLog: engineLog });
-      engine.__source = 'bundled';
-      await engine.init();
-    } else throw err;
-  }
-  engineSel.setOptions(engine.capabilities.engines.map(e => ({ label: e, value: e })));
-  syncEngineSelect();
-  return engine;
-}
+// The engine's lifecycle — which one, starting it, falling back, disposing —
+// lives in engine_host.js. The compile flow below stays here because it
+// coordinates the editor, the save path, SyncTeX, the PDF pane and the log;
+// moving it would mean injecting most of the app back into it.
+const engineHost = createEngineHost({
+  api: NativeAPI,
+  settings,
+  onLog: rawLog,
+  onStatus: setStatus,
+  projectIsOnDisk: () => !!project?.onDisk
+});
 
 async function compile() {
   if (!project) return;
@@ -616,13 +575,18 @@ async function compile() {
   setIssues([]);
 
   try {
-    const eng = await getEngine();
+    const eng = await engineHost.acquire();
+    // The dropdown reflects what the engine can actually do, so it is filled
+    // after acquiring rather than at boot — capabilities are not known until
+    // the engine has started.
+    engineSel.setOptions(eng.capabilities.engines.map(e => ({ label: e, value: e })));
+    syncEngineSelect();
     const engineName = engineSel.value || preferredEngine();
 
-    rawLog('hdr', `— ${project.key} · ${project.main} · ${engineName} · ${eng.__source}`);
+    rawLog('hdr', `— ${project.key} · ${project.main} · ${engineName} · ${engineHost.source}`);
     // A system TeX reads the real files, so unsaved edits would compile the
     // previous version without saying so.
-    if (eng.__source === 'system' && dirtyCount()) await saveAll();
+    if (engineHost.source === 'system' && dirtyCount()) await saveAll();
     setStatus('compiling…', 'warn');
 
     const files = [...project.files].map(([path, f]) => ({ path, content: f.content }));

@@ -22,7 +22,8 @@
     "test:tauri": "node test/run_tauri.js",
     "test:tauri:engine": "bash test/run_tauri_engine.sh",
     "test:ui": "node test/run_ui.js",
-    "test:tex": "node --test test/tex_run.test.js"
+    "test:tex": "node --test test/tex_run.test.js",
+    "check": "node test/check.js"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

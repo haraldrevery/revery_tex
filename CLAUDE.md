@@ -3,6 +3,16 @@
 Read `README.md` first; it covers architecture, build commands and the gotchas.
 This file is only the things an assistant gets wrong.
 
+## Run everything with one command
+
+    npm run check
+
+Starts both dev servers, runs unit → rust → gate → ui → web → electron, tears
+them down. `npm run check gate ui` runs a subset. It refuses to start if
+something is already on port 8777, because **a long-lived `node test/serve.js`
+does not pick up edits** and testing against a stale one looks exactly like the
+change having broken something.
+
 ## The invariant
 
 `npm run serve &` then `npm run gate` must pass **5/5**. It compiles four real
