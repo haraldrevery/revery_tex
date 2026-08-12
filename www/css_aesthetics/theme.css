@@ -232,6 +232,28 @@ button.primary { color:var(--text); border-color:var(--accent) }
 .node.dirty::after { content:' •'; color:var(--warn) }
 .node.main.dirty::after { content:' ■ •'; color:var(--warn) }
 
+/* ── outline ────────────────────────────────────────────────────────── */
+/* Files and outline share the sidebar's height. Both scroll, so a project with
+   200 files and one with 200 headings both behave. */
+#filetree { flex:1 1 40% }
+#outlinepane { flex:1 1 60%; display:flex; flex-direction:column; min-height:0; border-top:1px solid var(--border) }
+#outlinepane.collapsed { flex:none }
+#outlinepane.collapsed #outline { display:none }
+#outline { flex:1; overflow:auto; padding:4px 0 }
+#outline::-webkit-scrollbar { width:8px; height:8px }
+#outline::-webkit-scrollbar-thumb { background:var(--scrollbar); border-radius:2px }
+.node.sec { font-size:.68rem }
+/* An inset shadow rather than a border: the indent is set inline per level, so
+   a border would shift the text 2px sideways as the cursor moves between
+   headings. Same reason the PDF canvas uses one. */
+.node.sec.here { color:var(--text); box-shadow:inset 2px 0 0 var(--accent) }
+/* Headings in a file the main document never \input{}s: shown, because a
+   chapter whose include is commented out is exactly what you go looking for,
+   but dimmed so it cannot be mistaken for part of the compiled document. */
+.node.orphan { opacity:.55; font-style:italic }
+.node.dim-note { color:var(--text-dim); cursor:default; font-size:.66rem }
+.node.dim-note:hover { background:none }
+
 /* ── editor ─────────────────────────────────────────────────────────── */
 #editor { flex:1; min-height:0; overflow:hidden }
 .cm-editor { height:100% }

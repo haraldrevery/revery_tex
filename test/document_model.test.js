@@ -49,6 +49,15 @@ test('a section title containing a command is readable', async () => {
   assert.equal(ix.sections[0].title, 'The hard case');
 });
 
+test('escaped characters survive the title cleanup', async () => {
+  // From the book fixture. Showing the backslash reads as a bug in the outline
+  // rather than as correct TeX in the source.
+  const ix = await scan({
+    'main.tex': '\\subsection{Multi-Row \\& Multi-Column, 50\\% done\\\\ or so}'
+  });
+  assert.equal(ix.sections[0].title, 'Multi-Row & Multi-Column, 50% done or so');
+});
+
 test('commented-out structure is ignored', async () => {
   // The homework fixture is full of this. A commented \section in the outline
   // would jump the cursor to a line that is not a heading.
@@ -99,6 +108,70 @@ test('environments carry the line range and file', async () => {
   assert.equal(e.file, 'ch/one.tex');
   assert.equal(e.startLine, 2);
   assert.equal(e.endLine, 4);
+});
+
+/* ── the include graph, and the outline built on it ──────────────────── */
+
+/** A project with a `main`, which the include walk starts from. */
+function doc(main, files) {
+  const p = project(files);
+  p.main = main;
+  return p;
+}
+
+test('reading order follows \\input and \\include, not the file map', async () => {
+  const { projectIndex } = await mod();
+  const ix = projectIndex(doc('main.tex', {
+    // Deliberately inserted in an order that is not the reading order.
+    'ch/b.tex': '\\chapter{B}',
+    'main.tex': '\\input{ch/a}\n\\include{ch/b}\n\\input{./ch/c.tex}',
+    'ch/c.tex': '\\chapter{C}',
+    'ch/a.tex': '\\chapter{A}'
+  }));
+  assert.deepEqual(ix.order, ['main.tex', 'ch/a.tex', 'ch/b.tex', 'ch/c.tex']);
+});
+
+test('\\includegraphics is not an include', async () => {
+  const { projectIndex } = await mod();
+  const ix = projectIndex(doc('main.tex', {
+    'main.tex': '\\includegraphics{fig}\n\\includeonly{ch/a}',
+    'fig.tex': '\\section{Trap}',
+    'ch/a.tex': '\\section{Also a trap}'
+  }));
+  assert.deepEqual(ix.order, ['main.tex']);
+});
+
+test('an include cycle terminates', async () => {
+  const { projectIndex } = await mod();
+  const ix = projectIndex(doc('main.tex', {
+    'main.tex': '\\input{a}',
+    'a.tex': '\\input{b}',
+    'b.tex': '\\input{a}\n\\input{main}'
+  }));
+  assert.deepEqual(ix.order, ['main.tex', 'a.tex', 'b.tex']);
+});
+
+test('the outline is in reading order across files', async () => {
+  const { outlineOf } = await mod();
+  const out = outlineOf(doc('main.tex', {
+    'ch/two.tex': '\\chapter{Two}\n\\section{Two.a}',
+    'main.tex': '\\chapter{One}\n\\include{ch/two}\n\\include{ch/three}',
+    'ch/three.tex': '\\chapter{Three}'
+  }));
+  assert.deepEqual(out.map(s => s.title), ['One', 'Two', 'Two.a', 'Three']);
+  assert.ok(out.every(s => s.included));
+});
+
+test('a file nothing includes is flagged, not silently merged in', async () => {
+  // The book fixture ships main_legacy.tex — a whole second copy of the
+  // document. Treating its chapters as part of the outline would show the book
+  // twice, in an order that means nothing.
+  const { outlineOf } = await mod();
+  const out = outlineOf(doc('main.tex', {
+    'main.tex': '\\chapter{Real}',
+    'main_legacy.tex': '\\chapter{Old}'
+  }));
+  assert.deepEqual(out.map(s => [s.title, s.included]), [['Real', true], ['Old', false]]);
 });
 
 /* ── bibliography ────────────────────────────────────────────────────── */

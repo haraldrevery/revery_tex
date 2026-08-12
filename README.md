@@ -62,6 +62,11 @@ rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-t
 │    project_store.js             folder/fixture → project; no DOM             │
 │    engine_host.js               picks, starts and replaces the TeX engine    │
 │    log_console.js               Issues, Raw log and the status line          │
+│    latex_editor.js              CodeMirror behaviour: completion, auto-close │
+│    document_model.js            the one index — nothing else scans the text  │
+│    latex_snippets.js            pure text transforms (wrap, insert, label)   │
+│    editor_actions.js            snippet → CodeMirror edit; shared menu rows  │
+│    outline.js                   sections → sidebar tree, in \include order   │
 │    settings.js                  one declarative table: load, apply, menu     │
 │    menus.js                     dropdown component (radio, stepper, action)  │
 │    settings_boot.js             pre-paint theme, so there is no flash        │

@@ -398,6 +398,98 @@ async function main() {
       ['Bold', 'Italic', 'Underline', 'Code'].every(l => toolbox.includes(l)),
       toolbox.join(' | '));
 
+    /* ── outline ────────────────────────────────────────────────────── */
+    // The book fixture is the one that matters: chapters in separate files
+    // pulled in by \include, plus a main_legacy.tex that is a second complete
+    // main file nothing reads. Ordering by the file map instead of the include
+    // graph would show the book twice, interleaved.
+    const switched = await cdp.evaluate(`(() => {
+      document.getElementById('project').click();
+      const item = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => b.textContent.trim().replace(/^[■□]\\s*/, '') === 'book');
+      if (item) item.click();
+      return !!item;
+    })()`);
+    check('the book fixture can be selected', switched);
+
+    await cdp.waitFor(
+      `document.getElementById('docname').textContent === 'main.tex' &&
+       document.querySelectorAll('#outline .node.sec').length > 0`,
+      { what: 'the book outline', timeoutMs: 30000 });
+
+    const out = await cdp.evaluate(`(() => {
+      const rows = [...document.querySelectorAll('#outline .node')];
+      const secs = rows.filter(r => r.classList.contains('sec'));
+      const files = secs.map(r => r.title.replace(/:\\d+$/, ''));
+      return {
+        count: secs.length,
+        titles: secs.slice(0, 4).map(r => r.textContent),
+        files,
+        orphanFiles: [...new Set(secs.filter(r => r.classList.contains('orphan'))
+          .map((r, i) => r.title.replace(/:\\d+$/, '')))],
+        firstOrphan: secs.findIndex(r => r.classList.contains('orphan')),
+        lastIncluded: secs.map(r => r.classList.contains('orphan')).lastIndexOf(false),
+        counter: document.getElementById('outlinecount').textContent,
+        // Levels must indent: \\chapter shallower than the \\section under it.
+        indents: [...new Set(secs.map(r => r.style.paddingLeft))].length
+      };
+    })()`, true);
+
+    check('the outline lists the book headings', out.count > 10, `${out.count} headings`);
+    check('the counter matches', out.counter === String(out.count), out.counter);
+    check('reading order starts in the main file', out.files[0] === 'main.tex', out.files[0]);
+    check('chapters appear in \\include order',
+      ['chapters/introduction.tex', 'chapters/tables.tex', 'chapters/figures.tex']
+        .every((f, i, arr) => {
+          const at = out.files.indexOf(f);
+          return at >= 0 && (i === 0 || at > out.files.indexOf(arr[i - 1]));
+        }),
+      [...new Set(out.files)].slice(0, 6).join(' → '));
+    // main_legacy.tex is a complete alternative document. Its headings belong at
+    // the end, marked — not merged into the book's own structure.
+    check('the unreferenced main file is flagged, and last',
+      out.orphanFiles.length > 0 && out.orphanFiles.every(f => f === 'main_legacy.tex') &&
+      out.firstOrphan > out.lastIncluded,
+      `${out.orphanFiles.join(',')} at ${out.firstOrphan} after ${out.lastIncluded}`);
+    check('heading levels are indented', out.indents > 1, `${out.indents} distinct indents`);
+
+    const jumped = await cdp.evaluate(`(() => {
+      const row = [...document.querySelectorAll('#outline .node.sec')]
+        .find(r => r.title.startsWith('chapters/') && !r.classList.contains('orphan'));
+      if (!row) return { ok: false };
+      const [file, line] = row.title.split(':');
+      row.click();
+      const view = window.__reveryTexTest.view();
+      const at = view.state.doc.lineAt(view.state.selection.main.head).number;
+      return {
+        ok: true, file, want: Number(line), at,
+        opened: document.getElementById('editortitle').textContent,
+        text: view.state.doc.line(at).text.trim(),
+        marked: row.classList.contains('here')
+      };
+    })()`, true);
+
+    check('clicking a heading opens its file and moves the cursor',
+      jumped.ok && jumped.opened === jumped.file && jumped.at === jumped.want,
+      `${jumped.opened}:${jumped.at} (wanted ${jumped.file}:${jumped.want})`);
+    // The line it lands on must be the heading itself — an off-by-one here is
+    // invisible in a screenshot and wrong on every jump.
+    check('the cursor lands on the heading line',
+      /^\\(chapter|section|subsection|part)\*?[[{]/.test(jumped.text || ''), jumped.text);
+    check('the outline marks where the cursor is', jumped.marked === true);
+
+    const collapsed = await cdp.evaluate(`(() => {
+      document.getElementById('toggleoutline').click();
+      const hidden = getComputedStyle(document.getElementById('outline')).display === 'none';
+      const stored = JSON.parse(localStorage.getItem('revery_tex_settings') || '{}');
+      document.getElementById('toggleoutline').click();
+      return { hidden, stored: stored.outlineCollapsed,
+               shownAgain: getComputedStyle(document.getElementById('outline')).display !== 'none' };
+    })()`, true);
+    check('the outline collapses and the state is remembered',
+      collapsed.hidden && collapsed.stored === true && collapsed.shownAgain,
+      JSON.stringify(collapsed));
+
     const expected = /favicon|\/api\/projects/i;
     const real = pageErrors.filter(e => !expected.test(e));
     check('no unexpected page errors', real.length === 0, real.slice(0, 2).join(' | '));

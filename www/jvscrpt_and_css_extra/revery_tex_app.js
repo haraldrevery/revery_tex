@@ -22,6 +22,7 @@ import { writeZip } from './zip_core.js';
 import * as settings from './settings.js';
 import { attachMenu, openMenuAt, SelectMenu } from './menus.js';
 import { formattingRows } from './editor_actions.js';
+import { initOutline, refreshOutline, scheduleOutline } from './outline.js';
 import { $, download } from './dom.js';
 import { readProjectFromDisk, readProjectFromFixture } from './project_store.js';
 import {
@@ -198,12 +199,17 @@ function makeEditor() {
         }
       }),
       CM.EditorView.updateListener.of(u => {
-        if (loadingDoc || !u.docChanged || !currentPath || !project) return;
-        const f = project.files.get(currentPath);
-        f.content = u.state.doc.toString();
-        f.dirty = true;
-        refreshDirty();
-        scheduleBackup();
+        if (u.docChanged && !loadingDoc && currentPath && project) {
+          const f = project.files.get(currentPath);
+          f.content = u.state.doc.toString();
+          f.dirty = true;
+          refreshDirty();
+          scheduleBackup();
+        }
+        // The headings change on an edit, the highlighted one on any cursor
+        // move. Both go through the same coalescing timer, so holding a key
+        // down does not rebuild the index once per character.
+        if (u.docChanged || u.selectionSet) scheduleOutline();
       })
     ]
   });
@@ -224,6 +230,23 @@ function openFile(path) {
     loadingDoc = false;
   }
   for (const n of document.querySelectorAll('.node')) n.classList.toggle('active', n.dataset.path === path);
+  refreshOutline();
+}
+
+/** Where the outline's "you are here" mark belongs. */
+function cursorPosition() {
+  if (!view || !currentPath) return { file: null, line: 0 };
+  return { file: currentPath, line: view.state.doc.lineAt(view.state.selection.main.head).number };
+}
+
+/** An outline row was clicked: open its file if it is not the open one, then go. */
+function gotoSection(file, line) {
+  if (!project) return;
+  if (file !== currentPath && project.files.has(file)) openFile(file);
+  gotoLine(line);
+  // Directly, not through the debounce: the row you just clicked should be
+  // marked as you release the button, not a third of a second later.
+  refreshOutline();
 }
 
 // ── save, dirty state, crash backup ────────────────────────────────────
@@ -792,6 +815,9 @@ window.addEventListener('unhandledrejection', (e) => {
 // through it.
 initLogConsole({ onGotoLine: gotoLine });
 view = makeEditor();
+// Before loading: openFile() refreshes the outline, and it should have somewhere
+// to put the first project's headings rather than rendering them twice.
+initOutline({ project: () => project, position: cursorPosition, onJump: gotoSection });
 await loadProjects();
 // Only claim ready if something actually opened — otherwise loadProjects has
 // already said what the user needs to do, and overwriting it says nothing.
@@ -834,7 +860,7 @@ window.__reveryTexApp = {
     const f = project?.files.get(path);
     if (!f) return false;
     f.content = text; f.dirty = true;
-    if (path === currentPath) openFile(path);
+    if (path === currentPath) openFile(path); else refreshOutline();
     refreshDirty();
     return true;
   },

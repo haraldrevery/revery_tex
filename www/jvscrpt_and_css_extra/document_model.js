@@ -34,7 +34,8 @@ const IMAGE_EXT = /\.(png|jpe?g|pdf|gif|bmp|webp|svg)$/i;
 
 const EMPTY = {
   labels: [], citations: [], files: [], bib: [],
-  environments: [], sections: [], images: [], macros: {}
+  environments: [], sections: [], images: [], macros: {},
+  inputs: {}, order: []
 };
 
 /* ── braces ──────────────────────────────────────────────────────────── */
@@ -56,6 +57,24 @@ function readGroup(text, open) {
     else if (c === '}' && --depth === 0) return { body: text.slice(open + 1, i), end: i };
   }
   return null;
+}
+
+/**
+ * A heading's argument as a person would read it.
+ *
+ * Formatting commands go, but escaped characters must come back: a section
+ * called `Multi-Row \& Multi-Column` is displayed with the backslash otherwise,
+ * which looks like a bug in the outline rather than correct TeX in the source.
+ */
+function plainTitle(body) {
+  return body
+    .replace(/\\\\/g, ' ')                  // line break inside a title
+    .replace(/\\[a-zA-Z]+\s*/g, '')         // \textbf, \emph, …
+    .replace(/\\([&%$#_{}])/g, '$1')        // \& \% \_ … are literal characters
+    .replace(/[{}]/g, '')
+    .replace(/~/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /** The argument of the first `\cmd{…}` in `text`, or null. */
@@ -131,7 +150,7 @@ function scanFile(path, raw, acc) {
     if (!g) continue;
     acc.sections.push({
       level: SECTION_LEVELS[m[1]],
-      title: g.body.replace(/\\[a-zA-Z]+\s*/g, '').replace(/[{}]/g, '').trim(),
+      title: plainTitle(g.body),
       file: path,
       line: lineOf(offsets, m.index)
     });
@@ -157,6 +176,14 @@ function scanFile(path, raw, acc) {
     });
   }
 
+  // What this file pulls in, in order — the document's reading order, which is
+  // not the same as the order the files happen to sit in the project map.
+  // `\includegraphics` and `\includeonly` do not match: neither has `{` directly
+  // after the command name.
+  for (const m of text.matchAll(/\\(?:input|include)\s*\{([^}]*)\}/g)) {
+    (acc.inputs[path] ??= []).push(m[1].trim());
+  }
+
   // Macros, so a maths preview can be told what the document defines.
   for (const m of text.matchAll(/\\(?:re)?newcommand\s*\{?\\([a-zA-Z@]+)\}?\s*(?:\[(\d+)\])?\s*\{/g)) {
     const g = readGroup(text, text.indexOf('{', m.index + m[0].length - 1));
@@ -167,6 +194,51 @@ function scanFile(path, raw, acc) {
   }
 }
 
+/* ── the include graph ───────────────────────────────────────────────── */
+
+/**
+ * The file `\input{raw}` names, or null.
+ *
+ * TeX resolves relative to the working directory, which is the project root, so
+ * that is tried first; the file's own directory is a fallback because people
+ * write `\input{parts/a}` from `parts/b.tex` and expect it to work under
+ * `\graphicspath`-style habits. The extension is optional in TeX and usually
+ * omitted, so both spellings are tried.
+ */
+function resolveInput(raw, fromFile, files) {
+  const cleaned = raw.replace(/^\.\//, '').trim();
+  if (!cleaned) return null;
+  const dir = fromFile.includes('/') ? fromFile.slice(0, fromFile.lastIndexOf('/') + 1) : '';
+  for (const base of dir ? [cleaned, dir + cleaned] : [cleaned]) {
+    for (const candidate of [base, `${base}.tex`]) {
+      if (files.has(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+/**
+ * The files the document actually reads, in the order it reads them.
+ *
+ * This matters more than it sounds. The book fixture ships a `main_legacy.tex`
+ * — a complete alternative main file that nothing includes. Concatenating every
+ * file's sections would put a second, contradictory copy of the whole book in
+ * the outline. Walking from `main` is what makes the outline the *document's*
+ * structure rather than the folder's.
+ */
+function documentOrder(main, inputs, files) {
+  const order = [];
+  const seen = new Set();
+  const walk = (path) => {
+    if (!path || seen.has(path) || !files.has(path)) return;
+    seen.add(path);                                  // before recursing: cycles
+    order.push(path);
+    for (const raw of inputs[path] || []) walk(resolveInput(raw, path, files));
+  };
+  walk(main);
+  return order;
+}
+
 /* ── the index ───────────────────────────────────────────────────────── */
 
 export function scanProject(project) {
@@ -174,7 +246,7 @@ export function scanProject(project) {
 
   const acc = {
     labels: new Set(), citations: new Set(), bib: [],
-    environments: [], sections: [], images: [], macros: {}
+    environments: [], sections: [], images: [], macros: {}, inputs: {}
   };
   const files = [];
 
@@ -197,7 +269,12 @@ export function scanProject(project) {
     environments: acc.environments,
     sections: acc.sections,
     images: acc.images.sort((a, b) => a.path.localeCompare(b.path)),
-    macros: acc.macros
+    macros: acc.macros,
+    inputs: acc.inputs,
+    // `main` is set by project_store; the fallback keeps scanProject usable on
+    // a bare {files} map, as the tests use it.
+    order: documentOrder(project.main || (project.files.has('main.tex') ? 'main.tex' : null),
+                         acc.inputs, project.files)
   };
 }
 
@@ -221,3 +298,24 @@ export function projectIndex(project) {
 /** Environments of one kind, in document order. */
 export const environmentsOfKind = (project, kind) =>
   projectIndex(project).environments.filter(e => e.kind === kind);
+
+/**
+ * Sections in reading order, each flagged with whether the document includes it.
+ *
+ * Files the main file never reads still appear, at the end and marked — a
+ * scratch chapter you are working on should not vanish from the outline just
+ * because the `\include` line is commented out, which is exactly when you are
+ * most likely to be looking for it.
+ */
+export function outlineOf(project) {
+  const ix = projectIndex(project);
+  const rank = new Map(ix.order.map((p, i) => [p, i]));
+  const orphans = [...new Set(ix.sections.map(s => s.file))]
+    .filter(p => !rank.has(p)).sort();
+  orphans.forEach((p, i) => rank.set(p, ix.order.length + i));
+
+  return ix.sections
+    .slice()
+    .sort((a, b) => (rank.get(a.file) - rank.get(b.file)) || (a.line - b.line))
+    .map(s => ({ ...s, included: rank.get(s.file) < ix.order.length }));
+}
