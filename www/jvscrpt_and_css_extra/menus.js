@@ -41,6 +41,14 @@ function bindGlobals() {
     for (const m of [...OPEN]) {
       if (m.el.contains(e.target)) continue;
       if (m.button && m.button.contains(e.target)) continue;
+      // A submenu panel belongs to this menu even though it lives on <body>.
+      // Without this, pressing a submenu row closes the parent, which removes
+      // the panel — and the row is gone before the browser can deliver the
+      // click, so the row's action never runs. Every submenu in the app was
+      // unusable with a real mouse: Reference a table, Insert citation, and
+      // the theme picker. Tests missed it because el.click() fires no
+      // mousedown at all; see realClick in test/run_ui.js.
+      if (m.panels?.some(p => p.contains(e.target))) continue;
       m.close();
     }
   }, true);
@@ -82,7 +90,12 @@ function createMenu(spec, opts = {}) {
   button?.setAttribute('aria-haspopup', 'true');
   button?.setAttribute('aria-expanded', 'false');
 
-  const menu = { el, button, close, open, toggle };
+  // Submenu panels are mounted on <body>, so they are not inside `el` and the
+  // outside-click check below cannot find them by containment. The menu has to
+  // carry them, or pressing a submenu row dismisses the menu it belongs to.
+  const panels = [];
+
+  const menu = { el, button, panels, close, open, toggle };
 
   function items() {
     return [...el.querySelectorAll('.menu-item:not([disabled])')];
@@ -95,9 +108,8 @@ function createMenu(spec, opts = {}) {
     list[Math.max(0, Math.min(i, list.length - 1))].focus();
   }
 
-  // Submenu panels are mounted on <body>, so they have to be taken down by
-  // hand — clearing el.textContent would otherwise leave them orphaned there.
-  const panels = [];
+  // They also have to be taken down by hand — clearing el.textContent would
+  // otherwise leave them orphaned on <body>.
   function dropPanels() {
     for (const p of panels.splice(0)) p.remove();
   }

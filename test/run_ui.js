@@ -21,6 +21,36 @@ function check(name, ok, detail = '') {
   if (!ok) failures++;
 }
 
+/**
+ * A real press-and-release at an element's centre.
+ *
+ * `el.click()` dispatches a lone `click` event — no `mousedown`, no `mouseup`.
+ * Anything that listens for `mousedown` therefore never runs, which is not a
+ * detail: menu dismissal is built on exactly that listener, and a submenu whose
+ * rows were removed on mousedown passed every `.click()` test in this file
+ * while being completely unusable with a mouse.
+ *
+ * @param {string} expr  JS evaluating to the element, e.g. `document.querySelector('…')`
+ */
+async function realClick(cdp, expr) {
+  const at = await cdp.evaluate(`(() => {
+    const el = ${expr};
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    if (!r.width || !r.height) return null;
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  })()`, true);
+  if (!at) return false;
+  // A move first: hover intent opens submenus, and a press with no preceding
+  // move is not a sequence any real pointer produces.
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y, buttons: 0 });
+  for (const type of ['mousePressed', 'mouseReleased']) {
+    await cdp.send('Input.dispatchMouseEvent',
+      { type, x: at.x, y: at.y, button: 'left', buttons: 1, clickCount: 1 });
+  }
+  return true;
+}
+
 /** A missing dev server otherwise reads as "the app failed to boot". */
 async function requireServer() {
   const ok = await fetch(BASE, { signal: AbortSignal.timeout(2000) })
@@ -41,6 +71,12 @@ async function main() {
         cdp.send('Page.handleJavaScriptDialog', { accept: true }).catch(() => {});
       }
     });
+    // A fixed viewport. Real mouse events are dispatched at coordinates, so
+    // "wherever the headless window happened to open" is not good enough — an
+    // element scrolled out of view would be clicked at a point that is not on
+    // it, and the failure would look like the feature being broken.
+    await cdp.send('Emulation.setDeviceMetricsOverride',
+      { width: 1400, height: 950, deviceScaleFactor: 1, mobile: false });
     await cdp.waitFor('!!window.__reveryTexApp', { what: 'app boot', timeoutMs: 60000 });
 
     /* ── the menu opens and reflects real state ─────────────────────── */
@@ -157,12 +193,16 @@ async function main() {
       trigger.click();
       const panel = document.querySelector('.submenu:not([hidden])');
       const choices = panel ? [...panel.querySelectorAll('.menu-item')].map(b => b.textContent.trim()) : [];
-      const marked = choices.filter(t => t.startsWith('■'));
-      // Choosing from the submenu must change the page, same as any other row.
-      panel?.querySelector('.menu-item')?.click();
-      const after = document.documentElement.getAttribute('data-theme');
+      return { label, choices, marked: choices.filter(t => t.startsWith('■')), opened: !!panel };
+    })()`);
+    // Chosen with a real mouse. A submenu panel is mounted on <body>, so it is
+    // outside the parent menu that the global mousedown handler dismisses on —
+    // and a synthetic .click() never fires mousedown, so it cannot see that.
+    await realClick(cdp, `document.querySelector('.submenu:not([hidden]) .menu-item')`);
+    sub.after = await cdp.evaluate(`(() => {
+      const t = document.documentElement.getAttribute('data-theme');
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      return { label, choices, marked, after, opened: !!panel };
+      return t;
     })()`);
     check('the submenu opens', sub.opened);
     check('it holds all four themes', sub.choices.length === 4, sub.choices.join(' | '));
@@ -616,18 +656,27 @@ async function main() {
       trigger.click();
       const panel = [...document.querySelectorAll('.submenu')].find(p => !p.hidden);
       const rows = panel ? [...panel.querySelectorAll('.menu-item')] : [];
-      const labels = rows.map(b => b.textContent.trim());
-      const tips = rows.map(b => b.title);
-      rows[0]?.click();
-
-      const after = view.state.doc.toString();
+      window.__before = before;
       return {
-        found: true, count: rows.length, labels, tips,
-        inserted: after.length - before.length,
+        found: true, count: rows.length,
+        labels: rows.map(b => b.textContent.trim()),
+        tips: rows.map(b => b.title)
+      };
+    })()`, true);
+
+    // With a real mouse, not el.click(). This is the check that the reported
+    // "Reference a table doesn't work" is about: pressing the button used to
+    // dismiss the parent menu, which removed the panel before the click could
+    // land, so nothing was ever inserted.
+    await realClick(cdp, `[...document.querySelectorAll('.submenu')].find(p => !p.hidden)?.querySelector('.menu-item')`);
+    Object.assign(ref, await cdp.evaluate(`(() => {
+      const after = window.__reveryTexTest.view().state.doc.toString();
+      return {
+        inserted: after.length - window.__before.length,
         tail: after.slice(-30),
         menusClosed: !document.querySelector('.menu-container:not([hidden])')
       };
-    })()`, true);
+    })()`, true));
 
     check('the toolbox lists the tables that can be referenced',
       ref.found && ref.count > 0, `${ref.count} table(s)`);
@@ -651,11 +700,11 @@ async function main() {
       trigger.click();
       const panel = [...document.querySelectorAll('.submenu')].find(p => !p.hidden);
       const rows = panel ? [...panel.querySelectorAll('.menu-item')] : [];
-      const labels = rows.map(b => b.textContent.trim());
-      rows[0]?.click();
-      const text = view.state.doc.toString();
-      return { found: true, count: rows.length, labels, tail: text.slice(-30) };
+      return { found: true, count: rows.length, labels: rows.map(b => b.textContent.trim()) };
     })()`, true);
+    await realClick(cdp, `[...document.querySelectorAll('.submenu')].find(p => !p.hidden)?.querySelector('.menu-item')`);
+    cite.tail = await cdp.evaluate(
+      `window.__reveryTexTest.view().state.doc.toString().slice(-30)`, true);
     check('citations are listed from the bibliography',
       cite.found && cite.count > 0, `${cite.count} entr(ies)`);
     // Author and year, not the key: "smith2020" is what goes in the document,
