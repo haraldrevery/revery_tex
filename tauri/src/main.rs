@@ -24,6 +24,10 @@ use serde::Serialize;
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
+// Running the user's own TeX installation. Kept in its own module because it is
+// the only code here that starts a process, and that boundary is worth seeing.
+mod tex_run;
+
 /// The single open project root. Owned by the backend: the renderer can ask to
 /// change it via open_folder_dialog, but cannot set it to an arbitrary path.
 struct RootPath(Mutex<Option<PathBuf>>);
@@ -469,6 +473,36 @@ fn discard_backup(app: tauri::AppHandle, path: String, state: State<'_, RootPath
 
 /* ── entry point ─────────────────────────────────────────────────────── */
 
+/* ── system TeX ──────────────────────────────────────────────────────── */
+
+/// What the user has installed. Cheap enough to call on demand, and it must be
+/// re-checked rather than cached: people install TeX Live while the app is open.
+#[tauri::command]
+fn detect_tex() -> Vec<tex_run::ToolInfo> {
+    tex_run::detect()
+}
+
+/// Run one TeX tool over the open project.
+///
+/// The frontend chooses a tool by name and a main file; it never supplies
+/// arguments. `tex_run` builds argv, and the path here is validated against the
+/// project root exactly as a read or a write would be — a compile is not a
+/// reason to relax containment.
+#[tauri::command]
+fn run_tex(
+    tool: String,
+    main_file: String,
+    timeout_secs: Option<u64>,
+    state: State<'_, RootPath>,
+) -> Result<tex_run::RunResult, String> {
+    let root = get_root(&state)?;
+    let abs = safe_path_inside(&root.join(&main_file).to_string_lossy(), &root)?;
+    if !abs.exists() {
+        return Err(format!("{main_file} does not exist in the project"));
+    }
+    tex_run::run_tool(&tool, &main_file, &root, timeout_secs)
+}
+
 fn main() {
     // Seed the root from the environment or argv, so the app can be launched
     // straight into a project. Also what makes the desktop path testable without
@@ -493,6 +527,8 @@ fn main() {
             write_backup,
             list_stale_backups,
             discard_backup,
+            detect_tex,
+            run_tex,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Revery TeX");

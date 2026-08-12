@@ -39,6 +39,26 @@ never completed. `test/frontend_payload.test.js` now enforces a size ceiling.
 Electron survived it only because `electron-builder.yml` lists files explicitly.
 Two packagers independently excluding the same thing is not a strategy.
 
+## The subprocess layer
+
+`tauri/src/tex_run.rs` and `electron/tex_run.js` are the only code that starts a
+process, and they run on a directory the user may have downloaded. Do not
+loosen any of this without a reason written down:
+
+- **`latexmk` is not on the allowlist and must not be added.** It executes
+  `latexmkrc` from the working directory as Perl.
+- **`-no-shell-escape` on every invocation.** `\write18` runs shell commands
+  from inside the document.
+- **argv is built in the backend.** The renderer names a tool and a file; it
+  cannot pass a flag. The sandbox must not depend on the UI being careful.
+- **No shell, and no `which`.** PATH is walked by hand, skipping empty entries
+  (which mean `.`), so a file named `pdflatex` inside a project cannot become
+  the compiler.
+
+The two implementations must stay identical — a test compares their argv and
+allowlists, because a document that compiles in one shell and not the other is
+undiagnosable.
+
 ## Generated files — never edit directly
 
 - `www/jvscrpt_and_css_extra/codemirror-bundle.js` → edit `build_tools/cm_entry_tex.js`

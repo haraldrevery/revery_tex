@@ -35,7 +35,14 @@ const tauriImpl = {
 
   writeBackup: (path, content) => invoke('write_backup', { path, content }),
   listStaleBackups: () => invoke('list_stale_backups'),
-  discardBackup: (path) => invoke('discard_backup', { path })
+  discardBackup: (path) => invoke('discard_backup', { path }),
+
+  // A system TeX installation, if there is one. Present only on the desktop:
+  // a browser cannot start a process, and NativeTexEngine checks for these by
+  // presence rather than asking which shell it is in.
+  detectTex: () => invoke('detect_tex'),
+  runTex: (tool, mainFile, timeoutSecs) =>
+    invoke('run_tex', { tool, mainFile, timeoutSecs: timeoutSecs ?? null })
 };
 
 /**
@@ -68,7 +75,10 @@ const electronImpl = isElectron ? {
 
   writeBackup: (path, content) => window.electronAPI.writeBackup(path, content),
   listStaleBackups: () => window.electronAPI.listStaleBackups(),
-  discardBackup: (path) => window.electronAPI.discardBackup(path)
+  discardBackup: (path) => window.electronAPI.discardBackup(path),
+
+  detectTex: () => window.electronAPI.detectTex(),
+  runTex: (tool, mainFile, timeoutSecs) => window.electronAPI.runTex(tool, mainFile, timeoutSecs)
 } : null;
 
 /**

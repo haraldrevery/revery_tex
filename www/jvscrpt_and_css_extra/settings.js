@@ -24,6 +24,10 @@ const root = document.documentElement;
  * @property {string} [css]    custom property to set
  * @property {(v:*)=>string} [format]  value -> CSS text (defaults to String)
  * @property {(v:*)=>void} [effect]    anything not expressible as a property
+ * @property {'app'} [appliedBy]  read directly by the app rather than pushed
+ *   into the DOM. Must be declared, so that "shown in the menu but wired to
+ *   nothing" stays a test failure rather than a category the test learns to
+ *   ignore.
  * @property {'stepper'} [ui]  render as - value + instead of a list of choices.
  *   For scales: fourteen percentages as fourteen rows makes the menu a column
  *   nobody can scan.
@@ -97,8 +101,19 @@ export const SCHEMA = [
   {
     // Off matters for large documents, where a 20-second recompile on every
     // Ctrl+S is worse than pressing Ctrl+Enter when you actually want one.
-    key: 'autoCompile', label: 'Compile after save', def: true,
+    key: 'autoCompile', label: 'Compile after save', def: true, appliedBy: 'app',
     options: [{ label: 'On', value: true }, { label: 'Off', value: false }]
+  },
+  {
+    // Bundled is the default because it always works: no install, no PATH, the
+    // same result on every machine. A system TeX is the escape hatch for the
+    // two things WASM cannot do — biber, and packages outside the slim bundle.
+    // The app narrows this to what can actually run; see engineSource().
+    key: 'engineSource', label: 'LaTeX engine', def: 'bundled', appliedBy: 'app',
+    options: [
+      { label: 'Bundled (offline)', value: 'bundled' },
+      { label: 'System TeX Live', value: 'system' }
+    ]
   }
 ];
 

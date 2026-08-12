@@ -13,6 +13,7 @@
 // source that cannot be saved.
 
 import { WasmTexEngine } from './tex_engine_wasm.js';
+import { NativeTexEngine } from './tex_engine_native.js';
 import { PdfPreview } from './pdf_preview.js';
 import { NativeAPI } from './native_api.js';
 import { latexEditingExtensions, setDiagnostics, beginEndInsertion } from './latex_editor.js';
@@ -73,6 +74,9 @@ function refreshEditorMetrics() {
 function settingsMenuSpec() {
   const rows = [];
   for (const s of settings.SCHEMA) {
+    // Offering a system TeX where no process can be started would be a control
+    // that silently does nothing. Hide it instead of letting it lie.
+    if (s.key === 'engineSource' && !NativeTexEngine.available(NativeAPI)) continue;
     rows.push({
       type: s.ui || 'radio',      // the schema decides; a scale is a stepper
       label: s.label,
@@ -86,6 +90,12 @@ function settingsMenuSpec() {
     type: 'note',
     label: 'The preview is a rendered PDF, so its typography comes from the document, not from here.'
   });
+  if (NativeTexEngine.available(NativeAPI)) {
+    rows.push({
+      type: 'note',
+      label: 'A system TeX needs the project saved to disk. Shell escape stays disabled either way.'
+    });
+  }
   rows.push({ type: 'divider' });
   rows.push({ type: 'action', label: 'Reset to defaults', run: () => settings.reset() });
   return rows;
@@ -705,14 +715,54 @@ function b64ToBytes(b64) {
 }
 
 // ── compile ────────────────────────────────────────────────────────────
+
+/**
+ * Which engine the user has asked for, narrowed to what can actually run.
+ *
+ * A system TeX needs two things the bundled engine does not: a shell that can
+ * start a process, and files on disk. The dev-server fixtures live only in
+ * memory, so "system" silently falling back is better than a compile that
+ * reads whatever stale copy happens to be on disk — which would be worse than
+ * failing, because it would look like it worked.
+ */
+function engineSource() {
+  const want = settings.settings.engineSource;
+  if (want !== 'system') return 'bundled';
+  if (!NativeTexEngine.available(NativeAPI)) return 'bundled';
+  if (!project?.onDisk) return 'bundled';
+  return 'system';
+}
+
+const engineLog = (line, level) =>
+  rawLog({ debug: 'dbg', info: 'inf', warn: 'wrn', error: 'err', out: 'dbg', hdr: 'hdr' }[level] || 'dbg', line);
+
 async function getEngine() {
+  const want = engineSource();
+  // Switching source throws the old engine away rather than keeping both: the
+  // WASM heap is ~500 MB and holding it for an engine nobody is using is the
+  // difference between a comfortable machine and a swapping one.
+  if (engine && engine.__source !== want) { try { engine.dispose(); } catch {} engine = null; }
   if (engine) return engine;
-  engine = new WasmTexEngine({
-    onLog: (line, level) =>
-      rawLog({ debug: 'dbg', info: 'inf', warn: 'wrn', error: 'err' }[level] || 'dbg', line)
-  });
-  setStatus('starting engine…', 'warn');
-  await engine.init();
+
+  engine = want === 'system'
+    ? new NativeTexEngine({ onLog: engineLog, api: NativeAPI })
+    : new WasmTexEngine({ onLog: engineLog });
+  engine.__source = want;
+
+  setStatus(want === 'system' ? 'looking for your TeX installation…' : 'starting engine…', 'warn');
+  try {
+    await engine.init();
+  } catch (err) {
+    // A missing or broken system TeX must not leave the app with no engine at
+    // all; say so and fall back to the one that is always there.
+    if (want === 'system') {
+      rawLog('err', String(err.message || err));
+      rawLog('wrn', 'falling back to the bundled engine');
+      engine = new WasmTexEngine({ onLog: engineLog });
+      engine.__source = 'bundled';
+      await engine.init();
+    } else throw err;
+  }
   const sel = $('engine');
   sel.textContent = '';
   for (const e of engine.capabilities.engines) {
@@ -737,7 +787,10 @@ async function compile() {
     const eng = await getEngine();
     const engineName = $('engine').value || preferredEngine();
 
-    rawLog('hdr', `— ${project.key} · ${project.main} · ${engineName}`);
+    rawLog('hdr', `— ${project.key} · ${project.main} · ${engineName} · ${eng.__source}`);
+    // A system TeX reads the real files, so unsaved edits would compile the
+    // previous version without saying so.
+    if (eng.__source === 'system' && dirtyCount()) await saveAll();
     setStatus('compiling…', 'warn');
 
     const files = [...project.files].map(([path, f]) => ({ path, content: f.content }));
@@ -747,7 +800,9 @@ async function compile() {
       mainFile: project.main,
       engine: engineName,
       passes: !!project.rerun,
-      bibtex: false,
+      // The bundled engine has no biber at all; a system TeX usually does, so
+      // a bibliography is only attempted where it can succeed.
+      bibtex: eng.capabilities.biber || eng.capabilities.bibtex ? !!project.bibtex : false,
       makeindex: !!project.makeindex
     });
     const secs = ((performance.now() - t0) / 1000).toFixed(1);

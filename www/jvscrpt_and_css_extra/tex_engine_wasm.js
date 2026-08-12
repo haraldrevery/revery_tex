@@ -25,6 +25,10 @@
 // imported from outside www/ simply is not there at runtime. The copy under
 // vendor/texlyre-busytex/ stays as the provenance record (AGPL-3.0), mirroring
 // Revery Notebook's third_party_sources/ convention.
+// Log reading is shared with the system-TeX engine: two parsers would mean
+// the Issues tab disagreeing with itself depending on which engine ran.
+import { parseLatexLog as parseDiagnostics, missingPackages, pagesFromLog, firstTexError } from './latex_log.js';
+
 import { BusyTexRunner, PdfLatex, XeLatex, LuaLatex, clearAllPackageCache }
   from './texlyre_busytex.js';
 
@@ -37,59 +41,6 @@ const DRIVER = {
   xelatex: 'xetex_bibtex8_dvipdfmx',
   lualatex: 'luahbtex_bibtex8'
 };
-
-function firstTexError(log) {
-  const m = /^! (.+)$/m.exec(log || '');
-  return m ? m[1].trim() : null;
-}
-
-// A slim texmf makes "package not in the bundle" the most likely failure, so
-// it must be named rather than buried in 4000 lines of log.
-function missingPackages(log) {
-  const found = new Set();
-  const patterns = [
-    /(?:File|Package) [`'"]?([\w@.-]+\.(?:sty|cls|def|fd|cfg))['"`]? not found/gi,
-    /! LaTeX Error: File [`'"]([^'"`]+)['"`] not found/gi,
-    /Package fontspec Error:[\s\S]{0,80}?The font "([^"]+)" cannot be found/gi
-  ];
-  for (const re of patterns) {
-    let m;
-    while ((m = re.exec(log || ''))) found.add(m[1]);
-  }
-  return [...found];
-}
-
-// Structured diagnostics for the Issues tab. Deliberately conservative: the
-// raw log stays the source of truth, this is only the index into it.
-function parseDiagnostics(log) {
-  const out = [];
-  const text = log || '';
-
-  for (const m of text.matchAll(/^! (?:LaTeX|Package|Class)?\s*(?:([\w@-]+) )?[Ee]rror:?\s*(.*)$/gm)) {
-    out.push({ severity: 'error', package: m[1] || null, message: (m[2] || '').trim() || 'LaTeX error' });
-  }
-  for (const m of text.matchAll(/^! (?!(?:LaTeX|Package|Class)).+$/gm)) {
-    out.push({ severity: 'error', package: null, message: m[0].slice(2).trim() });
-  }
-  for (const m of text.matchAll(/^(?:(LaTeX|Package|Class) ([\w@-]+)? ?)?Warning: (.*?)(?: on input line (\d+))?\.?$/gm)) {
-    if (!m[3]) continue;
-    out.push({ severity: 'warning', package: m[2] || null, message: m[3].trim(), line: m[4] ? Number(m[4]) : null });
-  }
-
-  // dedupe — multi-pass compiles repeat every diagnostic
-  const seen = new Set();
-  return out.filter(d => {
-    const k = `${d.severity}|${d.package}|${d.message}|${d.line ?? ''}`;
-    if (seen.has(k)) return false;
-    seen.add(k);
-    return true;
-  });
-}
-
-function pagesFromLog(log) {
-  const m = /Output written on [^(]*\((\d+) pages?/.exec(log || '');
-  return m ? Number(m[1]) : null;
-}
 
 export class WasmTexEngine {
   /** Absolute URL, no trailing slash, relative to the document. */

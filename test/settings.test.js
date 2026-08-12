@@ -132,7 +132,8 @@ test('every schema entry actually does something on apply', async () => {
   // this table structure exists to make impossible.
   const { mod } = await load(undefined);
   for (const s of mod.SCHEMA) {
-    if (s.key === 'autoCompile') continue;   // read directly by the app, no DOM
-    assert.ok(s.css || s.effect, `${s.key}: has neither a css property nor an effect`);
+    assert.ok(s.css || s.effect || s.appliedBy === 'app',
+      `${s.key}: has no css property, no effect, and does not declare appliedBy — ` +
+      `it would appear in the menu wired to nothing`);
   }
 });

@@ -26,6 +26,7 @@ const path = require('path');
 const fs = require('fs');
 const { pathToFileURL } = require('url');
 const core = require('./fs_core.js');
+const texRun = require('./tex_run.js');
 
 const WWW = path.join(__dirname, '..', 'www');
 const SCHEME = 'revery';
@@ -127,6 +128,18 @@ handle('fs:writeFile', (p, c, expect) => core.writeFile(requireRoot(), p, c, exp
 handle('fs:writeBackup', (p, c) => core.writeBackup(backupDir(), requireRoot(), p, c));
 handle('fs:listStaleBackups', () => core.listStaleBackups(backupDir(), requireRoot()));
 handle('fs:discardBackup', (p) => core.discardBackup(backupDir(), requireRoot(), p));
+
+/* ── the user's own TeX installation ─────────────────────────────────── */
+// The renderer names a tool and a main file; it never supplies arguments.
+// tex_run builds argv, and the path is validated against the project root the
+// same way a read or a write is — a compile is not a reason to relax
+// containment.
+handle('tex:detect', () => texRun.detect());
+handle('tex:run', (tool, mainFile, timeoutSecs) => {
+  const root = requireRoot();
+  core.safePathInside(mainFile, root);          // must exist inside the project
+  return texRun.runTool(tool, mainFile, root, timeoutSecs);
+});
 
 app.whenReady().then(() => {
   registerProtocol();

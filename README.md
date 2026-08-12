@@ -211,6 +211,9 @@ npm run serve:static &                           # /api/* returns 404
 npm run test:web                                 # web-fs, web-zip and web (33)
 npm run test:ui                                  # settings menu, end to end (25)
 
+# The subprocess layer. The live cases are skipped without a system TeX.
+node --test test/tex_run.test.js                 # allowlist, argv, \write18, timeout (13)
+
 # The Electron shell, over the real IPC
 npm run test:electron                            # open → save → conflict → compile (14)
 REVERY_TEX_BIN=dist-electron/linux-unpacked/revery-tex npm run test:electron
@@ -268,9 +271,35 @@ match Revery Notebook's zero-test-dependency convention.
 
 ---
 
+## Using your own TeX Live or MiKTeX
+
+Settings → **LaTeX engine → System TeX Live**, on the desktop only. It closes
+the two things the bundled engine cannot do: **biber**, which no WASM build has,
+and packages outside the 62 MB slim bundle.
+
+The bundled engine stays the default because it always works — no install, no
+PATH, the same result on every machine.
+
+This is the only code in the project that starts a process, and it runs on a
+directory the user may have downloaded from anywhere. The rules, all tested:
+
+| | |
+|---|---|
+| **Never `latexmk`** | It reads `latexmkrc` **from the working directory** and executes it as Perl. Opening someone else's project would run their code before a page was typeset. The engines are driven directly instead — more work, and the only safe version. |
+| **Always `-no-shell-escape`** | `\write18` runs shell commands from inside the document. Restricted mode is the usual default; "usually" is not a security property. |
+| **Fixed allowlist** | `pdflatex`, `xelatex`, `lualatex`, `bibtex`, `biber`, `makeindex`. A name, never a path — the frontend cannot ask for anything else. |
+| **argv built in the backend** | The renderer names a tool and a file. It cannot pass a flag even if it wanted to, so the sandbox does not depend on the UI being careful. |
+| **No shell anywhere** | PATH is searched by hand; an empty `PATH` entry (meaning `.`) is skipped, so a file named `pdflatex` in the project cannot become the compiler. |
+| **Contained** | cwd pinned to the validated project root, `openout_any=p`, `openin_any=p`, hard timeout, output capped at 4 MB, stdin closed. |
+
+Both shells implement this identically (`tauri/src/tex_run.rs`,
+`electron/tex_run.js`) and a test asserts their argv and allowlists match, since
+a document that compiles in one shell and not the other is undiagnosable.
+
 ## Known limits
 
-- **No biber.** No WASM build has it. Ship a prebuilt `.bbl`; `makeindex` works.
+- **No biber in the bundled engine.** No WASM build has it — ship a prebuilt
+  `.bbl`, or switch to a system TeX Live on the desktop. `makeindex` works.
 - **Fonts must be referenced by file, not by system name** — WASM has no host
   font database. `\setmainfont{Times New Roman}` cannot work.
 - **No EPS.** That needs Ghostscript. Convert to PDF or PNG first.

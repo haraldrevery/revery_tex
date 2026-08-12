@@ -210,6 +210,43 @@ async function main() {
     /* ── and it actually compiles, through the custom protocol ──────── */
     const result = await cdp.evaluate(`window.__reveryTexApp.compile()`, true);
     check('compiles to a PDF', result.ok && result.pages === 1, result.status);
+
+    /* ── the user's own TeX installation ────────────────────────────── */
+    const tex = await cdp.evaluate(`(async () => {
+      if (!window.NativeAPI.detectTex) return { available: false };
+      const tools = await window.NativeAPI.detectTex();
+      return { available: true, tools: tools.map(t => t.name), versions: tools.map(t => t.version) };
+    })()`);
+    check('system TeX detection is exposed', tex.available);
+    if (tex.available && tex.tools.length) {
+      check('found an engine on PATH', tex.tools.some(t => /latex$/.test(t)), tex.tools.join(', '));
+
+      // The sandbox, through the real IPC rather than the unit tests.
+      const refused = await cdp.evaluate(`(async () => {
+        const out = {};
+        for (const bad of ['sh', 'rm', 'latexmk']) {
+          try { await window.NativeAPI.runTex(bad, 'main.tex'); out[bad] = 'ALLOWED'; }
+          catch (e) { out[bad] = e.message; }
+        }
+        try { await window.NativeAPI.runTex('pdflatex', '../escape.tex'); out.escape = 'ALLOWED'; }
+        catch (e) { out.escape = e.message; }
+        return out;
+      })()`);
+      check('refuses a shell', /not a program/.test(refused.sh || ''), refused.sh);
+      check('refuses rm', /not a program/.test(refused.rm || ''), refused.rm);
+      check('refuses latexmk (it executes latexmkrc)', /not a program/.test(refused.latexmk || ''), refused.latexmk);
+      check('refuses a path outside the project', !/ALLOWED/.test(refused.escape || ''), refused.escape);
+
+      // A real compile with the system engine, end to end through the app.
+      const sys = await cdp.evaluate(`(async () => {
+        const r = await window.NativeAPI.runTex('pdflatex', 'main.tex', 90);
+        return { code: r.code, timedOut: r.timedOut ?? r.timed_out, tail: (r.stdout||'').slice(-200) };
+      })()`, true);
+      check('system TeX compiles the project', sys.code === 0, `exit ${sys.code}`);
+      check('and did not time out', sys.timedOut === false);
+    } else if (tex.available) {
+      console.log('  · no system TeX on this machine — live checks skipped');
+    }
   } finally {
     cleanup();
     if (failures) console.log(`\n--- electron output ---\n${stderr.slice(-2000)}`);
