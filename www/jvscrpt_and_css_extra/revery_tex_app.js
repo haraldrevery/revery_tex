@@ -22,6 +22,7 @@ import { writeZip } from './zip_core.js';
 import * as settings from './settings.js';
 import { attachMenu, SelectMenu } from './menus.js';
 import { $, download } from './dom.js';
+import { readProjectFromDisk, readProjectFromFixture } from './project_store.js';
 import {
   initLogConsole, rawLog, clearLog, setStatus, showTab, togglePanel,
   setIssues, getIssues, hasErrors, logText
@@ -361,7 +362,6 @@ function renderTree() {
 }
 
 // ── project loading (dev server for now) ───────────────────────────────
-const TEXT_RE = /\.(tex|bib|cls|sty|bbl|ind|def|cfg|txt|clo)$/i;
 
 // The engine a project needs is a property of the document, not of whatever is
 // selected in the dropdown. Getting this wrong compiles a fontspec document
@@ -411,7 +411,6 @@ async function loadProjects() {
   if (projectSel.value) await loadProject(projectSel.value);
 }
 
-const TEXT_EXT_RE = /\.(tex|bib|cls|sty|bbl|ind|def|cfg|txt|clo|ltx)$/i;
 
 /** Open a real folder through NativeAPI. Desktop only for now. */
 async function openFolder() {
@@ -514,99 +513,19 @@ async function exportZip() {
  * never needed. A document that branches on the engine runs under either, so
  * pdfLaTeX wins: it is faster and needs fewer font files.
  */
-/**
- * Drop LaTeX comments before looking for commands.
- *
- * Without this, anything scanning the source reads code people have commented
- * out — and they comment out exactly the interesting lines. The homework
- * fixture carries a commented `\bibliography{…}`, which is enough to make an
- * unguarded scan run bibtex on a document that has no bibliography and compiles
- * fine today.
- *
- * A `%` starts a comment unless it is escaped, so an odd number of preceding
- * backslashes means it is literal.
- */
-function stripTexComments(src) {
-  return String(src).replace(/(^|[^\\])((?:\\\\)*)%.*$/gm, '$1$2');
-}
-
-function inferEngine(src) {
-  src = stripTexComments(src);
-  const branches = /\\(?:ifPDFTeX|ifpdftex|ifxetex|ifXeTeX|ifluatex|ifLuaTeX|RequirePackage\{iftex\}|usepackage\{iftex\})/.test(src);
-  if (branches) return 'pdftex';
-  return /\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{(?:fontspec|unicode-math)\}/.test(src)
-    ? 'xetex' : 'pdftex';
-}
-
-/**
- * Which bibliography tool a document needs, or null for none.
- *
- * A tool name rather than a boolean, because the two are not interchangeable:
- * biblatex builds its .bbl with biber, classic \bibliography with bibtex, and
- * running the wrong one fails in a way that reads as a broken document. Both
- * shapes are in the test fixtures — the book template is biblatex, homework is
- * classic — so guessing by "whichever is installed" is wrong for one of them.
- */
-function inferBibTool(src) {
-  src = stripTexComments(src);
-  if (/\\(?:addbibresource|printbibliography)|\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{biblatex\}/.test(src)) {
-    return 'biber';
-  }
-  if (/\\bibliography\{|\\bibliographystyle\{/.test(src)) return 'bibtex';
-  return null;
-}
-
 async function loadFromDisk(root) {
   setStatus('reading folder…', 'warn');
-  const entries = await NativeAPI.readDirectory();
-  const files = entries.filter(e => e.type === 'file');
-
-  // Pick the main file: a .tex containing \documentclass, preferring main.tex.
-  const texFiles = files.filter(f => /\.tex$/i.test(f.path));
-  if (!texFiles.length) {
-    setStatus('✗ no .tex files in that folder', 'err');
+  try {
+    project = await readProjectFromDisk(NativeAPI, root, {
+      onWarn: (msg) => rawLog('wrn', msg)
+    });
+  } catch (err) {
+    setStatus(`✗ ${err.message}`, 'err');
     return;
   }
 
-  project = { key: root.split('/').pop(), root, onDisk: true, engine: 'xetex',
-              rerun: true, makeindex: false, files: new Map() };
-
-  let mainCandidates = [];
-  for (const f of files) {
-    const isText = TEXT_EXT_RE.test(f.path);
-    try {
-      let content, stamp = null;
-      if (isText) {
-        const r = await NativeAPI.readTextFile(f.path);
-        content = r.content;
-        stamp = r.stamp;   // identity at read time; checked again before saving
-      } else {
-        content = await NativeAPI.readBinaryFile(f.path);
-      }
-      project.files.set(f.path, { content, binary: !isText, dirty: false, stamp });
-      if (isText && /\.tex$/i.test(f.path) && /\\documentclass/.test(content)) {
-        mainCandidates.push(f.path);
-      }
-    } catch (err) {
-      rawLog('wrn', `skipped ${f.path}: ${err}`);
-    }
-  }
-
-  if (!mainCandidates.length) mainCandidates = texFiles.map(f => f.path);
-  mainCandidates.sort((a, b) => {
-    const score = (p) => (/^main\.tex$/i.test(p) ? 0 : p.includes('/') ? 2 : 1);
-    return score(a) - score(b) || a.localeCompare(b);
-  });
-  project.main = mainCandidates[0];
-
-  const mainSrc = project.files.get(project.main)?.content || '';
-  project.engine = inferEngine(mainSrc);
-  project.makeindex = /\\makeindex/.test(stripTexComments(mainSrc));
-  project.bibtex = inferBibTool(mainSrc);
-
   $('docname').textContent = project.main;
   projectSel.setOptions([{ label: project.key, value: project.key }]);
-
   syncEngineSelect();
   renderTree();
   openFile(project.main);
@@ -620,37 +539,18 @@ async function loadFromDisk(root) {
 
 async function loadProject(key) {
   setStatus('loading project…', 'warn');
-  const m = await fetch(`/api/project/${key}`).then(r => r.json());
+  const { project: loaded, patchLog } = await readProjectFromFixture(key);
+  project = loaded;
 
-  // Fixtures come from the dev server and have no disk backing, so they cannot
-  // be saved. onDisk is what gates saving, not which shell is running.
-  project = { key, main: m.main, engine: m.engine, rerun: m.rerun,
-              makeindex: m.makeindex, bibtex: m.bibtex || null,
-              onDisk: false, files: new Map() };
-  for (const f of m.files) {
-    const binary = f.encoding === 'base64' && !TEXT_RE.test(f.path);
-    project.files.set(f.path, {
-      content: binary ? b64ToBytes(f.content) : (f.encoding === 'base64' ? atob(f.content) : f.content),
-      binary,
-      dirty: false
-    });
-  }
-  $('docname').textContent = m.main;
+  $('docname').textContent = project.main;
   refreshDirty();
   syncEngineSelect();
   renderTree();
   openFile(project.main);
   clearLog();
   setIssues([]);
-  for (const p of m.patchLog || []) rawLog('wrn', `patched ${p}`);
+  for (const p of patchLog) rawLog('wrn', `patched ${p}`);
   setStatus('ready');
-}
-
-function b64ToBytes(b64) {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
 }
 
 // ── compile ────────────────────────────────────────────────────────────

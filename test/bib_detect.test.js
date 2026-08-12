@@ -15,51 +15,40 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 
-/**
- * The implementation lives in the app module, which cannot be imported here —
- * it touches the DOM at load. Lifting the two functions out by name keeps this
- * a real unit test of the shipped source rather than a copy that can drift.
- */
-function lift(...names) {
-  const src = fs.readFileSync(
-    path.join(__dirname, '..', 'www', 'jvscrpt_and_css_extra', 'revery_tex_app.js'), 'utf8');
-  const bodies = names.map((name) => {
-    const start = src.indexOf(`function ${name}`);
-    assert.ok(start > 0, `${name} has been renamed or removed`);
-    // To the closing brace at column 0 — the app file is formatted that way.
-    const end = src.indexOf('\n}\n', start);
-    assert.ok(end > start, `could not find the end of ${name}`);
-    return src.slice(start, end + 3);
-  });
-  // eslint-disable-next-line no-new-func
-  return new Function(`${bodies.join('\n')}; return { ${names.join(', ')} };`)();
-}
+// project_store.js touches no DOM, so it imports directly — this used to lift
+// the functions out of the app module's source by name, because they lived in a
+// file that could not be loaded outside a browser.
+//
+// Memoised rather than assigned by a first test: tests that depend on an
+// earlier one having run pass in order and fail the moment anyone filters.
+let _store;
+const store = async () =>
+  (_store ??= await import('../www/jvscrpt_and_css_extra/project_store.js'));
+const inferBibTool = async (src) => (await store()).inferBibTool(src);
 
-const { inferBibTool } = lift('stripTexComments', 'inferBibTool');
-
-test('biblatex resolves to biber', () => {
-  assert.equal(inferBibTool('\\addbibresource{references.bib}'), 'biber');
-  assert.equal(inferBibTool('\\printbibliography[heading=bibintoc]'), 'biber');
-  assert.equal(inferBibTool('\\usepackage[backend=biber]{biblatex}'), 'biber');
-  assert.equal(inferBibTool('\\usepackage{biblatex}'), 'biber');
+test('biblatex resolves to biber', async () => {
+  assert.equal(await inferBibTool('\\addbibresource{references.bib}'), 'biber');
+  assert.equal(await inferBibTool('\\printbibliography[heading=bibintoc]'), 'biber');
+  assert.equal(await inferBibTool('\\usepackage[backend=biber]{biblatex}'), 'biber');
+  assert.equal(await inferBibTool('\\usepackage{biblatex}'), 'biber');
 });
 
-test('classic bibliography resolves to bibtex', () => {
-  assert.equal(inferBibTool('\\bibliography{refs}'), 'bibtex');
-  assert.equal(inferBibTool('\\bibliographystyle{plain}\n\\bibliography{refs}'), 'bibtex');
+test('classic bibliography resolves to bibtex', async () => {
+  assert.equal(await inferBibTool('\\bibliography{refs}'), 'bibtex');
+  assert.equal(await inferBibTool('\\bibliographystyle{plain}\n\\bibliography{refs}'), 'bibtex');
 });
 
-test('a document with no bibliography needs no tool', () => {
-  assert.equal(inferBibTool('\\documentclass{article}\\begin{document}hi\\end{document}'), null);
-  assert.equal(inferBibTool(''), null);
+test('a document with no bibliography needs no tool', async () => {
+  assert.equal(await inferBibTool('\\documentclass{article}\\begin{document}hi\\end{document}'), null);
+  assert.equal(await inferBibTool(''), null);
 });
 
-test('biblatex wins when both shapes appear', () => {
+test('biblatex wins when both shapes appear', async () => {
   // \bibliographystyle is inert under biblatex but people leave it behind when
   // they migrate. Running bibtex on that document would rebuild the .bbl in the
   // wrong format and the bibliography would come out empty.
   const migrated = '\\usepackage{biblatex}\n\\addbibresource{refs.bib}\n% \\bibliographystyle{plain}';
-  assert.equal(inferBibTool(migrated), 'biber');
+  assert.equal(await inferBibTool(migrated), 'biber');
 });
 
 /* ── against the real fixtures, which is what this is for ─────────────── */
@@ -67,9 +56,9 @@ test('biblatex wins when both shapes appear', () => {
 const FIXTURES = path.join(__dirname, '..', '..', 'latex_project_tests');
 const haveFixtures = fs.existsSync(FIXTURES);
 
-test('the book fixture is detected as biblatex', { skip: !haveFixtures }, () => {
+test('the book fixture is detected as biblatex', { skip: !haveFixtures }, async () => {
   const src = fs.readFileSync(path.join(FIXTURES, 'hrldrvry_book_templt_v2', 'main.tex'), 'utf8');
-  assert.equal(inferBibTool(src), 'biber',
+  assert.equal(await inferBibTool(src), 'biber',
     'the book template uses \\addbibresource and \\printbibliography');
 });
 
@@ -124,10 +113,10 @@ test('no bibliography means no bib tool runs', async () => {
   assert.deepEqual(calls.filter(c => c === 'biber' || c === 'bibtex'), []);
 });
 
-test('a commented-out bibliography is not detected', { skip: !haveFixtures }, () => {
+test('a commented-out bibliography is not detected', { skip: !haveFixtures }, async () => {
   // homework has \bibliography commented out. Running bibtex because of a
   // commented line would be a spurious failure on a document that compiles.
   const src = fs.readFileSync(path.join(FIXTURES, 'homework_template', 'main.tex'), 'utf8');
-  assert.equal(inferBibTool(src), null,
+  assert.equal(await inferBibTool(src), null,
     'the homework template only mentions \\bibliography inside comments');
 });
