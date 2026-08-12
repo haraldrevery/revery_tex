@@ -203,6 +203,98 @@ async function main() {
       `${reset.theme} / ${reset.scale} / ${reset.font}`);
     check('reset closes the menu', reset.closed);
 
+    /* ── the PDF preview refits when the divider moves ──────────────── */
+    // The reported bug: dragging the divider narrower than the width the PDF
+    // was rendered at squashed the page — max-width:100% shrank the width while
+    // an explicit pixel height stayed put — and nothing re-rendered, because the
+    // listener was on window resize and a divider drag does not resize the
+    // window.
+    await cdp.evaluate(`window.__reveryTexApp.compile('cv')`, true);
+    await sleep(500);
+
+    /** Drive the pane exactly the way the divider handler in the app does. */
+    const setSplit = (frac) => `(() => {
+      document.getElementById('editorpane').style.flex = '1 1 ${frac * 100}%';
+      document.getElementById('pdfpane').style.flex = '1 1 ${(1 - frac) * 100}%';
+      const c = document.querySelector('canvas.pdfpage');
+      const r = c.getBoundingClientRect();
+      return { w: r.width, h: r.height, ratio: r.width / r.height,
+               bitmapW: c.width, bitmapH: c.height,
+               natural: Number(c.dataset.natural) };
+    })()`;
+
+    const before = await cdp.evaluate(setSplit(0.55));
+    check('a page is rendered', before.w > 0 && before.bitmapW > 0,
+      `${before.w.toFixed(0)}×${before.h.toFixed(0)} css, ${before.bitmapW}×${before.bitmapH} bitmap`);
+    check('the page reports its natural width', before.natural > 0, String(before.natural));
+
+    // Immediately after the layout change, before any debounce can fire: this
+    // is the frame the user sees mid-drag, and it is where the squash showed.
+    const during = await cdp.evaluate(setSplit(0.72));
+    check('narrowing the pane actually shrinks the page',
+      during.w < before.w - 20, `${before.w.toFixed(0)} → ${during.w.toFixed(0)} px`);
+    check('aspect ratio holds during the drag',
+      Math.abs(during.ratio - before.ratio) / before.ratio < 0.01,
+      `${before.ratio.toFixed(4)} → ${during.ratio.toFixed(4)}`);
+    check('not yet re-rasterised — CSS is doing the scaling',
+      during.bitmapW === before.bitmapW, `${before.bitmapW} → ${during.bitmapW}`);
+
+    // Past the 150ms debounce it should have re-rendered at the new width.
+    await sleep(1800);
+    const after = await cdp.evaluate(`(() => {
+      const c = document.querySelector('canvas.pdfpage');
+      const r = c.getBoundingClientRect();
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      return { w: r.width, h: r.height, ratio: r.width / r.height,
+               bitmapW: c.width, expected: Math.round(r.width * dpr) };
+    })()`);
+    check('re-rasterised at the new width',
+      Math.abs(after.bitmapW - after.expected) <= 2,
+      `bitmap ${after.bitmapW}, expected ~${after.expected}`);
+    check('aspect ratio still right after the re-render',
+      Math.abs(after.ratio - before.ratio) / before.ratio < 0.01,
+      `${before.ratio.toFixed(4)} → ${after.ratio.toFixed(4)}`);
+
+    // And widening again, since the first fix only covered one direction.
+    await cdp.evaluate(setSplit(0.3));
+    await sleep(1800);
+    const wide = await cdp.evaluate(`(() => {
+      const c = document.querySelector('canvas.pdfpage');
+      const r = c.getBoundingClientRect();
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      return { w: r.width, ratio: r.width / r.height, bitmapW: c.width,
+               expected: Math.round(r.width * dpr) };
+    })()`);
+    check('widening refits too', wide.w > after.w + 20, `${after.w.toFixed(0)} → ${wide.w.toFixed(0)} px`);
+    check('re-rasterised when widened', Math.abs(wide.bitmapW - wide.expected) <= 2,
+      `bitmap ${wide.bitmapW}, expected ~${wide.expected}`);
+    check('aspect ratio held throughout',
+      Math.abs(wide.ratio - before.ratio) / before.ratio < 0.01,
+      `${before.ratio.toFixed(4)} → ${wide.ratio.toFixed(4)}`);
+
+    // The SyncTeX coupling: a point on the page must map to the same PDF
+    // coordinate whatever the pane width, or clicks land on the wrong line.
+    const mapping = await cdp.evaluate(`(() => {
+      const at = (frac) => {
+        document.getElementById('editorpane').style.flex = '1 1 ' + (frac * 100) + '%';
+        document.getElementById('pdfpane').style.flex = '1 1 ' + ((1 - frac) * 100) + '%';
+        const c = document.querySelector('canvas.pdfpage');
+        const r = c.getBoundingClientRect();
+        // The same computation PdfPreview.effectiveScale does, from the same
+        // data — done here rather than reaching into the instance, so this
+        // needs no test-only hook in the shipped app.
+        const s = r.width / Number(c.dataset.natural);
+        // A point a third of the way across and down, in PDF points.
+        return { x: (r.width / 3) / s, y: (r.height / 3) / s };
+      };
+      return { narrow: at(0.72), wide: at(0.3) };
+    })()`);
+    check('a screen point maps to the same PDF point at any width',
+      Math.abs(mapping.narrow.x - mapping.wide.x) < 1 &&
+      Math.abs(mapping.narrow.y - mapping.wide.y) < 1,
+      `narrow (${mapping.narrow.x.toFixed(1)}, ${mapping.narrow.y.toFixed(1)}) · ` +
+      `wide (${mapping.wide.x.toFixed(1)}, ${mapping.wide.y.toFixed(1)})`);
+
     const expected = /favicon|\/api\/projects/i;
     const real = pageErrors.filter(e => !expected.test(e));
     check('no unexpected page errors', real.length === 0, real.slice(0, 2).join(' | '));

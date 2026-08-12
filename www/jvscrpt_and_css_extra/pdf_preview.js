@@ -25,10 +25,24 @@ export class PdfPreview {
     this.scale = 1;
     this._renderToken = 0;
     this._resizeTimer = null;
+    this._renderedWidth = 0;
 
     // Re-render on width change, debounced: canvas is raster, so a resize
-    // without re-render leaves the page blurry.
+    // without a re-render leaves the page soft.
+    //
+    // A ResizeObserver on the pane, not a window resize listener — dragging the
+    // editor/PDF divider changes this element without changing the window, so
+    // the old listener never fired for the case people actually hit. The
+    // observer covers genuine window resizes too, so this is one code path
+    // instead of two.
     this._onResize = () => {
+      // Ignore changes too small to be worth re-rasterising. Without this the
+      // observer reacts to its own side effects: a re-render changes page
+      // height, which can add or remove the scrollbar, which changes
+      // clientWidth, which calls this again.
+      const avail = Math.max(120, this.container.clientWidth - 24);
+      if (Math.abs(avail - this._renderedWidth) < 2) return;
+
       clearTimeout(this._resizeTimer);
       const where = this.scrollFraction();
       this._resizeTimer = setTimeout(async () => {
@@ -36,7 +50,8 @@ export class PdfPreview {
         this.restoreScroll(where);
       }, 150);
     };
-    window.addEventListener('resize', this._onResize);
+    this._observer = new ResizeObserver(this._onResize);
+    this._observer.observe(this.container);
   }
 
   /**
@@ -86,6 +101,7 @@ export class PdfPreview {
     const natural = first.getViewport({ scale: 1 });
     const avail = Math.max(120, this.container.clientWidth - 24);
     this.scale = avail / natural.width;
+    this._renderedWidth = avail;     // what the resize observer compares against
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
     const frag = document.createDocumentFragment();
@@ -98,9 +114,18 @@ export class PdfPreview {
       canvas.className = 'pdfpage';
       canvas.width = Math.floor(viewport.width);
       canvas.height = Math.floor(viewport.height);
+      // Width in CSS pixels; height follows it. A canvas is a replaced element
+      // with an intrinsic ratio from its width/height attributes, so
+      // `max-width:100%; height:auto` scales it proportionally when the pane is
+      // narrower than the render. An explicit pixel height — which this used to
+      // set — leaves the height fixed while max-width shrinks the width, and the
+      // page is drawn squashed until something re-renders it.
       canvas.style.width = Math.floor(viewport.width / dpr) + 'px';
-      canvas.style.height = Math.floor(viewport.height / dpr) + 'px';
+      canvas.style.height = 'auto';
       canvas.dataset.page = String(n);
+      // Per page, because a document may mix page sizes. Everything that maps
+      // between screen pixels and PDF points reads this rather than this.scale.
+      canvas.dataset.natural = String(page.getViewport({ scale: 1 }).width);
       frag.appendChild(canvas);
 
       await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
@@ -112,19 +137,35 @@ export class PdfPreview {
   }
 
   /**
+   * How many CSS pixels one PDF point currently occupies on a given page.
+   *
+   * Read from the rendered box rather than from `this.scale`, because between a
+   * pane resize and the re-render the canvas is CSS-scaled and the two no longer
+   * agree. Using the stale value would put SyncTeX clicks on the wrong line.
+   */
+  effectiveScale(canvas) {
+    const naturalWidth = Number(canvas.dataset.natural);
+    const shown = canvas.getBoundingClientRect().width;
+    if (!naturalWidth || !shown) return this.scale;
+    return shown / naturalWidth;
+  }
+
+  /**
    * Report clicks as a page number plus PDF-point coordinates, which is what
-   * SyncTeX speaks. CSS pixels relate to PDF points by this.scale alone — the
-   * devicePixelRatio is already divided out of the canvas's style size.
+   * SyncTeX speaks. The scale comes from the page's own rendered box, so a click
+   * lands on the right line even while the pane is mid-resize and the canvas is
+   * still displayed at the previous render's raster size.
    */
   onPageClick(cb) {
     this.container.addEventListener('click', (ev) => {
       const canvas = ev.target.closest?.('canvas.pdfpage');
       if (!canvas) return;
       const r = canvas.getBoundingClientRect();
+      const scale = this.effectiveScale(canvas);
       cb({
         page: Number(canvas.dataset.page),
-        x: (ev.clientX - r.left) / this.scale,
-        y: (ev.clientY - r.top) / this.scale,
+        x: (ev.clientX - r.left) / scale,
+        y: (ev.clientY - r.top) / scale,
         native: ev
       });
     });
@@ -134,13 +175,14 @@ export class PdfPreview {
   scrollToPosition(page, x, y) {
     const canvas = this.container.querySelector(`canvas.pdfpage[data-page="${page}"]`);
     if (!canvas) return false;
-    const top = canvas.offsetTop + y * this.scale - this.container.clientHeight / 3;
+    const scale = this.effectiveScale(canvas);
+    const top = canvas.offsetTop + y * scale - this.container.clientHeight / 3;
     this.container.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
 
     const dot = document.createElement('div');
     dot.className = 'pdf-syncmark';
-    dot.style.left = (canvas.offsetLeft + x * this.scale) + 'px';
-    dot.style.top = (canvas.offsetTop + y * this.scale) + 'px';
+    dot.style.left = (canvas.offsetLeft + x * scale) + 'px';
+    dot.style.top = (canvas.offsetTop + y * scale) + 'px';
     this.container.appendChild(dot);
     setTimeout(() => dot.remove(), 1600);
     return true;
@@ -153,7 +195,7 @@ export class PdfPreview {
   }
 
   async destroy() {
-    window.removeEventListener('resize', this._onResize);
+    this._observer?.disconnect();
     clearTimeout(this._resizeTimer);
     await this.destroyDoc();
   }
