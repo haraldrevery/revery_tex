@@ -1054,6 +1054,141 @@ async function main() {
     // menu must fall back to \ref, which is defined everywhere.
     check('picking one inserts an \\eqref', /\\eqref\{[^}]+\}$/.test(refEq.tail || ''), refEq.tail);
 
+    /* ── the file tree, and changing it ─────────────────────────────── */
+    // On the fixtures, which are read-only: the operations run in memory, and
+    // that is the path every backend shares. Writing to disk is covered by the
+    // Rust and Electron unit tests, which is where the containment rules live.
+    const tree = await cdp.evaluate(`(() => {
+      const rows = [...document.querySelectorAll('#filetree .node')];
+      const dirs = rows.filter(r => r.dataset.dir !== undefined);
+      const files = rows.filter(r => r.dataset.path);
+      const indents = new Set(rows.map(r => r.style.paddingLeft));
+      const before = files.length;
+      // Fold a directory: its files must go, the directory must stay.
+      dirs[0]?.click();
+      const folded = [...document.querySelectorAll('#filetree .node')];
+      dirs[0].click();
+      return {
+        dirs: dirs.length, files: before, indents: indents.size,
+        binaries: files.filter(f => f.classList.contains('binary')).length,
+        foldedRows: folded.length, unfoldedRows: rows.length,
+        firstDir: dirs[0]?.dataset.dir,
+        stillThere: folded.some(r => r.dataset.dir === dirs[0]?.dataset.dir)
+      };
+    })()`, true);
+    check('directories and files are separate rows', tree.dirs > 0 && tree.files > 0,
+      `${tree.dirs} dir(s), ${tree.files} file(s)`);
+    check('nesting is visible as indentation', tree.indents > 1, `${tree.indents} distinct indents`);
+    // Hidden binaries were how a project's images became invisible in the one
+    // place anyone would look for them.
+    check('binary files are listed', tree.binaries > 0, `${tree.binaries} binaries`);
+    check('a directory folds and stays visible',
+      tree.foldedRows < tree.unfoldedRows && tree.stillThere,
+      `${tree.unfoldedRows} → ${tree.foldedRows} rows, ${tree.firstDir} kept`);
+
+    const made = await cdp.evaluate(`(async () => {
+      const rows = () => [...document.querySelectorAll('#filetree .node')];
+      const open = (label) => {
+        document.getElementById('newfile').click();
+        [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+          .find(b => new RegExp(label, 'i').test(b.textContent)).click();
+      };
+      const type = (v) => {
+        const i = document.querySelector('.dlg input[type="text"]');
+        i.value = v; i.dispatchEvent(new Event('input', { bubbles: true }));
+        [...document.querySelectorAll('.dlg-foot button')]
+          .find(b => !/cancel/i.test(b.textContent)).click();
+      };
+
+      open('new file');
+      type('notes/draft.tex');
+      await new Promise(r => setTimeout(r, 60));
+      const created = rows().some(r => r.dataset.path === 'notes/draft.tex');
+      const opened = document.getElementById('editortitle').textContent;
+      const nested = rows().some(r => r.dataset.dir === 'notes');
+
+      // The same name twice must be refused, not silently overwrite.
+      open('new file');
+      type('notes/draft.tex');
+      await new Promise(r => setTimeout(r, 60));
+      const refused = document.getElementById('status').textContent;
+
+      // …and so must anything that would climb out of the project.
+      open('new file');
+      type('../escape.tex');
+      await new Promise(r => setTimeout(r, 60));
+      return { created, opened, nested, refused,
+               escape: document.getElementById('status').textContent,
+               count: rows().filter(r => r.dataset.path === 'notes/draft.tex').length };
+    })()`, true);
+    check('a new file appears, nested under a folder that did not exist',
+      made.created && made.nested && made.opened === 'notes/draft.tex',
+      `${made.opened}${made.nested ? ' under notes/' : ''}`);
+    check('a duplicate name is refused', /already exists/i.test(made.refused) && made.count === 1,
+      made.refused);
+    check('a path that climbs out of the project is refused',
+      /not a usable/i.test(made.escape), made.escape);
+
+    const renamed = await cdp.evaluate(`(async () => {
+      const row = [...document.querySelectorAll('#filetree .node')]
+        .find(r => r.dataset.path === 'notes/draft.tex');
+      const r = row.getBoundingClientRect();
+      row.dispatchEvent(new MouseEvent('contextmenu',
+        { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 5 }));
+      const labels = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .map(b => b.textContent.trim());
+      [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /rename/i.test(b.textContent)).click();
+      const i = document.querySelector('.dlg input[type="text"]');
+      const prefilled = i.value;
+      i.value = 'notes/renamed.tex'; i.dispatchEvent(new Event('input', { bubbles: true }));
+      [...document.querySelectorAll('.dlg-foot button')]
+        .find(b => !/cancel/i.test(b.textContent)).click();
+      await new Promise(res => setTimeout(res, 80));
+      const paths = [...document.querySelectorAll('#filetree .node')].map(n => n.dataset.path);
+      return { labels, prefilled, gone: !paths.includes('notes/draft.tex'),
+               there: paths.includes('notes/renamed.tex'),
+               title: document.getElementById('editortitle').textContent };
+    })()`, true);
+    check('right-clicking a file offers rename and delete',
+      ['Rename…', 'Delete…'].every(l => renamed.labels.includes(l)), renamed.labels.join(' | '));
+    check('rename moves the file and the editor follows it',
+      renamed.gone && renamed.there && renamed.title === 'notes/renamed.tex',
+      `${renamed.prefilled} → ${renamed.title}`);
+
+    const mainGuard = await cdp.evaluate(`(async () => {
+      const main = [...document.querySelectorAll('#filetree .node')]
+        .find(r => r.classList.contains('main'));
+      const r = main.getBoundingClientRect();
+      main.dispatchEvent(new MouseEvent('contextmenu',
+        { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 5 }));
+      [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /delete/i.test(b.textContent)).click();
+      await new Promise(res => setTimeout(res, 80));
+      return { status: document.getElementById('status').textContent,
+               survived: [...document.querySelectorAll('#filetree .node')]
+                 .some(n => n.classList.contains('main')) };
+    })()`, true);
+    // The compile targets the main file by name, so losing it breaks the
+    // project in a way nothing in the UI would explain.
+    check('the main file cannot be deleted', /main file/i.test(mainGuard.status) && mainGuard.survived,
+      mainGuard.status);
+
+    const deleted = await cdp.evaluate(`(async () => {
+      const row = [...document.querySelectorAll('#filetree .node')]
+        .find(r => r.dataset.path === 'notes/renamed.tex');
+      const r = row.getBoundingClientRect();
+      row.dispatchEvent(new MouseEvent('contextmenu',
+        { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 5 }));
+      [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /delete/i.test(b.textContent)).click();
+      await new Promise(res => setTimeout(res, 120));
+      return { paths: [...document.querySelectorAll('#filetree .node')].map(n => n.dataset.path),
+               status: document.getElementById('status').textContent };
+    })()`, true);
+    // The harness answers confirm() with OK, so this is the confirmed path.
+    check('delete removes the file', !deleted.paths.includes('notes/renamed.tex'), deleted.status);
+
     const expected = /favicon|\/api\/projects/i;
     const real = pageErrors.filter(e => !expected.test(e));
     check('no unexpected page errors', real.length === 0, real.slice(0, 2).join(' | '));

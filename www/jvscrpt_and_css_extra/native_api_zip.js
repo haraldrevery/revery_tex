@@ -187,6 +187,24 @@ export const webZipImpl = {
     return { mtime_ms, size: bytes.length };
   },
 
+  /**
+   * Remove a file. There are no directories in this store — a path is a key —
+   * so a folder disappears when the last file under it does, which is also
+   * what a zip does.
+   */
+  async deleteFile(path) {
+    await run(FILES, 'readwrite', (s) => s.delete(path));
+  },
+
+  /** Move a file. Copy then delete, so a failure leaves the original. */
+  async renameFile(from, to) {
+    const src = await getFile(from);
+    if (!src) throw new Error(`Cannot rename ${from}: it does not exist`);
+    if (await getFile(to)) throw new Error(`Cannot rename to ${to}: that already exists`);
+    await run(FILES, 'readwrite', (s) => s.put({ path: to, bytes: src.bytes, mtime_ms: Date.now() }));
+    await run(FILES, 'readwrite', (s) => s.delete(from));
+  },
+
   /** Everything in the store, for Export. */
   async readAll() {
     return (await allFiles()).map(r => ({ path: r.path, bytes: r.bytes }));

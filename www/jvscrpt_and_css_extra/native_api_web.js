@@ -77,6 +77,38 @@ function requireHandle(path) {
   return h;
 }
 
+/**
+ * The handle for `path`, creating the file and any missing directories.
+ *
+ * `handles` is only populated by the directory walk, so a path that did not
+ * exist when the folder was opened has no handle at all — which is why writing
+ * a newly created file used to fail here while both desktop backends, which
+ * create parents in their write, were perfectly happy.
+ */
+async function handleForCreate(path) {
+  const existing = handles.get(path);
+  if (existing) return existing;
+  if (!rootHandle) throw new Error('No folder is open');
+
+  const parts = path.split('/').filter(Boolean);
+  const name = parts.pop();
+  let dir = rootHandle;
+  for (const part of parts) dir = await dir.getDirectoryHandle(part, { create: true });
+  const handle = await dir.getFileHandle(name, { create: true });
+  handles.set(path, handle);
+  return handle;
+}
+
+/** The directory handle that holds `path`, without creating anything. */
+async function parentOf(path) {
+  if (!rootHandle) throw new Error('No folder is open');
+  const parts = path.split('/').filter(Boolean);
+  const name = parts.pop();
+  let dir = rootHandle;
+  for (const part of parts) dir = await dir.getDirectoryHandle(part);
+  return { dir, name };
+}
+
 /** Ask for read/write permission, prompting only if we do not already have it. */
 async function ensurePermission(handle) {
   const opts = { mode: 'readwrite' };
@@ -142,7 +174,9 @@ export const webFsImpl = {
   },
 
   async writeFile(path, content, expect) {
-    const handle = requireHandle(path);
+    // Creates when it is not there, matching the desktop backends. `expect` is
+    // only meaningful for a file that already exists, so a create skips it.
+    const handle = await handleForCreate(path);
 
     if (expect) {
       const now = stampOf(await handle.getFile());
@@ -160,6 +194,39 @@ export const webFsImpl = {
     await w.write(content);
     await w.close();
     return stampOf(await handle.getFile());
+  },
+
+  /**
+   * Remove a file, or an empty directory.
+   *
+   * Same refusals as the desktop backends: `removeEntry` without `recursive`
+   * throws on a directory that still has something in it, which is the
+   * behaviour we want — nothing here deletes a tree.
+   */
+  async deleteFile(path) {
+    const { dir, name } = await parentOf(path);
+    await dir.removeEntry(name);
+    handles.delete(path);
+  },
+
+  /**
+   * Move a file. There is no rename in the File System Access API, so this is
+   * read, write, delete — in that order, so a failure at any point leaves the
+   * original where it was rather than losing it.
+   */
+  async renameFile(from, to) {
+    const src = requireHandle(from);
+    if (handles.has(to)) throw new Error(`Cannot rename to ${to}: that already exists`);
+    const bytes = new Uint8Array(await (await src.getFile()).arrayBuffer());
+
+    const dest = await handleForCreate(to);
+    const w = await dest.createWritable();
+    await w.write(bytes);
+    await w.close();
+
+    const { dir, name } = await parentOf(from);
+    await dir.removeEntry(name);
+    handles.delete(from);
   },
 
   /* Crash backups live in localStorage: small, synchronous, and survives a tab

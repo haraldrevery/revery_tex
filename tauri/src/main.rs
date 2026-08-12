@@ -387,6 +387,60 @@ fn write_file(
     write_file_impl(&path, &content, &get_root(&state)?, want.as_ref())
 }
 
+/* ── delete and rename ───────────────────────────────────────────────── */
+//
+// The first operations here that destroy something. Every rule they follow is
+// the one the write path already follows — same `safe_path_inside`, same
+// refusal to touch anything outside the project root — because a second place
+// that decides what is reachable is a second place to get it wrong.
+//
+// Neither recurses. Deleting a folder means deleting the files the UI is
+// showing inside it, one call each, so there is no "remove this whole tree"
+// primitive that a wrong path could point at.
+
+fn delete_file_impl(path: &str, root: &Path) -> Result<(), String> {
+    let abs = safe_path_inside(&root.join(path).to_string_lossy(), root)?;
+    let meta = fs::symlink_metadata(&abs).map_err(|e| format!("Cannot delete {path}: {e}"))?;
+    if meta.is_dir() {
+        // Only an empty one, and only after its files have gone individually.
+        fs::remove_dir(&abs).map_err(|e| format!("Cannot remove {path}: {e}"))?;
+    } else {
+        fs::remove_file(&abs).map_err(|e| format!("Cannot delete {path}: {e}"))?;
+    }
+    sync_parent_dir(&abs);
+    Ok(())
+}
+
+fn rename_file_impl(from: &str, to: &str, root: &Path) -> Result<(), String> {
+    let src = safe_path_inside(&root.join(from).to_string_lossy(), root)?;
+    let dest = safe_path_inside(&root.join(to).to_string_lossy(), root)?;
+    if !src.exists() {
+        return Err(format!("Cannot rename {from}: it does not exist"));
+    }
+    // Never silently replace something. The caller has the project listing and
+    // can ask; the backend refusing is what makes that not merely advisory.
+    if dest.exists() {
+        return Err(format!("Cannot rename to {to}: that already exists"));
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
+    }
+    fs::rename(&src, &dest).map_err(|e| format!("Cannot rename {from}: {e}"))?;
+    sync_parent_dir(&src);
+    sync_parent_dir(&dest);
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_file(path: String, state: State<'_, RootPath>) -> Result<(), String> {
+    delete_file_impl(&path, &get_root(&state)?)
+}
+
+#[tauri::command]
+fn rename_file(from: String, to: String, state: State<'_, RootPath>) -> Result<(), String> {
+    rename_file_impl(&from, &to, &get_root(&state)?)
+}
+
 /* ── crash backups ───────────────────────────────────────────────────── */
 //
 // Backups live outside the project, in the app cache dir, so a crash-recovery
@@ -524,6 +578,8 @@ fn main() {
             read_text_file,
             read_binary_file,
             write_file,
+            delete_file,
+            rename_file,
             write_backup,
             list_stale_backups,
             discard_backup,
@@ -658,6 +714,75 @@ mod tests {
         write_file_impl("chapters/new/intro.tex", "hello", &root, None).unwrap();
         assert_eq!(fs::read_to_string(root.join("chapters/new/intro.tex")).unwrap(), "hello");
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn delete_removes_a_file_and_refuses_to_escape() {
+        let root = tmpdir("delete");
+        let outside = tmpdir("delete-outside");
+        fs::write(outside.join("victim.tex"), b"do not touch").unwrap();
+        fs::write(root.join("gone.tex"), b"x").unwrap();
+
+        delete_file_impl("gone.tex", &root).unwrap();
+        assert!(!root.join("gone.tex").exists());
+
+        // The first destructive operation in the app: the containment rule has
+        // to hold here exactly as it does for writes.
+        let rel = format!("../{}/victim.tex", outside.file_name().unwrap().to_string_lossy());
+        assert!(delete_file_impl(&rel, &root).is_err());
+        assert!(outside.join("victim.tex").exists());
+
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn delete_will_not_empty_a_directory_for_you() {
+        // No recursion, deliberately: the caller deletes the files it is
+        // showing, one at a time, so there is no "remove this tree" primitive.
+        let root = tmpdir("delete-dir");
+        fs::create_dir_all(root.join("ch")).unwrap();
+        fs::write(root.join("ch/a.tex"), b"x").unwrap();
+        assert!(delete_file_impl("ch", &root).is_err());
+        assert!(root.join("ch/a.tex").exists());
+
+        delete_file_impl("ch/a.tex", &root).unwrap();
+        delete_file_impl("ch", &root).unwrap();
+        assert!(!root.join("ch").exists());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn rename_moves_and_never_overwrites() {
+        let root = tmpdir("rename");
+        fs::write(root.join("a.tex"), b"content").unwrap();
+        fs::write(root.join("taken.tex"), b"someone else's work").unwrap();
+
+        rename_file_impl("a.tex", "ch/b.tex", &root).unwrap();
+        assert_eq!(fs::read_to_string(root.join("ch/b.tex")).unwrap(), "content");
+        assert!(!root.join("a.tex").exists());
+
+        // Renaming onto an existing file would destroy it with no warning.
+        assert!(rename_file_impl("ch/b.tex", "taken.tex", &root).is_err());
+        assert_eq!(fs::read_to_string(root.join("taken.tex")).unwrap(), "someone else's work");
+        assert!(rename_file_impl("nothing.tex", "x.tex", &root).is_err());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn rename_refuses_to_escape_the_root() {
+        let root = tmpdir("rename-escape");
+        let outside = tmpdir("rename-escape-outside");
+        fs::write(root.join("a.tex"), b"x").unwrap();
+
+        let rel = format!("../{}/stolen.tex", outside.file_name().unwrap().to_string_lossy());
+        assert!(rename_file_impl("a.tex", &rel, &root).is_err());
+        assert!(!outside.join("stolen.tex").exists());
+        assert!(root.join("a.tex").exists(), "the source must survive a refused rename");
+
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&outside).ok();
     }
 
     #[test]

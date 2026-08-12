@@ -32,6 +32,8 @@ const tauriImpl = {
   readTextFile: (path) => invoke('read_text_file', { path }),
   readBinaryFile: (path) => invoke('read_binary_file', { path }).then(b64ToBytes),
   writeFile: (path, content, expect) => invoke('write_file', { path, content, expect: expect || null }),
+  deleteFile: (path) => invoke('delete_file', { path }),
+  renameFile: (from, to) => invoke('rename_file', { from, to }),
 
   writeBackup: (path, content) => invoke('write_backup', { path, content }),
   listStaleBackups: () => invoke('list_stale_backups'),
@@ -72,6 +74,8 @@ const electronImpl = isElectron ? {
   readTextFile: (path) => window.electronAPI.readTextFile(path),
   readBinaryFile: (path) => window.electronAPI.readBinaryFile(path).then(b64ToBytes),
   writeFile: (path, content, expect) => window.electronAPI.writeFile(path, content, expect || null),
+  deleteFile: (path) => window.electronAPI.deleteFile(path),
+  renameFile: (from, to) => window.electronAPI.renameFile(from, to),
 
   writeBackup: (path, content) => window.electronAPI.writeBackup(path, content),
   listStaleBackups: () => window.electronAPI.listStaleBackups(),

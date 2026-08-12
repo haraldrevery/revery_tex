@@ -22,6 +22,7 @@ import { writeZip } from './zip_core.js';
 import * as settings from './settings.js';
 import { attachMenu, openMenuAt, SelectMenu } from './menus.js';
 import { toolboxRows, contextRows } from './toolbox.js';
+import { openDialog } from './dialog.js';
 import { initOutline, refreshOutline, scheduleOutline, applyOutlineVisibility } from './outline.js';
 import { buildTree, flattenTree, normalizePath } from './file_tree.js';
 import { $, download } from './dom.js';
@@ -438,6 +439,186 @@ function renderTree() {
 
   $('filecount').textContent = `${shown} file${shown === 1 ? '' : 's'}`;
 }
+
+// ── creating, renaming and deleting ────────────────────────────────────
+//
+// Every one of these changes the in-memory project first and the disk second,
+// and only touches the disk when there is one: the dev-server fixtures are
+// read-only, so they get the same operations with nothing written, and the
+// already-disabled Save button is what says so.
+
+const dirOf = (path) => (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '');
+/** Every file at or inside `dir` — what a folder operation actually acts on. */
+const filesUnder = (dir) => [...project.files.keys()].filter(p => p.startsWith(`${dir}/`));
+
+const canWriteDisk = () => !!project?.onDisk;
+
+/** One text field, so a name is typed into the app's own dialog, not prompt(). */
+function askName({ title, label, def, submitLabel = 'Create' }, onOk) {
+  openDialog({
+    title, submitLabel,
+    fields: [{ key: 'name', label, type: 'text', def, placeholder: 'name.tex' }],
+    onSubmit: (v) => onOk(v.name)
+  });
+}
+
+async function createFile(parent = '') {
+  askName({ title: 'New file', label: 'Name', def: '' }, async (raw) => {
+    const path = normalizePath(raw, parent);
+    if (!path) { setStatus('✗ that is not a usable file name', 'err'); return; }
+    if (project.files.has(path)) { setStatus(`✗ ${path} already exists`, 'err'); return; }
+
+    project.files.set(path, { content: '', binary: false, dirty: true, stamp: null });
+    // Written immediately where there is a disk, so the tree matches what is
+    // actually there rather than promising a file that only exists if you
+    // remember to save.
+    if (canWriteDisk() && NativeAPI.writeFile) {
+      try {
+        const stamp = await NativeAPI.writeFile(path, '', null);
+        Object.assign(project.files.get(path), { stamp, dirty: false });
+      } catch (err) {
+        project.files.delete(path);
+        setStatus(`✗ ${err.message || err}`, 'err');
+        renderTree();
+        return;
+      }
+    }
+    // A folder that only existed in the tree now holds something.
+    emptyDirs.delete(dirOf(path));
+    renderTree();
+    openFile(path);
+    refreshDirty();
+    setStatus(`created ${path}`, 'ok');
+  });
+}
+
+function createFolder(parent = '') {
+  askName({ title: 'New folder', label: 'Name', def: '' }, (raw) => {
+    const path = normalizePath(raw, parent);
+    if (!path) { setStatus('✗ that is not a usable folder name', 'err'); return; }
+    emptyDirs.add(path);
+    renderTree();
+    // No mkdir anywhere in NativeAPI, and none is needed: every backend's write
+    // creates missing parents. Saying so beats a folder that silently is not
+    // there the next time the project is opened.
+    setStatus(`${path} — created when the first file in it is saved`, 'warn');
+  });
+}
+
+/** Move one file, in memory and on disk, keeping the editor pointed at it. */
+async function moveOne(from, to) {
+  if (canWriteDisk() && NativeAPI.renameFile) await NativeAPI.renameFile(from, to);
+  const f = project.files.get(from);
+  project.files.delete(from);
+  project.files.set(to, f);
+  if (project.main === from) project.main = to;
+  if (currentPath === from) { currentPath = to; $('editortitle').textContent = to; }
+}
+
+async function renameEntry(path, isDir) {
+  if (!isDir && path === project.main) {
+    setStatus('✗ the main file is what gets compiled — rename it outside the app', 'err');
+    return;
+  }
+  askName({ title: isDir ? 'Rename folder' : 'Rename file', label: 'New path',
+            def: path, submitLabel: 'Rename' }, async (raw) => {
+    const to = normalizePath(raw);
+    if (!to || to === path) return;
+
+    const moving = isDir ? filesUnder(path) : [path];
+    if (isDir && moving.some(p => p === project.main)) {
+      setStatus('✗ that folder holds the main file', 'err');
+      return;
+    }
+    const targets = moving.map(p => (isDir ? to + p.slice(path.length) : to));
+    const clash = targets.find(t => project.files.has(t));
+    if (clash) { setStatus(`✗ ${clash} already exists`, 'err'); return; }
+
+    try {
+      for (let i = 0; i < moving.length; i++) await moveOne(moving[i], targets[i]);
+    } catch (err) {
+      // Partway through a folder move: say so rather than pretending it worked.
+      setStatus(`✗ ${err.message || err}`, 'err');
+      rawLog('err', `rename stopped partway: ${err.message || err}`);
+    }
+    if (isDir) { emptyDirs.delete(path); }
+    renderTree();
+    refreshDirty();
+    scheduleOutline();
+  });
+}
+
+async function deleteEntry(path, isDir) {
+  const doomed = isDir ? filesUnder(path) : [path];
+  if (doomed.includes(project.main)) {
+    setStatus('✗ the main file is what gets compiled — it cannot be deleted here', 'err');
+    return;
+  }
+  if (!isDir && !project.files.has(path)) return;
+
+  const what = isDir
+    ? `${path}/ and the ${doomed.length} file(s) in it`
+    : path;
+  if (!confirm(`Delete ${what}?\n\nThis cannot be undone from inside the app.`)) return;
+
+  try {
+    // One call per file, then the directory itself. No backend here can remove
+    // a tree, which is deliberate: there is no single call that could point at
+    // the wrong one.
+    for (const p of doomed) {
+      if (canWriteDisk() && NativeAPI.deleteFile) await NativeAPI.deleteFile(p);
+      project.files.delete(p);
+      if (p === currentPath) { currentPath = null; $('editortitle').textContent = 'no file'; }
+    }
+    if (isDir && canWriteDisk() && NativeAPI.deleteFile) {
+      await NativeAPI.deleteFile(path).catch(() => {});   // gone with its files on some backends
+    }
+  } catch (err) {
+    setStatus(`✗ ${err.message || err}`, 'err');
+    rawLog('err', `delete stopped partway: ${err.message || err}`);
+  }
+  emptyDirs.delete(path);
+  if (!currentPath && project.files.has(project.main)) openFile(project.main);
+  renderTree();
+  refreshDirty();
+  scheduleOutline();
+  setStatus(`deleted ${what}`, 'ok');
+}
+
+/** Right-click anywhere in the tree, and the + button in its header. */
+function treeMenuRows(node) {
+  const parent = node ? (node.dir ? node.path : dirOf(node.path)) : '';
+  const rows = [
+    { type: 'action', label: 'New file…', run: () => createFile(parent) },
+    { type: 'action', label: 'New folder…', run: () => createFolder(parent) }
+  ];
+  if (node) {
+    rows.push({ type: 'divider' });
+    rows.push({ type: 'action', label: 'Rename…', run: () => renameEntry(node.path, node.dir) });
+    rows.push({ type: 'action', label: 'Delete…', run: () => deleteEntry(node.path, node.dir) });
+  }
+  if (project && !project.onDisk) {
+    rows.push({ type: 'divider' });
+    rows.push({ type: 'note', label: 'This project is read-only, so changes stay in the browser until you export a zip.' });
+  }
+  return rows;
+}
+
+$('filetree').addEventListener('contextmenu', (e) => {
+  if (!project) return;
+  e.preventDefault();
+  const el = e.target.closest('.node');
+  const node = !el ? null
+    : el.dataset.dir !== undefined ? { path: el.dataset.dir, dir: true }
+    : { path: el.dataset.path, dir: false };
+  openMenuAt(e.clientX, e.clientY, () => treeMenuRows(node));
+});
+
+$('newfile').onclick = () => {
+  if (!project) return;
+  const r = $('newfile').getBoundingClientRect();
+  openMenuAt(r.left, r.bottom, () => treeMenuRows(null));
+};
 
 // ── project loading (dev server for now) ───────────────────────────────
 

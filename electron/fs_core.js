@@ -196,6 +196,33 @@ function writeFile(root, rel, content, expect = null) {
   return stampOf(abs);
 }
 
+/* ── delete and rename ───────────────────────────────────────────────── */
+//
+// Mirrors tauri/src/main.rs exactly, including the refusals. Same
+// safePathInside, no recursion into a directory, and no silent overwrite —
+// a document that can be renamed in one shell and not the other is
+// undiagnosable, so a test compares the two.
+
+function deleteFile(root, rel) {
+  const abs = safePathInside(rel, root);
+  const st = fs.lstatSync(abs);
+  // Only an empty directory, and only after its files have gone one by one.
+  if (st.isDirectory()) fs.rmdirSync(abs);
+  else fs.unlinkSync(abs);
+  syncParentDir(abs);
+}
+
+function renameFile(root, from, to) {
+  const src = safePathInside(from, root);
+  const dest = safePathInside(to, root);
+  if (!fs.existsSync(src)) throw new Error(`Cannot rename ${from}: it does not exist`);
+  if (fs.existsSync(dest)) throw new Error(`Cannot rename to ${to}: that already exists`);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.renameSync(src, dest);
+  syncParentDir(src);
+  syncParentDir(dest);
+}
+
 /* ── crash backups ───────────────────────────────────────────────────── */
 // Outside the project, so a recovery file never shows up in git status or gets
 // swept into a compile.
@@ -236,6 +263,6 @@ function discardBackup(backupDir, root, rel) {
 
 module.exports = {
   safePath, safePathInside, atomicWriteFile, isCrossDeviceErr, tmpFor,
-  readDirectory, readTextFile, readBinaryFile, writeFile, stampOf,
+  readDirectory, readTextFile, readBinaryFile, writeFile, deleteFile, renameFile, stampOf,
   writeBackup, listStaleBackups, discardBackup, backupKey
 };

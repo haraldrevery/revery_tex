@@ -198,6 +198,94 @@ test('write returns a stamp usable for the next save', () => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+/* ── delete and rename ───────────────────────────────────────────────── */
+
+test('delete removes a file and refuses to escape', () => {
+  const root = tmpdir('delete');
+  const outside = tmpdir('delete-outside');
+  fs.writeFileSync(path.join(outside, 'victim.tex'), 'do not touch');
+  fs.writeFileSync(path.join(root, 'gone.tex'), 'x');
+
+  core.deleteFile(root, 'gone.tex');
+  assert.ok(!fs.existsSync(path.join(root, 'gone.tex')));
+
+  // The first destructive operation in the app: containment has to hold here
+  // exactly as it does for writes.
+  assert.throws(() => core.deleteFile(root, `../${path.basename(outside)}/victim.tex`), /escapes/);
+  assert.ok(fs.existsSync(path.join(outside, 'victim.tex')));
+
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(outside, { recursive: true, force: true });
+});
+
+test('delete will not empty a directory for you', () => {
+  // No recursion, deliberately: the caller deletes the files it is showing,
+  // one at a time, so there is no "remove this tree" primitive.
+  const root = tmpdir('delete-dir');
+  fs.mkdirSync(path.join(root, 'ch'));
+  fs.writeFileSync(path.join(root, 'ch', 'a.tex'), 'x');
+  assert.throws(() => core.deleteFile(root, 'ch'));
+  assert.ok(fs.existsSync(path.join(root, 'ch', 'a.tex')));
+
+  core.deleteFile(root, 'ch/a.tex');
+  core.deleteFile(root, 'ch');
+  assert.ok(!fs.existsSync(path.join(root, 'ch')));
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('rename moves and never overwrites', () => {
+  const root = tmpdir('rename');
+  fs.writeFileSync(path.join(root, 'a.tex'), 'content');
+  fs.writeFileSync(path.join(root, 'taken.tex'), "someone else's work");
+
+  core.renameFile(root, 'a.tex', 'ch/b.tex');
+  assert.equal(fs.readFileSync(path.join(root, 'ch', 'b.tex'), 'utf8'), 'content');
+  assert.ok(!fs.existsSync(path.join(root, 'a.tex')));
+
+  // Renaming onto an existing file would destroy it with no warning.
+  assert.throws(() => core.renameFile(root, 'ch/b.tex', 'taken.tex'), /already exists/);
+  assert.equal(fs.readFileSync(path.join(root, 'taken.tex'), 'utf8'), "someone else's work");
+  assert.throws(() => core.renameFile(root, 'nothing.tex', 'x.tex'), /does not exist/);
+
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('rename refuses to escape the root, and the source survives', () => {
+  const root = tmpdir('rename-escape');
+  const outside = tmpdir('rename-escape-outside');
+  fs.writeFileSync(path.join(root, 'a.tex'), 'x');
+
+  assert.throws(() => core.renameFile(root, 'a.tex', `../${path.basename(outside)}/stolen.tex`));
+  assert.ok(!fs.existsSync(path.join(outside, 'stolen.tex')));
+  assert.ok(fs.existsSync(path.join(root, 'a.tex')));
+
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(outside, { recursive: true, force: true });
+});
+
+test('both shells refuse the same things', () => {
+  // A file that can be renamed in one shell and not the other is undiagnosable,
+  // so the two implementations are held to the same refusals by name.
+  const rust = fs.readFileSync(
+    path.join(__dirname, '..', 'tauri', 'src', 'main.rs'), 'utf8');
+  for (const marker of ['fn delete_file_impl', 'fn rename_file_impl',
+                        'it does not exist', 'that already exists',
+                        'remove_dir(', 'safe_path_inside']) {
+    assert.ok(rust.includes(marker), `Rust is missing ${marker}`);
+  }
+  const js = fs.readFileSync(path.join(__dirname, '..', 'electron', 'fs_core.js'), 'utf8');
+  for (const marker of ['function deleteFile', 'function renameFile',
+                        'it does not exist', 'that already exists',
+                        'rmdirSync', 'safePathInside']) {
+    assert.ok(js.includes(marker), `Electron is missing ${marker}`);
+  }
+  // And both are reachable from their shells.
+  const main = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.js'), 'utf8');
+  assert.ok(main.includes('fs:deleteFile') && main.includes('fs:renameFile'));
+  assert.ok(rust.includes('delete_file,') && rust.includes('rename_file,'),
+    'commands must be in the Tauri invoke handler, or the renderer cannot call them');
+});
+
 test('backup keys are stable and distinct', () => {
   assert.equal(core.backupKey('/tmp/p/main.tex'), core.backupKey('/tmp/p/main.tex'));
   assert.notEqual(core.backupKey('/tmp/p/main.tex'), core.backupKey('/tmp/p/other.tex'));
