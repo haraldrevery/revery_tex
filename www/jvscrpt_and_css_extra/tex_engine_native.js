@@ -113,10 +113,16 @@ export class NativeTexEngine {
     if (!last) return this._fail('cancelled');
 
     // Bibliography and index between passes, exactly as one would by hand.
+    //
+    // `bibtex` names the tool the *document* needs — biblatex builds its .bbl
+    // with biber, classic \bibliography with bibtex. They are not substitutes:
+    // running biber on a classic document fails, and running bibtex on a
+    // biblatex one produces a bibliography that is silently wrong. So the named
+    // tool runs or nothing does, and the log says which was missing.
     if (bibtex) {
-      const bibTool = this.capabilities.biber ? 'biber' : 'bibtex';
-      if (this.capabilities[bibTool]) await run(bibTool, bibTool);
-      else this.onLog('no bibtex or biber found — skipping the bibliography', 'wrn');
+      if (this.capabilities[bibtex]) await run(bibtex, bibtex);
+      else this.onLog(`this document needs ${bibtex}, which is not on your PATH — ` +
+                      `the bibliography will be whatever the existing .bbl holds`, 'wrn');
     }
     if (makeindex && this.capabilities.makeindex) await run('makeindex', 'makeindex');
 

@@ -126,6 +126,12 @@ const PROJECTS = {
     expectPages: 49,
     rerun: true,
     makeindex: true,
+    // biblatex, so the tool is biber — which no WASM build has. The gate passes
+    // this through (engine_smoke.html), so the run covers that branch: the
+    // bundled engine must say it cannot build the bibliography and carry on
+    // with the committed .bbl, rather than failing the compile or quietly
+    // running bibtex8 instead and producing a wrong one.
+    bibtex: 'biber',
     note: 'Uses the committed main.bbl; biber does not exist in WASM.'
   },
   homework: {

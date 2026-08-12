@@ -334,7 +334,10 @@ async function compile() {
       mainFile: manifest.main,
       engine: engineName,
       passes: !!manifest.rerun,
-      bibtex: false,
+      // The tool the document needs ('biber' | 'bibtex' | null), from the
+      // manifest — the same value the app passes. Hardcoding false here meant
+      // the gate never exercised the bibliography path at all.
+      bibtex: manifest.bibtex || null,
       makeindex: !!manifest.makeindex
     });
 

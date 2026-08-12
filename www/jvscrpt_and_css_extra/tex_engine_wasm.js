@@ -161,7 +161,21 @@ export class WasmTexEngine {
       const Tool = TOOLS[engine];
       const tool = new Tool(this._runner, true);
 
-      this._log('info', `compiling ${mainFile} with ${engine} (passes=${passes}, bibtex=${bibtex}, makeindex=${makeindex})`);
+      // `bibtex` names the tool the document needs ('bibtex' | 'biber' | null).
+      // Every driver here is *_bibtex8, so classic BibTeX runs; no WASM build
+      // has biber, and substituting bibtex8 for it would produce a silently
+      // wrong bibliography rather than none. Say so and carry on with whatever
+      // .bbl the project ships — the same way a missing package is named
+      // rather than swallowed.
+      let runBibtex = false;
+      if (bibtex === 'biber') {
+        this._log('warn', 'this document uses biblatex, which needs biber — no WASM build has it. ' +
+                          'Using the .bbl in the project if there is one; a system TeX Live can build it.');
+      } else if (bibtex === 'bibtex' || bibtex === true) {
+        runBibtex = true;
+      }
+
+      this._log('info', `compiling ${mainFile} with ${engine} (passes=${passes}, bibtex=${bibtex || 'none'}, makeindex=${makeindex})`);
 
       const result = await tool.compile({
         input: typeof main.content === 'string'
@@ -170,7 +184,7 @@ export class WasmTexEngine {
         mainTexPath: mainFile,
         additionalFiles: files.filter(f => f.path !== mainFile),
         driver: DRIVER[engine],
-        bibtex,
+        bibtex: runBibtex,
         makeindex,
         rerun: passes,
         verbose: 'info',

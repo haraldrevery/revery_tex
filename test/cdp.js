@@ -66,7 +66,14 @@ class Cdp {
       } catch { }
       await sleep(intervalMs);
     }
-    throw new Error(`timed out waiting for: ${what}`);
+    // Whatever went wrong almost always already announced itself as a page
+    // error. Reporting the timeout alone hides the cause behind a symptom, so
+    // attach them — `launch` wires this list up.
+    const seen = (this.pageErrors || []).filter(e => !/favicon/i.test(e));
+    throw new Error(
+      `timed out waiting for: ${what}` +
+      (seen.length ? `\n  page errors:\n    ${seen.slice(0, 5).join('\n    ')}` : '')
+    );
   }
 }
 
@@ -134,11 +141,21 @@ async function launch({ url, port = 9333, chromePath, extraArgs = [] } = {}) {
   await cdp.send('Page.enable');
 
   const pageErrors = [];
+  cdp.pageErrors = pageErrors;   // so waitFor can explain its own timeout
   cdp.on((msg) => {
     if (msg.method === 'Log.entryAdded' && msg.params.entry.level === 'error') {
       const e = msg.params.entry;
       // The URL is what makes a "Failed to load resource" entry actionable.
       pageErrors.push(`${e.source}: ${e.text}${e.url ? ` [${e.url}]` : ''}`);
+    }
+    // A throw while a module is evaluating arrives here, NOT as a console
+    // entry. Without this a broken import reads only as "timed out waiting for
+    // app boot", with the actual ReferenceError invisible — which is exactly
+    // how a stray variable after a refactor cost an hour once.
+    if (msg.method === 'Runtime.exceptionThrown') {
+      const d = msg.params.exceptionDetails;
+      const where = d.url ? ` [${d.url}:${(d.lineNumber ?? 0) + 1}]` : '';
+      pageErrors.push(`uncaught: ${d.exception?.description || d.text}${where}`);
     }
   });
 

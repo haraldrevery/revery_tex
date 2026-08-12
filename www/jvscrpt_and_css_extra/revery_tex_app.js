@@ -606,11 +606,46 @@ async function exportZip() {
  * never needed. A document that branches on the engine runs under either, so
  * pdfLaTeX wins: it is faster and needs fewer font files.
  */
+/**
+ * Drop LaTeX comments before looking for commands.
+ *
+ * Without this, anything scanning the source reads code people have commented
+ * out — and they comment out exactly the interesting lines. The homework
+ * fixture carries a commented `\bibliography{…}`, which is enough to make an
+ * unguarded scan run bibtex on a document that has no bibliography and compiles
+ * fine today.
+ *
+ * A `%` starts a comment unless it is escaped, so an odd number of preceding
+ * backslashes means it is literal.
+ */
+function stripTexComments(src) {
+  return String(src).replace(/(^|[^\\])((?:\\\\)*)%.*$/gm, '$1$2');
+}
+
 function inferEngine(src) {
+  src = stripTexComments(src);
   const branches = /\\(?:ifPDFTeX|ifpdftex|ifxetex|ifXeTeX|ifluatex|ifLuaTeX|RequirePackage\{iftex\}|usepackage\{iftex\})/.test(src);
   if (branches) return 'pdftex';
   return /\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{(?:fontspec|unicode-math)\}/.test(src)
     ? 'xetex' : 'pdftex';
+}
+
+/**
+ * Which bibliography tool a document needs, or null for none.
+ *
+ * A tool name rather than a boolean, because the two are not interchangeable:
+ * biblatex builds its .bbl with biber, classic \bibliography with bibtex, and
+ * running the wrong one fails in a way that reads as a broken document. Both
+ * shapes are in the test fixtures — the book template is biblatex, homework is
+ * classic — so guessing by "whichever is installed" is wrong for one of them.
+ */
+function inferBibTool(src) {
+  src = stripTexComments(src);
+  if (/\\(?:addbibresource|printbibliography)|\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{biblatex\}/.test(src)) {
+    return 'biber';
+  }
+  if (/\\bibliography\{|\\bibliographystyle\{/.test(src)) return 'bibtex';
+  return null;
 }
 
 async function loadFromDisk(root) {
@@ -658,7 +693,8 @@ async function loadFromDisk(root) {
 
   const mainSrc = project.files.get(project.main)?.content || '';
   project.engine = inferEngine(mainSrc);
-  project.makeindex = /\\makeindex/.test(mainSrc);
+  project.makeindex = /\\makeindex/.test(stripTexComments(mainSrc));
+  project.bibtex = inferBibTool(mainSrc);
 
   $('docname').textContent = project.main;
   projectSel.setOptions([{ label: project.key, value: project.key }]);
@@ -681,7 +717,8 @@ async function loadProject(key) {
   // Fixtures come from the dev server and have no disk backing, so they cannot
   // be saved. onDisk is what gates saving, not which shell is running.
   project = { key, main: m.main, engine: m.engine, rerun: m.rerun,
-              makeindex: m.makeindex, onDisk: false, files: new Map() };
+              makeindex: m.makeindex, bibtex: m.bibtex || null,
+              onDisk: false, files: new Map() };
   for (const f of m.files) {
     const binary = f.encoding === 'base64' && !TEXT_RE.test(f.path);
     project.files.set(f.path, {
@@ -789,9 +826,10 @@ async function compile() {
       mainFile: project.main,
       engine: engineName,
       passes: !!project.rerun,
-      // The bundled engine has no biber at all; a system TeX usually does, so
-      // a bibliography is only attempted where it can succeed.
-      bibtex: eng.capabilities.biber || eng.capabilities.bibtex ? !!project.bibtex : false,
+      // The tool the document needs ('biber' | 'bibtex' | null). Each engine
+      // decides whether it has that tool and says so if not — substituting the
+      // other one produces a wrong bibliography rather than an honest failure.
+      bibtex: project.bibtex || null,
       makeindex: !!project.makeindex
     });
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
