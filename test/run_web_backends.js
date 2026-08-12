@@ -145,7 +145,10 @@ async function main() {
     // The dropdown is populated from the engine's capabilities, which only
     // exist once the engine has started — so this is only meaningful after a
     // compile. The document has no fontspec, so pdfLaTeX is the right pick.
-    const chosen = await cdp.evaluate(`document.getElementById('engine').value`);
+    // The engine drop-down is a button now, not a <select>; its label is the
+    // current value.
+    const chosen = await cdp.evaluate(
+      `document.getElementById('engine').textContent.replace(/\s*▾\s*$/, '').trim()`);
     check('engine inferred as pdflatex', chosen === 'pdflatex', chosen);
 
     /* ── export, including the edit that has not been saved ─────────── */

@@ -20,10 +20,15 @@ import { latexEditingExtensions, setDiagnostics, beginEndInsertion } from './lat
 import { SyncTex } from './synctex.js';
 import { writeZip } from './zip_core.js';
 import * as settings from './settings.js';
-import { attachMenu, closeAllMenus } from './menus.js';
+import { attachMenu, closeAllMenus, SelectMenu } from './menus.js';
 
 const $ = (id) => document.getElementById(id);
 const CM = window.CM;
+
+// Topbar drop-downs. Same .value / .onchange surface a <select> had, so the
+// call sites below read identically — only the rendering changed.
+const projectSel = new SelectMenu($('project'), { empty: 'no project' });
+const engineSel = new SelectMenu($('engine'), { empty: 'engine' });
 
 // ── state ──────────────────────────────────────────────────────────────
 let engine = null;
@@ -54,7 +59,6 @@ function refreshAutoCompile() {
     : 'Not compiling after save — click to turn on';
 }
 $('autocompile').onclick = () => settings.set('autoCompile', !settings.settings.autoCompile);
-$('theme').onclick = () => settings.cycle('theme');
 // One listener rather than each control refreshing itself: a setting changed
 // from the menu and the same setting changed from its button must look the
 // same afterwards, and that is only guaranteed if there is one path.
@@ -78,7 +82,10 @@ function settingsMenuSpec() {
     // that silently does nothing. Hide it instead of letting it lie.
     if (s.key === 'engineSource' && !NativeTexEngine.available(NativeAPI)) continue;
     rows.push({
-      type: s.ui || 'radio',      // the schema decides; a scale is a stepper
+      // Theme is a submenu, as in Revery Notebook: four colour schemes are the
+      // least frequently changed setting here and do not need four permanent
+      // rows at the top of the menu.
+      type: s.key === 'theme' ? 'submenu' : (s.ui || 'radio'),
       label: s.label,
       options: s.options,
       get: () => settings.settings[s.key],
@@ -455,10 +462,8 @@ const ENGINE_FOR = { pdftex: 'pdflatex', xetex: 'xelatex', luahbtex: 'lualatex' 
 const preferredEngine = () => (project && ENGINE_FOR[project.engine]) || 'xelatex';
 
 function syncEngineSelect() {
-  const sel = $('engine');
-  if (!sel.options.length) return;
   const want = preferredEngine();
-  if ([...sel.options].some(o => o.value === want)) sel.value = want;
+  engineSel.value = want;   // ignored if the engine is not among the options
 }
 
 async function loadProjects() {
@@ -490,19 +495,12 @@ async function loadProjects() {
     return;
   }
 
-  const sel = $('project');
-  sel.textContent = '';
-  for (const p of list.filter(p => !p.expectFailure)) {
-    const o = document.createElement('option');
-    o.value = p.key;
-    o.textContent = p.key;
-    sel.appendChild(o);
-  }
-  sel.onchange = () => {
-    if (!confirmDiscard('Switch project')) { sel.value = project ? project.key : sel.value; return; }
-    loadProject(sel.value);
+  projectSel.setOptions(list.filter(p => !p.expectFailure).map(p => ({ label: p.key, value: p.key })));
+  projectSel.onchange = (v) => {
+    if (!confirmDiscard('Switch project')) { projectSel.value = project ? project.key : v; return; }
+    loadProject(v);
   };
-  if (sel.value) await loadProject(sel.value);
+  if (projectSel.value) await loadProject(projectSel.value);
 }
 
 const TEXT_EXT_RE = /\.(tex|bib|cls|sty|bbl|ind|def|cfg|txt|clo|ltx)$/i;
@@ -663,10 +661,7 @@ async function loadFromDisk(root) {
   project.makeindex = /\\makeindex/.test(mainSrc);
 
   $('docname').textContent = project.main;
-  $('project').innerHTML = '';
-  const o = document.createElement('option');
-  o.value = project.key; o.textContent = project.key;
-  $('project').appendChild(o);
+  projectSel.setOptions([{ label: project.key, value: project.key }]);
 
   syncEngineSelect();
   renderTree();
@@ -763,13 +758,7 @@ async function getEngine() {
       await engine.init();
     } else throw err;
   }
-  const sel = $('engine');
-  sel.textContent = '';
-  for (const e of engine.capabilities.engines) {
-    const o = document.createElement('option');
-    o.value = e; o.textContent = e;
-    sel.appendChild(o);
-  }
+  engineSel.setOptions(engine.capabilities.engines.map(e => ({ label: e, value: e })));
   syncEngineSelect();
   return engine;
 }
@@ -785,7 +774,7 @@ async function compile() {
 
   try {
     const eng = await getEngine();
-    const engineName = $('engine').value || preferredEngine();
+    const engineName = engineSel.value || preferredEngine();
 
     rawLog('hdr', `— ${project.key} · ${project.main} · ${engineName} · ${eng.__source}`);
     // A system TeX reads the real files, so unsaved edits would compile the
@@ -1008,7 +997,7 @@ window.__reveryTexApp = {
     return true;
   },
   async compile(key) {
-    if (key && key !== project?.key) { $('project').value = key; await loadProject(key); }
+    if (key && key !== project?.key) { projectSel.value = key; await loadProject(key); }
     await compile();
     return {
       status: $('status').textContent,

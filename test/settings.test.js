@@ -41,10 +41,10 @@ test('defaults apply when nothing is stored', async () => {
   const { mod, dom } = await load(undefined);
   mod.applyAll();
   assert.equal(mod.settings.theme, 'dark');
-  assert.equal(mod.settings.uiSize, 100);
+  assert.equal(mod.settings.uiSize, 120);
   assert.equal(mod.settings.autoCompile, true);
   assert.equal(dom.attrs.get('data-theme'), 'dark');
-  assert.equal(dom.props.get('--ui-scale'), '1');
+  assert.equal(dom.props.get('--ui-scale'), '1.2');
 });
 
 test('stored values are restored', async () => {
@@ -60,7 +60,7 @@ test('a value that is not an offered option falls back to the default', async ()
   // e.g. a theme removed in a later release, or a hand-edited store.
   const { mod } = await load({ theme: 'neon', uiSize: 9999, editorFont: 42 });
   assert.equal(mod.settings.theme, 'dark');
-  assert.equal(mod.settings.uiSize, 100);
+  assert.equal(mod.settings.uiSize, 120);
   assert.equal(mod.settings.editorFont, 'mono');
 });
 
@@ -114,7 +114,7 @@ test('reset restores every default but keeps unknown keys', async () => {
   const { mod } = await load({ theme: 'light', uiSize: 150, panelCollapsed: true });
   mod.reset();
   assert.equal(mod.settings.theme, 'dark');
-  assert.equal(mod.settings.uiSize, 100);
+  assert.equal(mod.settings.uiSize, 120);
   assert.equal(mod.settings.panelCollapsed, true, 'layout is not a preference to reset');
 });
 

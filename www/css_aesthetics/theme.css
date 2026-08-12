@@ -88,26 +88,41 @@ body {
 }
 .spacer { flex:1 }
 
-button, select {
+/* No <select> anywhere: the native list draws the operating system's own
+   popup, in system fonts, ignoring the theme. Every drop-down is a button
+   plus a .menu-container — see menus.js SelectMenu. */
+button {
   font-family:var(--font-mono); font-size:.7rem; text-transform:uppercase;
   letter-spacing:var(--tracking-wide); color:var(--text-muted);
   background:none; border:1px solid var(--border-md); border-radius:2px;
   /* asymmetric padding: the brand face sits high in its em box */
   padding:.375rem .75rem .1875rem .75rem; line-height:1; cursor:pointer;
+  /* Never wrap a label to a second line: the topbar is a fixed height, and a
+     wrapped button overflows it. Things that can lose characters do so with an
+     ellipsis instead — see #topbar below. */
+  white-space:nowrap;
   transition:color .15s, border-color .15s, background .15s;
 }
-select { padding:.3rem .4rem }
-select option { background:var(--menu-bg); color:var(--text) }
-button:hover:not(:disabled), select:hover { color:var(--text); border-color:var(--accent); background:var(--bg-hover) }
+button:hover:not(:disabled) { color:var(--text); border-color:var(--accent); background:var(--bg-hover) }
 button:disabled { opacity:.35; cursor:default }
 button.primary { color:var(--text); border-color:var(--accent) }
 
 #topbar {
   height:2.4rem; flex:none; display:flex; align-items:center; gap:.55rem;
   padding:0 .9rem; border-bottom:1px solid var(--border); background:var(--bg);
+  overflow:hidden;
 }
-.docname { font-size:.66rem; letter-spacing:var(--tracking-wide); color:var(--text-muted); text-transform:uppercase }
-.statusline { border-color:transparent; color:var(--text-muted) }
+/* The two variable-length items give way first, so the controls keep their
+   labels at any UI size rather than the row wrapping or clipping a button. */
+.docname {
+  font-size:.66rem; letter-spacing:var(--tracking-wide); color:var(--text-muted);
+  text-transform:uppercase;
+  min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.statusline {
+  border-color:transparent; color:var(--text-muted);
+  min-width:0; overflow:hidden; text-overflow:ellipsis;
+}
 .statusline.ok { color:var(--ok) } .statusline.err { color:var(--err) } .statusline.warn { color:var(--warn) }
 
 /* Where the work is stored, when that is not the obvious answer. Persistent
@@ -146,6 +161,20 @@ button.primary { color:var(--text); border-color:var(--accent) }
 .menu-item:hover, .menu-item:focus { background:var(--bg-hover); color:var(--text); outline:none }
 .menu-item:focus-visible { box-shadow:inset 2px 0 0 var(--accent) }
 .menu-divider { height:1px; background:var(--theme-divider); margin:.3rem 0 }
+
+/* Submenus, opening sideways like Revery Notebook's.
+   Mounted on <body> and positioned fixed by menus.js: the parent menu scrolls,
+   and an overflow container clips any descendant positioned outside it. */
+.menu-item.has-submenu { display:flex; align-items:baseline; gap:.6rem }
+.menu-item.has-submenu > span:first-child { flex:1 }
+.menu-sub-value { color:var(--text-dim); font-size:.62rem; white-space:nowrap }
+.submenu {
+  position:fixed; z-index:101; display:flex; flex-direction:column;
+  min-width:8rem; padding:.25rem 0;
+  background:var(--menu-bg); border:1px solid var(--border-md); border-radius:3px;
+  box-shadow:0 4px 14px rgba(0,0,0,.22);
+}
+.submenu[hidden] { display:none }
 
 /* − value +  on one line, so a 14-step scale is one row rather than fourteen. */
 .menu-stepper { display:flex; align-items:center; gap:.2rem; padding:0 .55rem .15rem .55rem }

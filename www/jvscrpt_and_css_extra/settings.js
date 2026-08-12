@@ -58,7 +58,9 @@ export const SCHEMA = [
   {
     // Scales every chrome measurement at once, because the whole stylesheet is
     // in rem. The editor and PDF have their own scales below.
-    key: 'uiSize', label: 'UI size', def: 100, ui: 'stepper',
+    // 120% by default: at 100% the mono chrome is legible but tight on a
+    // high-DPI laptop, which is what this is mostly used on.
+    key: 'uiSize', label: 'UI size', def: 120, ui: 'stepper',
     options: PERCENT(80, 160, 10),
     css: '--ui-scale', format: (v) => String(v / 100)
   },

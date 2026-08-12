@@ -7,15 +7,21 @@
 // others.
 //
 // A menu is a list of rows:
-//   { type: 'radio',  label, options: [{label, value}], get(), set(v) }
-//   { type: 'action', label, run() }
+//   { type: 'radio',   label, options: [{label, value}], get(), set(v) }
+//   { type: 'stepper', ... }         − value + on one line, for scales
+//   { type: 'submenu', ... }         a nested panel, for themes
+//   { type: 'action',  label, run() }
 //   { type: 'divider' }
-//   { type: 'note',   label }        non-interactive, for stating a limitation
+//   { type: 'note',    label }       non-interactive, for stating a limitation
 //
-// Radio rows render as a label with the choices beneath, each prefixed ■ or □.
-// That is deliberate rather than a submenu: submenus need hover intent, an open
-// delay and edge flipping, and every one of those is a bug surface for a menu
-// that has to hold seven settings.
+// Most rows are flat — a label with its choices beneath, each prefixed ■ or □ —
+// because a submenu costs hover intent, an open delay and edge flipping, and
+// every one of those is a bug surface. Themes get one anyway: four colour
+// schemes are the least-changed setting here and do not deserve four permanent
+// rows at the top of the menu.
+//
+// SelectMenu at the bottom replaces `<select>`, which draws the operating
+// system's own popup in system fonts and cannot show the ■ marker.
 
 const OPEN = new Set();
 
@@ -77,7 +83,15 @@ export function attachMenu(button, spec, opts = {}) {
     list[Math.max(0, Math.min(i, list.length - 1))].focus();
   }
 
+  // Submenu panels are mounted on <body>, so they have to be taken down by
+  // hand — clearing el.textContent would otherwise leave them orphaned there.
+  const panels = [];
+  function dropPanels() {
+    for (const p of panels.splice(0)) p.remove();
+  }
+
   function render() {
+    dropPanels();
     el.textContent = '';
     for (const row of spec()) {
       if (row.type === 'divider') {
@@ -93,6 +107,93 @@ export function attachMenu(button, spec, opts = {}) {
         el.appendChild(n);
         continue;
       }
+      if (row.type === 'submenu') {
+        // A nested panel, opening sideways like Revery Notebook's. Used where a
+        // setting has enough choices to crowd the parent — themes — without
+        // being worth a stepper.
+        const trigger = document.createElement('button');
+        trigger.className = 'menu-item has-submenu';
+        trigger.setAttribute('aria-haspopup', 'true');
+        trigger.setAttribute('aria-expanded', 'false');
+        const current = row.get ? row.get() : null;
+        const chosen = (row.options || []).find(o => o.value === current);
+        trigger.append(
+          Object.assign(document.createElement('span'), { textContent: row.label }),
+          Object.assign(document.createElement('span'), {
+            className: 'menu-sub-value',
+            textContent: `${chosen ? chosen.label : ''} \u25B8`
+          })
+        );
+
+        // The panel lives on <body>, not inside the trigger. The parent menu
+        // scrolls (overflow-y:auto for long menus), and an overflow container
+        // clips any descendant positioned outside it — so a nested panel simply
+        // never appears. Positioning it against the trigger's rect avoids that
+        // entirely, the same way the parent menu is positioned.
+        const panel = document.createElement('div');
+        panel.className = 'submenu';
+        panel.hidden = true;
+        panel.setAttribute('role', 'menu');
+        document.body.appendChild(panel);
+        panels.push(panel);
+
+        for (const opt of row.options || []) {
+          const b = document.createElement('button');
+          b.className = 'menu-item';
+          b.setAttribute('role', 'menuitemradio');
+          const active = opt.value === current;
+          b.setAttribute('aria-checked', String(active));
+          b.textContent = `${active ? '\u25A0' : '\u25A1'}  ${opt.label}`;
+          // Focus returns to the trigger: the chosen row is about to be
+          // rebuilt, and the trigger is where the user was.
+          b.onclick = () => { row.set(opt.value); render(); items()[0]?.focus(); };
+          panel.appendChild(b);
+        }
+
+        let closeTimer = null;
+        const place = () => {
+          const r = trigger.getBoundingClientRect();
+          panel.style.top = `${Math.max(8, Math.min(r.top - 4, window.innerHeight - panel.offsetHeight - 8))}px`;
+          // Opens leftwards, because the settings menu is already at the right
+          // edge; flips to the right if there is no room on the left.
+          const w = panel.offsetWidth;
+          const left = r.left - w - 4;
+          panel.style.left = `${left < 8 ? Math.min(r.right + 4, window.innerWidth - w - 8) : left}px`;
+        };
+        const show = (on) => {
+          panel.hidden = !on;
+          trigger.setAttribute('aria-expanded', String(on));
+          if (on) place();
+        };
+        const cancelClose = () => { clearTimeout(closeTimer); closeTimer = null; };
+        const scheduleClose = () => { closeTimer = setTimeout(() => show(false), 220); };
+        // Both halves need the handlers now that they are not nested, and the
+        // grace period covers the gap the pointer crosses between them.
+        for (const el2 of [trigger, panel]) {
+          el2.addEventListener('mouseenter', () => { cancelClose(); show(true); });
+          el2.addEventListener('mouseleave', scheduleClose);
+        }
+        // Deliberately not opened on focus: arrow-keying down the menu would
+        // pop a panel over the rows below, and a click straight after a focus
+        // would then read as "close" and look broken.
+        trigger.onclick = (e) => {
+          e.preventDefault();
+          show(panel.hidden);
+          if (!panel.hidden) panel.querySelector('.menu-item')?.focus();
+        };
+        trigger.addEventListener('keydown', (e) => {
+          if (e.key === 'ArrowRight' || e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault(); show(true); panel.querySelector('.menu-item')?.focus();
+          }
+        });
+        panel.addEventListener('keydown', (e) => {
+          if (e.key === 'ArrowLeft') { e.preventDefault(); show(false); trigger.focus(); }
+        });
+
+        el.appendChild(trigger);
+        continue;
+      }
+
       if (row.type === 'stepper') {
         // A scale with 14 values is 14 rows as a radio list, which turns the
         // settings menu into a scrolling column where nothing is scannable.
@@ -200,6 +301,7 @@ export function attachMenu(button, spec, opts = {}) {
 
   function close() {
     if (el.hidden) return;
+    dropPanels();
     el.hidden = true;
     OPEN.delete(menu);
     button.setAttribute('aria-expanded', 'false');
@@ -226,4 +328,60 @@ export function attachMenu(button, spec, opts = {}) {
   });
 
   return menu;
+}
+
+/**
+ * A drop-down that behaves like `<select>` but looks like the rest of the app.
+ *
+ * A native `<select>` draws the operating system's own list — a white popup
+ * with system fonts, in an app where every other control is mono, uppercase and
+ * themed. It also cannot show the ■ marker the menus use. This keeps the same
+ * `.value` / `.onchange` surface so call sites read the same.
+ */
+export class SelectMenu {
+  /**
+   * @param {HTMLElement} button
+   * @param {{empty?: string}} [opts]  label shown when there are no options
+   */
+  constructor(button, { empty = '—' } = {}) {
+    this.button = button;
+    this.empty = empty;
+    this.options = [];
+    this._value = null;
+    this.onchange = null;
+    attachMenu(button, () => (this.options.length
+      ? [{
+          type: 'radio',
+          label: button.dataset.label || '',
+          options: this.options,
+          get: () => this._value,
+          set: (v) => { this.value = v; if (this.onchange) this.onchange(v); closeAllMenus(); }
+        }]
+      : [{ type: 'note', label: 'nothing to choose yet' }]));
+    this._paint();
+  }
+
+  setOptions(list) {
+    this.options = list.map(o => (typeof o === 'string' ? { label: o, value: o } : o));
+    // Keep the current value if it survived; otherwise take the first, which is
+    // what a <select> does when its options are replaced.
+    if (!this.options.some(o => o.value === this._value)) {
+      this._value = this.options.length ? this.options[0].value : null;
+    }
+    this._paint();
+  }
+
+  get value() { return this._value ?? ''; }
+
+  set value(v) {
+    if (!this.options.some(o => o.value === v)) return;
+    this._value = v;
+    this._paint();
+  }
+
+  _paint() {
+    const chosen = this.options.find(o => o.value === this._value);
+    this.button.textContent = `${chosen ? chosen.label : this.empty} ▾`;
+    this.button.disabled = this.options.length === 0;
+  }
 }
