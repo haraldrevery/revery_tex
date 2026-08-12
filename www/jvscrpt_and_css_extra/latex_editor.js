@@ -7,6 +7,10 @@
 // adopted later, these sources can be reimplemented over the syntax tree without
 // changing a single caller.
 
+// The one index — see document_model.js. This file used to own a private
+// scanner, but every new feature needed the same data, so it moved out.
+import { projectIndex } from './document_model.js';
+
 const CM = window.CM;
 
 /* ── \begin{…} auto-close ─────────────────────────────────────────────── */
@@ -83,44 +87,6 @@ const ENVIRONMENTS = [
   'lstlisting', 'center', 'minipage', 'subfigure', 'theorem', 'proof',
   'definition', 'lemma', 'proposition', 'corollary', 'algorithm'
 ];
-
-/**
- * Scan every text file in the project for things worth completing.
- * Cheap enough to redo per completion request for a normal project; cached by
- * a cheap signature so a big project is not rescanned on every keystroke.
- */
-function scanProject(project) {
-  const labels = new Set();
-  const citations = new Set();
-  const files = [];
-
-  if (!project) return { labels: [], citations: [], files: [] };
-
-  for (const [path, f] of project.files) {
-    if (f.binary || typeof f.content !== 'string') {
-      files.push(path);
-      continue;
-    }
-    files.push(path);
-    for (const m of f.content.matchAll(/\\label\{([^}]+)\}/g)) labels.add(m[1]);
-    // BibTeX entries: @article{key, …
-    for (const m of f.content.matchAll(/@\w+\s*\{\s*([^,\s}]+)/g)) citations.add(m[1]);
-    // biblatex \bibitem{key}
-    for (const m of f.content.matchAll(/\\bibitem(?:\[[^\]]*\])?\{([^}]+)\}/g)) citations.add(m[1]);
-  }
-  return { labels: [...labels].sort(), citations: [...citations].sort(), files: files.sort() };
-}
-
-let cache = { sig: null, data: null };
-function projectIndex(project) {
-  if (!project) return { labels: [], citations: [], files: [] };
-  // Signature changes whenever any buffer changes length — good enough to keep
-  // the index fresh without rescanning on every character.
-  let sig = project.key + '|';
-  for (const [p, f] of project.files) sig += p + (typeof f.content === 'string' ? f.content.length : 0) + ';';
-  if (cache.sig !== sig) cache = { sig, data: scanProject(project) };
-  return cache.data;
-}
 
 /**
  * @param {() => object|null} getProject  the app's current project
