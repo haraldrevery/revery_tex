@@ -21,7 +21,19 @@ function check(name, ok, detail = '') {
   if (!ok) failures++;
 }
 
+/** A missing dev server otherwise reads as "the app failed to boot". */
+async function requireServer() {
+  const ok = await fetch(BASE, { signal: AbortSignal.timeout(2000) })
+    .then(r => r.ok).catch(() => false);
+  if (!ok) {
+    console.error(`No server at ${BASE} — start the fixture server (npm run serve) first.\n` +
+                  `Note that \`npm run check\` stops its own servers when it finishes.`);
+    process.exit(2);
+  }
+}
+
 async function main() {
+  await requireServer();
   const { cdp, cleanup, pageErrors } = await launch({ url: BASE, port: CDP_PORT });
   try {
     cdp.on((msg) => {
@@ -294,6 +306,97 @@ async function main() {
       Math.abs(mapping.narrow.y - mapping.wide.y) < 1,
       `narrow (${mapping.narrow.x.toFixed(1)}, ${mapping.narrow.y.toFixed(1)}) · ` +
       `wide (${mapping.wide.x.toFixed(1)}, ${mapping.wide.y.toFixed(1)})`);
+
+    /* ── toolbox and right-click formatting ─────────────────────────── */
+    const fmt = await cdp.evaluate(`(async () => {
+      const app = window.__reveryTexApp;
+      const view = window.__reveryTexTest.view();
+      const set = (text) => view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: text } });
+      const select = (a, b) => view.dispatch({ selection: { anchor: a, head: b } });
+      const doc = () => view.state.doc.toString();
+
+      set('make this bold please');
+      select(10, 14);
+
+      // Right-click over the editor with a selection.
+      const target = document.querySelector('.cm-content');
+      const r = target.getBoundingClientRect();
+      target.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true, clientX: r.left + 40, clientY: r.top + 20 }));
+      const menu = document.querySelector('.menu-container:not([hidden])');
+      const labels = menu ? [...menu.querySelectorAll('.menu-item')].map(b => b.textContent.trim()) : [];
+
+      // Bold it, then bold it again — the second must undo the first.
+      const bold = () => [...document.querySelectorAll('.menu-container .menu-item')]
+        .find(b => /^Bold$/i.test(b.textContent.trim()));
+      bold()?.click();
+      const once = doc();
+
+      const at = once.indexOf('bold');
+      select(at, at + 4);
+      target.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true, clientX: r.left + 40, clientY: r.top + 20 }));
+      bold()?.click();
+      const twice = doc();
+
+      // With nothing selected the browser's own menu must survive.
+      select(3, 3);
+      const ev = new MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true, clientX: r.left + 40, clientY: r.top + 20 });
+      target.dispatchEvent(ev);
+      const suppressedWithNoSelection = ev.defaultPrevented;
+
+      // …and so must it outside the editor entirely.
+      const outside = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+      document.getElementById('status').dispatchEvent(outside);
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+
+      // Accumulation is a delta, not an absolute: the permanent menus (settings,
+      // toolbox, and the two topbar drop-downs) are always attached.
+      const baseline = document.querySelectorAll('.menu-container').length;
+      for (let i = 0; i < 5; i++) {
+        select(0, 4);
+        target.dispatchEvent(new MouseEvent('contextmenu', {
+          bubbles: true, cancelable: true, clientX: r.left + 40, clientY: r.top + 20 }));
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      }
+      const after = document.querySelectorAll('.menu-container').length;
+
+      return {
+        opened: !!menu, labels, once, twice,
+        suppressedWithNoSelection, suppressedOutside: outside.defaultPrevented,
+        baseline, after
+      };
+    })()`, true);
+
+    check('right-click opens a menu over a selection', fmt.opened, fmt.labels.join(' | '));
+    check('it offers the four formats',
+      ['Bold', 'Italic', 'Underline', 'Code'].every(l => fmt.labels.includes(l)),
+      fmt.labels.join(' | '));
+    check('Bold wraps the selection',
+      fmt.once === 'make this \\textbf{bold} please', JSON.stringify(fmt.once));
+    check('Bold again unwraps it',
+      fmt.twice === 'make this bold please', JSON.stringify(fmt.twice));
+    // The native menu carries spellcheck, clipboard and Look Up; replacing it
+    // with four items nobody asked for is a downgrade.
+    check('the native menu survives with no selection', !fmt.suppressedWithNoSelection);
+    check('the native menu survives outside the editor', !fmt.suppressedOutside);
+    // A transient menu that is not removed leaves a dead <div> per right-click.
+    check('context menus do not accumulate', fmt.after === fmt.baseline,
+      `${fmt.baseline} permanent → ${fmt.after} after five right-clicks`);
+
+    const toolbox = await cdp.evaluate(`(() => {
+      document.getElementById('toolbox').click();
+      const m = document.querySelector('.menu-container:not([hidden])');
+      const labels = m ? [...m.querySelectorAll('.menu-item')].map(b => b.textContent.trim()) : [];
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return labels;
+    })()`);
+    check('the toolbox offers the same formats',
+      ['Bold', 'Italic', 'Underline', 'Code'].every(l => toolbox.includes(l)),
+      toolbox.join(' | '));
 
     const expected = /favicon|\/api\/projects/i;
     const real = pageErrors.filter(e => !expected.test(e));

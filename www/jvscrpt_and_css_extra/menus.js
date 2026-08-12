@@ -37,13 +37,19 @@ function bindGlobals() {
   // Capture phase: a click on another menu's button must close this one before
   // that button's own handler decides whether to toggle itself open.
   document.addEventListener('mousedown', (e) => {
-    for (const m of [...OPEN]) if (!m.el.contains(e.target) && !m.button.contains(e.target)) m.close();
+    for (const m of [...OPEN]) {
+      if (m.el.contains(e.target)) continue;
+      if (m.button && m.button.contains(e.target)) continue;
+      m.close();
+    }
   }, true);
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && OPEN.size) {
       const last = [...OPEN].pop();
       last.close();
-      last.button.focus();
+      // A context menu has no button to return focus to; leave focus wherever
+      // it was, which for the editor is the text.
+      last.button?.focus();
       e.stopPropagation();
     }
   });
@@ -51,15 +57,20 @@ function bindGlobals() {
 }
 
 /**
- * Attach a dropdown to a button.
+ * The menu itself: rendering, keyboard handling, placement and dismissal.
+ * Not exported — callers reach it through attachMenu or openMenuAt, which
+ * differ only in what they anchor to.
  *
- * @param {HTMLElement} button
  * @param {() => Array<object>} spec  called on every open, so rows reflect
  *        current values without anyone having to remember to refresh them
- * @param {{align?: 'left'|'right'}} [opts]
+ * @param {{align?, button?, anchor?, transient?}} [opts]
  */
-export function attachMenu(button, spec, opts = {}) {
+function createMenu(spec, opts = {}) {
   bindGlobals();
+  // A button is one kind of anchor. A context menu has none — it is positioned
+  // at a point — so everything below treats it as optional rather than there
+  // being two menu implementations that drift apart on focus and dismissal.
+  const button = opts.button || null;
 
   const el = document.createElement('div');
   el.className = 'menu-container';
@@ -67,8 +78,8 @@ export function attachMenu(button, spec, opts = {}) {
   el.hidden = true;
   document.body.appendChild(el);
 
-  button.setAttribute('aria-haspopup', 'true');
-  button.setAttribute('aria-expanded', 'false');
+  button?.setAttribute('aria-haspopup', 'true');
+  button?.setAttribute('aria-expanded', 'false');
 
   const menu = { el, button, close, open, toggle };
 
@@ -274,7 +285,7 @@ export function attachMenu(button, spec, opts = {}) {
    * menu would otherwise be cut off at the first row.
    */
   function place() {
-    const r = button.getBoundingClientRect();
+    const r = opts.anchor ? opts.anchor() : button.getBoundingClientRect();
     el.style.position = 'fixed';
     el.style.top = `${r.bottom + 4}px`;
     el.style.maxHeight = `${Math.max(160, window.innerHeight - r.bottom - 16)}px`;
@@ -293,7 +304,7 @@ export function attachMenu(button, spec, opts = {}) {
     render();
     el.hidden = false;
     OPEN.add(menu);
-    button.setAttribute('aria-expanded', 'true');
+    button?.setAttribute('aria-expanded', 'true');
     place();
     const first = items()[0];
     if (first) first.focus();
@@ -304,7 +315,10 @@ export function attachMenu(button, spec, opts = {}) {
     dropPanels();
     el.hidden = true;
     OPEN.delete(menu);
-    button.setAttribute('aria-expanded', 'false');
+    button?.setAttribute('aria-expanded', 'false');
+    // A menu opened at a point is built per use; leaving them attached would
+    // add a dead <div> to the document on every right-click.
+    if (opts.transient) el.remove();
   }
 
   function toggle() { el.hidden ? open() : close(); }
@@ -322,11 +336,40 @@ export function attachMenu(button, spec, opts = {}) {
     else if (e.key === 'Tab') { close(); }
   });
 
-  button.addEventListener('click', (e) => { e.preventDefault(); toggle(); });
-  button.addEventListener('keydown', (e) => {
-    if (e.key === 'ArrowDown') { e.preventDefault(); open(); }
-  });
+  return menu;
+}
 
+/**
+ * Attach a dropdown to a button.
+ *
+ * @param {HTMLElement} button
+ * @param {() => Array<object>} spec  called on every open, so rows reflect
+ *        current values without anyone having to remember to refresh them
+ * @param {{align?: 'left'|'right'}} [opts]
+ */
+export function attachMenu(button, spec, opts = {}) {
+  const menu = createMenu(spec, { ...opts, button });
+  button.addEventListener('click', (e) => { e.preventDefault(); menu.toggle(); });
+  button.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); menu.open(); }
+  });
+  return menu;
+}
+
+/**
+ * Open a menu at a point — the right-click case.
+ *
+ * The same renderer, keyboard handling and dismissal as every other menu; only
+ * the anchor differs. A separate context-menu component is how two menus end up
+ * disagreeing about what Escape does.
+ */
+export function openMenuAt(x, y, spec, opts = {}) {
+  const menu = createMenu(spec, {
+    ...opts,
+    transient: true,
+    anchor: () => ({ top: y, bottom: y, left: x, right: x })
+  });
+  menu.open();
   return menu;
 }
 

@@ -20,7 +20,8 @@ import { latexEditingExtensions, setDiagnostics, beginEndInsertion } from './lat
 import { SyncTex } from './synctex.js';
 import { writeZip } from './zip_core.js';
 import * as settings from './settings.js';
-import { attachMenu, SelectMenu } from './menus.js';
+import { attachMenu, openMenuAt, SelectMenu } from './menus.js';
+import { formattingRows } from './editor_actions.js';
 import { $, download } from './dom.js';
 import { readProjectFromDisk, readProjectFromFixture } from './project_store.js';
 import {
@@ -110,6 +111,34 @@ function settingsMenuSpec() {
   return rows;
 }
 attachMenu($('settings'), settingsMenuSpec, { align: 'right' });
+
+/**
+ * The Toolbox — insert and format. Shares its formatting rows with the
+ * right-click menu below, so the two cannot drift into offering different
+ * things.
+ */
+function toolboxSpec() {
+  return [
+    { type: 'note', label: 'Formatting applies to the selection.' },
+    ...formattingRows(() => view)
+  ];
+}
+attachMenu($('toolbox'), toolboxSpec, { align: 'right' });
+
+/**
+ * Right-click inside the editor.
+ *
+ * Only over the editor, and only when something is selected — everywhere else
+ * the browser's own menu is better than ours, and swallowing it costs
+ * spellcheck suggestions, clipboard access and Look Up. A context menu that
+ * replaces those with four items nobody wanted is a downgrade.
+ */
+document.addEventListener('contextmenu', (e) => {
+  if (!view || !$('editor').contains(e.target)) return;
+  if (view.state.selection.main.empty) return;
+  e.preventDefault();
+  openMenuAt(e.clientX, e.clientY, () => formattingRows(() => view));
+});
 
 // Diagnostics carry a line number only when the log gave one; the gutter shows
 // just those, and the Issues tab remains the complete list.
@@ -771,6 +800,9 @@ if (project) setStatus('ready');
 // Test hook for the editor extensions: completion and auto-close are hard to
 // exercise through the UI without a keystroke driver.
 window.__reveryTexTest = {
+  // The editor itself, so a driver can set text and selections without
+  // synthesising keystrokes. Same purpose as the hooks below it.
+  view: () => view,
   index: () => {
     const labels = new Set(), citations = new Set();
     if (project) for (const [, f] of project.files) {

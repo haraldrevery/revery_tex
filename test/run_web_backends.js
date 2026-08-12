@@ -33,7 +33,19 @@ function check(name, ok, detail = '') {
   if (!ok) failures++;
 }
 
+/** A missing dev server otherwise reads as "the app failed to boot". */
+async function requireServer() {
+  const ok = await fetch(BASE, { signal: AbortSignal.timeout(2000) })
+    .then(r => r.ok).catch(() => false);
+  if (!ok) {
+    console.error(`No server at ${BASE} — start the static server (npm run serve:static) first.\n` +
+                  `Note that \`npm run check\` stops its own servers when it finishes.`);
+    process.exit(2);
+  }
+}
+
 async function main() {
+  await requireServer();
   const { cdp, cleanup, pageErrors } = await launch({ url: `${BASE}?backend=zip`, port: CDP_PORT });
   try {
     // The app uses confirm() for anything that discards work, and the last step
