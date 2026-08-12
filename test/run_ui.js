@@ -307,6 +307,115 @@ async function main() {
       `narrow (${mapping.narrow.x.toFixed(1)}, ${mapping.narrow.y.toFixed(1)}) · ` +
       `wide (${mapping.wide.x.toFixed(1)}, ${mapping.wide.y.toFixed(1)})`);
 
+    /* ── the table builder ──────────────────────────────────────────── */
+    // Before the formatting block, which replaces the whole cv document with a
+    // test sentence — the compile below needs a real document.
+    const dlg = await cdp.evaluate(`(() => {
+      const view = window.__reveryTexTest.view();
+      // Into the body. A table float in the preamble is a compile error, and
+      // "wherever the cursor happened to be" is not a test.
+      const text = view.state.doc.toString();
+      const at = text.indexOf('\\\\begin{document}') + '\\\\begin{document}'.length;
+      view.dispatch({ selection: { anchor: at } });
+
+      document.getElementById('toolbox').click();
+      const menu = document.querySelector('.menu-container:not([hidden])');
+      const rows = [...menu.querySelectorAll('.menu-item')].map(b => b.textContent.trim());
+      const notes = [...menu.querySelectorAll('.menu-note')].map(n => n.textContent.trim());
+      [...menu.querySelectorAll('.menu-item')]
+        .find(b => /insert table/i.test(b.textContent)).click();
+
+      const panel = document.querySelector('.dlg');
+      if (!panel) return { opened: false, rows, notes };
+      const field = (name) => [...panel.querySelectorAll('.dlg-row')]
+        .find(r => new RegExp(name, 'i').test(r.querySelector('.dlg-label').textContent))
+        .querySelector('input');
+      const type = (input, v) => {
+        input.value = v;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      const preview = () => panel.querySelector('.dlg-preview').textContent;
+
+      const first = preview();
+      type(field('columns'), '4');
+      const wider = preview();
+      type(field('caption'), 'Measured results & 10% error');
+      const captioned = preview();
+      const derivedLabel = field('label').value;
+      // Typing in the label box stops the caption from overwriting it.
+      type(field('label'), 'tab:mine');
+      type(field('caption'), 'Measured results again');
+      const keptLabel = field('label').value;
+
+      return {
+        opened: true, rows, notes, first, wider, captioned, derivedLabel, keptLabel,
+        rules: [...panel.querySelectorAll('.dlg-choice button')].map(b => b.textContent.trim())
+      };
+    })()`, true);
+
+    check('the toolbox offers the insert actions',
+      dlg.rows.some(r => /insert table/i.test(r)), dlg.rows.join(' | '));
+    // The cv fixture has no tables, so the reference row must say so rather
+    // than offering an empty submenu.
+    check('with no tables, the menu says so instead of offering an empty list',
+      dlg.notes.some(n => /no tables/i.test(n)), dlg.notes.join(' | '));
+    check('the insert-table dialog opens with a preview',
+      dlg.opened && /\\begin\{table\}/.test(dlg.first || ''), (dlg.first || '').split('\n')[0]);
+    check('the preview follows the column count',
+      (dlg.wider.match(/&/g) || []).length > (dlg.first.match(/&/g) || []).length,
+      `${(dlg.first.match(/&/g) || []).length} → ${(dlg.wider.match(/&/g) || []).length} ampersands`);
+    // A % in a caption comments away the rest of the line and still compiles.
+    check('the caption is escaped in the preview',
+      dlg.captioned.includes('Measured results \\& 10\\% error'),
+      (dlg.captioned.match(/\\caption\{.*\}/) || [''])[0]);
+    check('the label is derived from the caption',
+      dlg.derivedLabel === 'tab:measured-results-10-error', dlg.derivedLabel);
+    check('editing the label stops the caption overwriting it', dlg.keptLabel === 'tab:mine');
+    // booktabs is not in the cv preamble, so it must not be on offer.
+    check('booktabs is not offered to a document that does not load it',
+      !dlg.rules.some(r => /booktabs/i.test(r)), dlg.rules.join(' | '));
+
+    const put = await cdp.evaluate(`(() => {
+      const panel = document.querySelector('.dlg');
+      [...panel.querySelectorAll('.dlg-foot button')]
+        .find(b => /insert/i.test(b.textContent)).click();
+      const view = window.__reveryTexTest.view();
+      const text = view.state.doc.toString();
+      const at = text.indexOf('\\\\begin{table}');
+      return {
+        closed: !document.querySelector('.dlg'),
+        inserted: at >= 0,
+        // A block pasted mid-line produces "text\\begin{table}" and a compile
+        // error, so it must start its own line.
+        ownLine: at > 0 && text[at - 1] === '\\n',
+        label: /\\\\label\\{tab:mine\\}/.test(text)
+      };
+    })()`, true);
+    check('inserting closes the dialog', put.closed);
+    check('the table lands in the document, on its own line',
+      put.inserted && put.ownLine && put.label, JSON.stringify(put));
+
+    const built = await cdp.evaluate(`window.__reveryTexApp.compile()`, true);
+    // The point of this check: the generated LaTeX has to compile. The page
+    // count is reported rather than asserted — adding a table may legitimately
+    // add a page, and pinning it would make the test wrong for the right reason.
+    check('a generated table compiles', built.ok === true,
+      `${built.status} · ${built.pages} pages · ${built.issues} issues`);
+
+    const escaped = await cdp.evaluate(`(() => {
+      document.getElementById('toolbox').click();
+      [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /insert table/i.test(b.textContent)).click();
+      const before = window.__reveryTexTest.view().state.doc.length;
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return {
+        closed: !document.querySelector('.dlg'),
+        unchanged: window.__reveryTexTest.view().state.doc.length === before
+      };
+    })()`, true);
+    check('Escape closes the dialog and inserts nothing',
+      escaped.closed && escaped.unchanged, JSON.stringify(escaped));
+
     /* ── toolbox and right-click formatting ─────────────────────────── */
     const fmt = await cdp.evaluate(`(async () => {
       const app = window.__reveryTexApp;
@@ -489,6 +598,45 @@ async function main() {
     check('the outline collapses and the state is remembered',
       collapsed.hidden && collapsed.stored === true && collapsed.shownAgain,
       JSON.stringify(collapsed));
+
+    /* ── referencing an existing table ──────────────────────────────── */
+    // The book fixture has a chapter of them, which is why this runs here and
+    // not on the cv.
+    const ref = await cdp.evaluate(`(() => {
+      const view = window.__reveryTexTest.view();
+      view.dispatch({ selection: { anchor: view.state.doc.length } });
+      const before = view.state.doc.toString();
+
+      document.getElementById('toolbox').click();
+      const trigger = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /reference a table/i.test(b.textContent));
+      if (!trigger) return { found: false };
+      trigger.click();
+      const panel = [...document.querySelectorAll('.submenu')].find(p => !p.hidden);
+      const rows = panel ? [...panel.querySelectorAll('.menu-item')] : [];
+      const labels = rows.map(b => b.textContent.trim());
+      const tips = rows.map(b => b.title);
+      rows[0]?.click();
+
+      const after = view.state.doc.toString();
+      return {
+        found: true, count: rows.length, labels, tips,
+        inserted: after.length - before.length,
+        tail: after.slice(-30),
+        menusClosed: !document.querySelector('.menu-container:not([hidden])')
+      };
+    })()`, true);
+
+    check('the toolbox lists the tables that can be referenced',
+      ref.found && ref.count > 0, `${ref.count} table(s)`);
+    // Captions, not \\label keys: "Simple Table" is what you are looking for in
+    // the list; tab:simple is what goes in the document.
+    check('rows are named by caption', ref.labels?.some(l => /table/i.test(l)),
+      (ref.labels || []).slice(0, 3).join(' | '));
+    check('each row shows its label and source on hover',
+      (ref.tips || []).every(t => /tab:|:\d+/.test(t || '')), (ref.tips || [])[0]?.split('\n')[0]);
+    check('picking one inserts a \\ref', /\\ref\{[^}]+\}$/.test(ref.tail || ''), ref.tail);
+    check('and closes the menu', ref.menusClosed === true);
 
     const expected = /favicon|\/api\/projects/i;
     const real = pageErrors.filter(e => !expected.test(e));

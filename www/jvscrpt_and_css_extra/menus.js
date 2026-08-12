@@ -9,7 +9,8 @@
 // A menu is a list of rows:
 //   { type: 'radio',   label, options: [{label, value}], get(), set(v) }
 //   { type: 'stepper', ... }         − value + on one line, for scales
-//   { type: 'submenu', ... }         a nested panel, for themes
+//   { type: 'submenu', ... }         a nested panel: `options` for a choice
+//                                    (themes), `actions` for a list (tables)
 //   { type: 'action',  label, run() }
 //   { type: 'divider' }
 //   { type: 'note',    label }       non-interactive, for stating a limitation
@@ -132,7 +133,10 @@ function createMenu(spec, opts = {}) {
           Object.assign(document.createElement('span'), { textContent: row.label }),
           Object.assign(document.createElement('span'), {
             className: 'menu-sub-value',
-            textContent: `${chosen ? chosen.label : ''} \u25B8`
+            // `hint` is for panels that are a list rather than a choice \u2014 how
+            // many tables there are to reference, say, where there is no
+            // "current value" to echo back.
+            textContent: `${chosen ? chosen.label : (row.hint ?? '')} \u25B8`
           })
         );
 
@@ -158,6 +162,20 @@ function createMenu(spec, opts = {}) {
           // Focus returns to the trigger: the chosen row is about to be
           // rebuilt, and the trigger is where the user was.
           b.onclick = () => { row.set(opt.value); render(); items()[0]?.focus(); };
+          panel.appendChild(b);
+        }
+
+        // A submenu can equally be a *list* — the tables you could reference —
+        // where each row does something once rather than selecting a value that
+        // stays selected. Same panel, same keyboard handling; only the row
+        // semantics differ, which is why this is not a second component.
+        for (const act of row.actions || []) {
+          const b = document.createElement('button');
+          b.className = 'menu-item';
+          b.setAttribute('role', 'menuitem');
+          b.textContent = act.label;
+          if (act.title) b.title = act.title;
+          b.onclick = () => { close(); act.run(); };
           panel.appendChild(b);
         }
 

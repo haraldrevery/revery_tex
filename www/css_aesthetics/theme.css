@@ -175,6 +175,10 @@ button.primary { color:var(--text); border-color:var(--accent) }
   box-shadow:0 4px 14px rgba(0,0,0,.22);
 }
 .submenu[hidden] { display:none }
+/* A submenu can be a list — every table in the document — so it has to be able
+   to run out of room without covering the screen. */
+.submenu { max-height:min(60vh, 24rem); overflow-y:auto; overscroll-behavior:contain; max-width:22rem }
+.submenu .menu-item { overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
 
 /* − value +  on one line, so a 14-step scale is one row rather than fourteen. */
 .menu-stepper { display:flex; align-items:center; gap:.2rem; padding:0 .55rem .15rem .55rem }
@@ -190,6 +194,52 @@ button.primary { color:var(--text); border-color:var(--accent) }
   padding:.35rem .9rem .5rem .9rem; font-size:.58rem; line-height:1.5;
   color:var(--text-dim); text-transform:none; letter-spacing:var(--tracking-body);
   max-width:16rem; white-space:normal;
+}
+
+/* ── modal dialogs ──────────────────────────────────────────────────── */
+/* Same surface as a menu, given a backdrop. See dialog.js. */
+.dlg-backdrop {
+  position:fixed; inset:0; z-index:200; display:flex; align-items:center; justify-content:center;
+  background:rgba(0,0,0,.45); padding:1rem;
+}
+.dlg {
+  display:flex; flex-direction:column; min-width:min(22rem, 92vw); max-width:min(30rem, 94vw);
+  max-height:90vh; overflow:auto; overscroll-behavior:contain;
+  background:var(--menu-bg); border:1px solid var(--border-md); border-radius:3px;
+  box-shadow:0 10px 34px rgba(0,0,0,.4);
+}
+.dlg-head {
+  padding:.75rem .9rem .5rem .9rem; border-bottom:1px solid var(--border);
+  font-size:.62rem; letter-spacing:var(--tracking-wider); text-transform:uppercase;
+  color:var(--text-dim);
+}
+.dlg-body { padding:.5rem .9rem .3rem .9rem; display:flex; flex-direction:column; gap:.3rem }
+.dlg-row { display:flex; align-items:center; gap:.6rem; min-height:1.8rem }
+.dlg-label {
+  flex:none; width:6.5rem; font-size:.62rem; color:var(--text-dim);
+  letter-spacing:var(--tracking-wide); text-transform:uppercase;
+}
+.dlg-row input[type="text"], .dlg-row input[type="number"] {
+  flex:1; min-width:0; font-family:var(--font-mono); font-size:.72rem; color:var(--text);
+  background:var(--bg); border:1px solid var(--border-md); border-radius:2px;
+  padding:.3rem .45rem .2rem .45rem;
+}
+.dlg-row input:focus { outline:none; border-color:var(--accent) }
+.dlg-row input[type="checkbox"] { accent-color:var(--accent); width:.9rem; height:.9rem }
+.dlg-choice { display:flex; gap:.25rem; flex-wrap:wrap }
+.dlg-choice button { padding:.3rem .55rem .2rem .55rem; font-size:.62rem }
+.dlg-choice button[aria-pressed="true"] { color:var(--text); border-color:var(--accent) }
+/* The preview is the document's own language, so it is shown as source, not as
+   a rendering: a table's appearance depends on packages this app cannot see. */
+.dlg-preview {
+  margin:.4rem .9rem; padding:.5rem .6rem; max-height:14rem; overflow:auto;
+  font-family:var(--font-mono); font-size:.66rem; line-height:1.45; white-space:pre;
+  color:var(--text-muted); background:var(--bg); border:1px solid var(--border);
+  border-radius:2px;
+}
+.dlg-foot {
+  display:flex; justify-content:flex-end; gap:.4rem;
+  padding:.55rem .9rem .7rem .9rem; border-top:1px solid var(--border);
 }
 
 /* ── layout ─────────────────────────────────────────────────────────── */
@@ -240,8 +290,6 @@ button.primary { color:var(--text); border-color:var(--accent) }
 #outlinepane.collapsed { flex:none }
 #outlinepane.collapsed #outline { display:none }
 #outline { flex:1; overflow:auto; padding:4px 0 }
-#outline::-webkit-scrollbar { width:8px; height:8px }
-#outline::-webkit-scrollbar-thumb { background:var(--scrollbar); border-radius:2px }
 .node.sec { font-size:.68rem }
 /* An inset shadow rather than a border: the indent is set inline per level, so
    a border would shift the text 2px sideways as the cursor moves between
@@ -331,8 +379,15 @@ button.primary { color:var(--text); border-color:var(--accent) }
 .tab.active { color:var(--text); border-bottom-color:var(--accent) }
 .tabbody { flex:1; overflow:auto; padding:6px 14px; white-space:pre; font-size:.7rem; line-height:1.45 }
 .tabbody.hidden { display:none }
-.tabbody::-webkit-scrollbar, #filetree::-webkit-scrollbar { width:8px; height:8px }
-.tabbody::-webkit-scrollbar-thumb, #filetree::-webkit-scrollbar-thumb { background:var(--scrollbar); border-radius:2px }
+/* Every scrolling surface in the app, in one place — a new one styled
+   separately is how two panes end up with different scrollbars. */
+.tabbody::-webkit-scrollbar, #filetree::-webkit-scrollbar, #outline::-webkit-scrollbar,
+.dlg::-webkit-scrollbar, .dlg-preview::-webkit-scrollbar, .submenu::-webkit-scrollbar,
+.menu-container::-webkit-scrollbar { width:8px; height:8px }
+.tabbody::-webkit-scrollbar-thumb, #filetree::-webkit-scrollbar-thumb,
+#outline::-webkit-scrollbar-thumb, .dlg::-webkit-scrollbar-thumb,
+.dlg-preview::-webkit-scrollbar-thumb, .submenu::-webkit-scrollbar-thumb,
+.menu-container::-webkit-scrollbar-thumb { background:var(--scrollbar); border-radius:2px }
 
 .l-inf { color:var(--text-muted) } .l-dbg { color:var(--text) }
 .l-wrn { color:var(--warn) } .l-err { color:var(--err) }

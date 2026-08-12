@@ -21,7 +21,7 @@ import { SyncTex } from './synctex.js';
 import { writeZip } from './zip_core.js';
 import * as settings from './settings.js';
 import { attachMenu, openMenuAt, SelectMenu } from './menus.js';
-import { formattingRows } from './editor_actions.js';
+import { toolboxRows, contextRows } from './toolbox.js';
 import { initOutline, refreshOutline, scheduleOutline } from './outline.js';
 import { $, download } from './dom.js';
 import { readProjectFromDisk, readProjectFromFixture } from './project_store.js';
@@ -113,18 +113,10 @@ function settingsMenuSpec() {
 }
 attachMenu($('settings'), settingsMenuSpec, { align: 'right' });
 
-/**
- * The Toolbox — insert and format. Shares its formatting rows with the
- * right-click menu below, so the two cannot drift into offering different
- * things.
- */
-function toolboxSpec() {
-  return [
-    { type: 'note', label: 'Formatting applies to the selection.' },
-    ...formattingRows(() => view)
-  ];
-}
-attachMenu($('toolbox'), toolboxSpec, { align: 'right' });
+// The Toolbox — insert and format. Its rows live in toolbox.js; this is the
+// wiring that tells them which button, which editor and which project.
+attachMenu($('toolbox'), () => toolboxRows({ view: () => view, project: () => project }),
+  { align: 'right' });
 
 /**
  * Right-click inside the editor.
@@ -138,7 +130,8 @@ document.addEventListener('contextmenu', (e) => {
   if (!view || !$('editor').contains(e.target)) return;
   if (view.state.selection.main.empty) return;
   e.preventDefault();
-  openMenuAt(e.clientX, e.clientY, () => formattingRows(() => view));
+  openMenuAt(e.clientX, e.clientY,
+    () => contextRows({ view: () => view, project: () => project }));
 });
 
 // Diagnostics carry a line number only when the log gave one; the gutter shows

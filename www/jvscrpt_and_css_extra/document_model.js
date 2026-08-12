@@ -35,7 +35,7 @@ const IMAGE_EXT = /\.(png|jpe?g|pdf|gif|bmp|webp|svg)$/i;
 const EMPTY = {
   labels: [], citations: [], files: [], bib: [],
   environments: [], sections: [], images: [], macros: {},
-  inputs: {}, order: []
+  packages: [], inputs: {}, order: []
 };
 
 /* ── braces ──────────────────────────────────────────────────────────── */
@@ -176,6 +176,16 @@ function scanFile(path, raw, acc) {
     });
   }
 
+  // Which packages the document loads. Read, never written: the app offers
+  // booktabs rules when booktabs is already there and plain \hline when it is
+  // not, rather than adding a \usepackage to someone's preamble behind them.
+  for (const m of text.matchAll(/\\(?:usepackage|RequirePackage)\s*(?:\[[^\]]*\])?\s*\{([^}]*)\}/g)) {
+    for (const name of m[1].split(',')) {
+      const n = name.trim();
+      if (n) acc.packages.add(n);
+    }
+  }
+
   // What this file pulls in, in order — the document's reading order, which is
   // not the same as the order the files happen to sit in the project map.
   // `\includegraphics` and `\includeonly` do not match: neither has `{` directly
@@ -246,7 +256,8 @@ export function scanProject(project) {
 
   const acc = {
     labels: new Set(), citations: new Set(), bib: [],
-    environments: [], sections: [], images: [], macros: {}, inputs: {}
+    environments: [], sections: [], images: [], macros: {}, inputs: {},
+    packages: new Set()
   };
   const files = [];
 
@@ -270,6 +281,7 @@ export function scanProject(project) {
     sections: acc.sections,
     images: acc.images.sort((a, b) => a.path.localeCompare(b.path)),
     macros: acc.macros,
+    packages: [...acc.packages].sort(),
     inputs: acc.inputs,
     // `main` is set by project_store; the fallback keeps scanProject usable on
     // a bare {files} map, as the tests use it.
