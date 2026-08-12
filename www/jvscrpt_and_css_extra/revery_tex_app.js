@@ -18,6 +18,8 @@ import { NativeAPI } from './native_api.js';
 import { latexEditingExtensions, setDiagnostics, beginEndInsertion } from './latex_editor.js';
 import { SyncTex } from './synctex.js';
 import { writeZip } from './zip_core.js';
+import * as settings from './settings.js';
+import { attachMenu, closeAllMenus } from './menus.js';
 
 const $ = (id) => document.getElementById(id);
 const CM = window.CM;
@@ -39,43 +41,56 @@ const syncTex = new SyncTex();
 // user never touched.
 let loadingDoc = false;
 
-const THEMES = ['dark', 'light', 'paper', 'forest'];
-const SETTINGS_KEY = 'revery_tex_settings';
-const settings = loadSettings();
+// Settings live in settings.js as one declarative table; this file only reads
+// values and wires the two shortcut buttons in the topbar.
+settings.applyAll();
 
-function loadSettings() {
-  try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; } catch { return {}; }
-}
-function saveSettings() {
-  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { }
-}
-
-// ── theme ──────────────────────────────────────────────────────────────
-function applyTheme(name) {
-  settings.theme = name;
-  document.documentElement.setAttribute('data-theme', name);
-  document.documentElement.style.colorScheme = (name === 'dark' || name === 'forest') ? 'dark' : 'light';
-  saveSettings();
-}
-applyTheme(settings.theme || 'dark');
-$('theme').onclick = () =>
-  applyTheme(THEMES[(THEMES.indexOf(settings.theme) + 1) % THEMES.length]);
-
-// Compile after save, on by default. Off is for very large documents where a
-// 20-second recompile on every Ctrl+S is worse than pressing Ctrl+Enter.
 function refreshAutoCompile() {
-  const on = settings.autoCompile !== false;
+  const on = settings.settings.autoCompile;
   $('autocompile').textContent = on ? 'Auto ✓' : 'Auto';
   $('autocompile').title = on
     ? 'Compiling after each save — click to turn off'
     : 'Not compiling after save — click to turn on';
 }
-$('autocompile').onclick = () => {
-  settings.autoCompile = settings.autoCompile === false;
-  saveSettings();
-  refreshAutoCompile();
-};
+$('autocompile').onclick = () => settings.set('autoCompile', !settings.settings.autoCompile);
+$('theme').onclick = () => settings.cycle('theme');
+// One listener rather than each control refreshing itself: a setting changed
+// from the menu and the same setting changed from its button must look the
+// same afterwards, and that is only guaranteed if there is one path.
+settings.onChange(() => { refreshAutoCompile(); refreshEditorMetrics(); });
 refreshAutoCompile();
+
+/**
+ * CodeMirror measures character width once and caches it. Changing the font or
+ * size behind its back leaves the cursor drawn at the old metrics — visible as
+ * a caret that drifts further from the text the further right you type.
+ */
+function refreshEditorMetrics() {
+  if (view) requestAnimationFrame(() => view.requestMeasure());
+}
+
+/** Build the settings menu from the schema, so a new setting needs no wiring. */
+function settingsMenuSpec() {
+  const rows = [];
+  for (const s of settings.SCHEMA) {
+    rows.push({
+      type: s.ui || 'radio',      // the schema decides; a scale is a stepper
+      label: s.label,
+      options: s.options,
+      get: () => settings.settings[s.key],
+      set: (v) => settings.set(s.key, v)
+    });
+    rows.push({ type: 'divider' });
+  }
+  rows.push({
+    type: 'note',
+    label: 'The preview is a rendered PDF, so its typography comes from the document, not from here.'
+  });
+  rows.push({ type: 'divider' });
+  rows.push({ type: 'action', label: 'Reset to defaults', run: () => settings.reset() });
+  return rows;
+}
+attachMenu($('settings'), settingsMenuSpec, { align: 'right' });
 
 // ── log console ────────────────────────────────────────────────────────
 function rawLog(kind, msg) {
@@ -112,11 +127,13 @@ function togglePanel(open) {
   const collapsed = open === undefined ? !p.classList.contains('collapsed') : !open;
   p.classList.toggle('collapsed', collapsed);
   $('togglepanel').textContent = collapsed ? 'Show' : 'Hide';
-  settings.panelCollapsed = collapsed;
-  saveSettings();
+  // Not in SCHEMA: this is remembered layout, not a user preference with
+  // choices, so it rides along in the same store without a menu row.
+  settings.settings.panelCollapsed = collapsed;
+  settings.save();
 }
 $('togglepanel').onclick = () => togglePanel();
-togglePanel(!settings.panelCollapsed);
+togglePanel(!settings.settings.panelCollapsed);
 
 function renderIssues() {
   const body = $('issues');
@@ -315,7 +332,7 @@ async function saveAll() {
     }
     refreshDirty();
     setStatus(`saved ${pending.length} file(s)`, 'ok');
-    if (settings.autoCompile !== false) await compile();
+    if (settings.settings.autoCompile) await compile();
   } catch (err) {
     setStatus(`✗ save failed: ${err}`, 'err');
     rawLog('err', `save failed: ${err}`);

@@ -59,6 +59,9 @@ rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-t
 │    native_api_web.js            File System Access backend (Chromium)        │
 │    native_api_zip.js            IndexedDB backend (Firefox, Safari)          │
 │    zip_core.js                  zip reader/writer, no dependencies           │
+│    settings.js                  one declarative table: load, apply, menu     │
+│    menus.js                     dropdown component (radio, stepper, action)  │
+│    settings_boot.js             pre-paint theme, so there is no flash        │
 │    pdf_preview.js               pdf.js canvas renderer                       │
 │    codemirror-bundle.js         generated — edit build_tools/cm_entry_tex.js  │
 │  engine/dist/                   TeX Live WASM + slim texmf (97 MB, committed) │
@@ -112,6 +115,30 @@ if (NativeAPI.openFolder) { /* show the Open button */ }
 to the folder a project came from, and a method by that name which cannot save
 is exactly the half-truth that loses someone's work. The app offers Import
 instead, and shows a standing bar saying where the work is being kept.
+
+### Settings are a table, not a variable each
+
+`settings.js` holds one `SCHEMA` array. Loading, validating, persisting,
+applying and building the menu are all derived from it, so a new setting is one
+entry and cannot end up persisted-but-never-applied:
+
+```js
+{ key: 'uiSize', label: 'UI size', def: 100, ui: 'stepper',
+  options: PERCENT(80, 160, 10),
+  css: '--ui-scale', format: (v) => String(v / 100) }
+```
+
+Two rules keep it honest. **Values that are not among the declared options are
+discarded** — `localStorage` is hand-editable and survives across versions, so
+an option removed in a later release would otherwise persist as a setting
+nothing knows how to apply. And **font stacks live in the stylesheet**, keyed off
+`[data-editor-font]`, so `settings_boot.js` can apply the stored theme before
+first paint without knowing what any value means — there is no second copy of
+the font list to drift.
+
+Revery Notebook's equivalent is ~3400 lines with a module-level `let` per
+setting, each wired by hand into five places. The visual idiom is copied; the
+structure deliberately is not.
 
 ### Why the engine is the shape it is
 
@@ -182,6 +209,7 @@ cargo test --manifest-path tauri/Cargo.toml      # tauri/src/main.rs (19)
 # The browser build, on a server that behaves like a real static host
 npm run serve:static &                           # /api/* returns 404
 npm run test:web                                 # web-fs, web-zip and web (33)
+npm run test:ui                                  # settings menu, end to end (25)
 
 # The Electron shell, over the real IPC
 npm run test:electron                            # open → save → conflict → compile (14)

@@ -12,7 +12,15 @@
   --tracking-body: .01em;
   --tracking-wide: .09em;
   --tracking-wider: .16em;
+  --editor-font: var(--font-mono);
 }
+
+/* The editor font setting. Stacks live here rather than in JS so the pre-paint
+   script can copy the stored value onto <html> without knowing any font names —
+   nothing to drift out of step. */
+[data-editor-font="mono"]   { --editor-font: var(--font-mono) }
+[data-editor-font="brand"]  { --editor-font: var(--font-brand) }
+[data-editor-font="system"] { --editor-font: ui-monospace, 'SF Mono', 'Cascadia Mono', 'Liberation Mono', monospace }
 
 [data-theme="dark"] {
   --bg:#0a0a0a; --bg-panel:#1e1e1e; --bg-hover:#2c2c2c;
@@ -61,6 +69,12 @@
   url('../fonts/HaraldReveryMonoFont.woff') format('woff'); font-weight:normal; font-display:swap }
 
 * { box-sizing:border-box }
+
+/* The whole of the chrome is in rem, so scaling the root font size is the UI
+   size setting — one property instead of a rule per element. Set by
+   settings.js; the fallback keeps the stylesheet meaningful on its own. */
+html { font-size:calc(16px * var(--ui-scale, 1)) }
+
 html,body { height:100%; margin:0; overflow:hidden }
 body {
   background:var(--bg); color:var(--text); font-family:var(--font-mono);
@@ -105,8 +119,58 @@ button.primary { color:var(--text); border-color:var(--accent) }
 }
 #notice[hidden] { display:none }
 
+/* ── dropdown menus ─────────────────────────────────────────────────── */
+/* Same idiom as Revery Notebook: mono, uppercase, ■ marks the active choice.
+   Positioned fixed by menus.js — the topbar clips overflow, so an absolutely
+   positioned child would be cut off at the first row. */
+.menu-container {
+  position:fixed; z-index:100; display:flex; flex-direction:column;
+  min-width:11rem; padding:.25rem 0; overflow-y:auto; overscroll-behavior:contain;
+  background:var(--menu-bg); border:1px solid var(--border-md); border-radius:3px;
+  box-shadow:0 4px 14px rgba(0,0,0,.22);
+}
+.menu-container[hidden] { display:none }
+
+.menu-head {
+  padding:.5rem .9rem .25rem .9rem; font-size:.58rem;
+  letter-spacing:var(--tracking-wider); text-transform:uppercase; color:var(--text-dim);
+}
+.menu-item {
+  background:none; border:none; border-radius:0; width:100%; text-align:left;
+  color:var(--text-muted); font-family:var(--font-mono); font-size:.68rem;
+  letter-spacing:var(--tracking-wide); text-transform:uppercase;
+  /* asymmetric: the brand face sits high in its em box */
+  padding:.4rem .9rem .25rem .9rem; cursor:pointer;
+}
+.menu-item[aria-checked="true"] { color:var(--text) }
+.menu-item:hover, .menu-item:focus { background:var(--bg-hover); color:var(--text); outline:none }
+.menu-item:focus-visible { box-shadow:inset 2px 0 0 var(--accent) }
+.menu-divider { height:1px; background:var(--theme-divider); margin:.3rem 0 }
+
+/* − value +  on one line, so a 14-step scale is one row rather than fourteen. */
+.menu-stepper { display:flex; align-items:center; gap:.2rem; padding:0 .55rem .15rem .55rem }
+.menu-item.menu-step {
+  width:auto; flex:none; padding:.3rem .55rem .2rem .55rem;
+  border:1px solid var(--border-md); border-radius:2px; font-size:.72rem;
+}
+.menu-value {
+  flex:1; text-align:center; font-size:.68rem; color:var(--text);
+  letter-spacing:var(--tracking-wide); text-transform:uppercase;
+}
+.menu-note {
+  padding:.35rem .9rem .5rem .9rem; font-size:.58rem; line-height:1.5;
+  color:var(--text-dim); text-transform:none; letter-spacing:var(--tracking-body);
+  max-width:16rem; white-space:normal;
+}
+
 /* ── layout ─────────────────────────────────────────────────────────── */
 #workspace { flex:1; display:flex; min-height:0 }
+
+/* Panel order is a setting. The divider between editor and PDF has to move
+   with them or it ends up on the wrong side of the pair. */
+[data-panel-order="pdf-first"] #pdfpane { order:1 }
+[data-panel-order="pdf-first"] #workspace .vdiv:nth-of-type(2) { order:2 }
+[data-panel-order="pdf-first"] #editorpane { order:3 }
 #sidebar  { width:230px; min-width:120px; display:flex; flex-direction:column; background:var(--bg-panel) }
 #editorpane { flex:1 1 55%; display:flex; flex-direction:column; min-width:0 }
 #pdfpane  { flex:1 1 45%; display:flex; flex-direction:column; min-width:0; background:var(--bg-panel) }
@@ -142,7 +206,16 @@ button.primary { color:var(--text); border-color:var(--accent) }
 /* ── editor ─────────────────────────────────────────────────────────── */
 #editor { flex:1; min-height:0; overflow:hidden }
 .cm-editor { height:100% }
-.cm-scroller { font-family:var(--font-mono) !important; line-height:1.6 }
+/* Editor font, size and line height are settings; the !important is required
+   because CodeMirror sets these inline on .cm-scroller itself. Size is scaled
+   from .75rem so it compounds with UI size the way a reader expects: making
+   the UI bigger makes the text bigger too, and the editor slider is relative
+   to that. */
+.cm-scroller {
+  font-family:var(--editor-font, var(--font-mono)) !important;
+  font-size:calc(.75rem * var(--editor-scale, 1)) !important;
+  line-height:var(--editor-line-height, 1.6) !important;
+}
 .cm-gutters { background:transparent !important; border-right:1px solid var(--border) !important; color:var(--text-dim) !important }
 .cm-activeLineGutter { background:transparent !important; color:var(--text-muted) !important }
 .cm-content { caret-color:var(--text) }

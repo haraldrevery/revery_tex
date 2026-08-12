@@ -10,6 +10,10 @@
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'">
 <link rel="stylesheet" href="./css_aesthetics/theme.css">
+<!-- Before the stylesheet paints anything: sets the persisted theme and scales,
+     so the app does not flash the default theme first. Must stay a blocking
+     classic script — a module would be deferred and run too late. -->
+<script src="./jvscrpt_and_css_extra/settings_boot.js"></script>
 <script src="./jvscrpt_and_css_extra/codemirror-bundle.js"></script>
 </head>
 <body>
@@ -29,6 +33,7 @@
   <div class="spacer"></div>
   <button id="status" class="statusline">idle</button>
   <button id="theme" title="Cycle theme">Theme</button>
+  <button id="settings" title="Appearance and behaviour">Settings ▾</button>
 </div>
 
 <div id="notice" hidden></div>
