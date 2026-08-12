@@ -335,10 +335,19 @@ button.primary { color:var(--text); border-color:var(--accent) }
   overflow:hidden; text-overflow:ellipsis; font-size:.7rem; color:var(--text-muted);
 }
 .node:hover { background:var(--bg-hover); color:var(--text) }
-.node.active { color:var(--text); border-left:2px solid var(--accent); padding-left:calc(1rem - 2px) }
-.node.dir { color:var(--text-dim); letter-spacing:var(--tracking-wide); text-transform:uppercase; font-size:.62rem;
-            margin-top:.35rem; cursor:default }
-.node.dir:hover { background:none; color:var(--text-dim) }
+/* An inset shadow, not a border: rows are indented inline by depth, and a
+   border would shift the text sideways as the selection moves. */
+.node.active { color:var(--text); box-shadow:inset 2px 0 0 var(--accent) }
+/* Directories are rows now, not headings: clickable, foldable, and indented
+   with their contents so the nesting is visible. */
+.node.dir { color:var(--text-dim); letter-spacing:var(--tracking-wide); font-size:.66rem }
+.node.dir::before { content:'▾ '; color:var(--text-dim) }
+.node.dir.folded::before { content:'▸ ' }
+.node.dir:hover { color:var(--text) }
+/* Binaries are shown so you can see what \includegraphics can point at, and
+   dimmed because opening one would put bytes in the editor. */
+.node.binary { color:var(--text-dim); cursor:default }
+.node.binary:hover { background:none; color:var(--text-dim) }
 .node.main::after { content:' ■'; color:var(--accent) }
 .node.dirty::after { content:' •'; color:var(--warn) }
 .node.main.dirty::after { content:' ■ •'; color:var(--warn) }

@@ -23,6 +23,7 @@ import * as settings from './settings.js';
 import { attachMenu, openMenuAt, SelectMenu } from './menus.js';
 import { toolboxRows, contextRows } from './toolbox.js';
 import { initOutline, refreshOutline, scheduleOutline, applyOutlineVisibility } from './outline.js';
+import { buildTree, flattenTree, normalizePath } from './file_tree.js';
 import { $, download } from './dom.js';
 import { readProjectFromDisk, readProjectFromFixture } from './project_store.js';
 import {
@@ -373,42 +374,69 @@ async function offerRecovery() {
 }
 
 // ── file tree ──────────────────────────────────────────────────────────
+
+// Folded directories, remembered across reloads. Paths rather than an id, so
+// the same layout comes back when the same project is reopened; a name shared
+// with another project folding there too is harmless.
+const collapsedDirs = new Set(settings.settings.collapsedDirs || []);
+function rememberCollapsed() {
+  settings.settings.collapsedDirs = [...collapsedDirs];
+  settings.save();
+}
+
+/** Directories a project has, whether or not they hold a file yet. */
+const emptyDirs = new Set();
+
 function renderTree() {
   const tree = $('filetree');
   tree.textContent = '';
   if (!project) return;
 
-  // Group by directory; editable files only, since binaries cannot be opened.
-  const byDir = new Map();
-  for (const [path, f] of project.files) {
-    if (f.binary) continue;
-    const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
-    if (!byDir.has(dir)) byDir.set(dir, []);
-    byDir.get(dir).push(path);
-  }
-  const dirs = [...byDir.keys()].sort((a, b) => (a === '' ? -1 : b === '' ? 1 : a.localeCompare(b)));
+  // Binaries are shown too, dimmed. They are what \includegraphics points at,
+  // and hiding them meant a project's images were invisible in the one place
+  // anyone would look for them.
+  const entries = [...project.files].map(([path, f]) => ({ path, binary: !!f.binary }));
+  // A folder made from the tree but not yet holding a file has nothing to
+  // build a node from, so it is carried separately until something lands in it.
+  for (const dir of emptyDirs) entries.push({ path: dir, dir: true });
+
+  const rows = flattenTree(buildTree(entries), collapsedDirs);
 
   let shown = 0;
-  for (const dir of dirs) {
-    if (dir) {
-      const d = document.createElement('div');
-      d.className = 'node dir';
-      d.textContent = dir;
-      tree.appendChild(d);
-    }
-    for (const path of byDir.get(dir).sort()) {
-      const n = document.createElement('div');
-      n.className = 'node' + (path === project.main ? ' main' : '');
-      n.dataset.path = path;
-      n.textContent = path.slice(dir ? dir.length + 1 : 0);
-      n.title = path;
-      n.onclick = () => openFile(path);
-      tree.appendChild(n);
+  for (const node of rows) {
+    const n = document.createElement('div');
+    n.textContent = node.name;
+    n.title = node.path;
+    // Indent by depth. The old render put every directory's files at the same
+    // inset, so nothing said what contained what.
+    n.style.paddingLeft = `calc(0.55rem + ${node.depth * 0.8}rem)`;
+
+    if (node.type === 'dir') {
+      const folded = collapsedDirs.has(node.path);
+      n.className = 'node dir' + (folded ? ' folded' : '');
+      n.dataset.dir = node.path;
+      n.setAttribute('aria-expanded', String(!folded));
+      n.onclick = () => {
+        folded ? collapsedDirs.delete(node.path) : collapsedDirs.add(node.path);
+        rememberCollapsed();
+        renderTree();
+      };
+    } else {
+      const f = project.files.get(node.path);
+      n.className = 'node'
+        + (node.path === project.main ? ' main' : '')
+        + (node.binary ? ' binary' : '')
+        + (node.path === currentPath ? ' active' : '')
+        + (f && f.dirty ? ' dirty' : '');
+      n.dataset.path = node.path;
+      // Binaries stay visible and stay unopenable: the editor would show bytes.
+      if (!node.binary) n.onclick = () => openFile(node.path);
       shown++;
     }
+    tree.appendChild(n);
   }
-  const binaries = [...project.files.values()].filter(f => f.binary).length;
-  $('filecount').textContent = `${shown}${binaries ? ` +${binaries} bin` : ''}`;
+
+  $('filecount').textContent = `${shown} file${shown === 1 ? '' : 's'}`;
 }
 
 // ── project loading (dev server for now) ───────────────────────────────
