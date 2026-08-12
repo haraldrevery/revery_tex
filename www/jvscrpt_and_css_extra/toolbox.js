@@ -10,9 +10,10 @@
 import { projectIndex, environmentsOfKind, resolveGraphic } from './document_model.js';
 import { formattingRows, insertBlockAtCursor, insertReference } from './editor_actions.js';
 import { tableBlock, availableRules } from './table_builder.js';
-import { slug, uniqueLabel, figureBlock } from './latex_snippets.js';
+import { slug, uniqueLabel, figureBlock, equationBlock } from './latex_snippets.js';
 import { openDialog } from './dialog.js';
 import { openPicker } from './picker.js';
+import { renderMath, mathSource } from './math_preview.js';
 
 /** One line of an environment's source, for the tooltip on a reference row. */
 function snippet(env, lines = 3) {
@@ -176,6 +177,64 @@ function referenceFigurePicker(view, project) {
   });
 }
 
+/* ── equations ───────────────────────────────────────────────────────── */
+
+/**
+ * `\eqref` needs amsmath. Without it the command does not exist and the
+ * document fails to compile — so a document that has not loaded amsmath gets a
+ * plain `\ref`, which is correct everywhere. Same rule as booktabs.
+ */
+const refKindForEquations = (packages) =>
+  packages.includes('amsmath') || packages.includes('mathtools') ? 'equation' : 'ref';
+
+function insertEquationDialog(view, project) {
+  const ix = projectIndex(project());
+  let labelEdited = false;
+
+  openDialog({
+    title: 'Insert equation',
+    fields: [
+      { key: 'body', label: 'Equation', type: 'text', def: '', placeholder: 'E = mc^2' },
+      { key: 'numbered', label: 'Numbered', type: 'check', def: true },
+      { key: 'label', label: 'Label', type: 'text', def: '', placeholder: 'eq:…' }
+    ],
+    onChange: (v, key) => {
+      if (key === 'label') { labelEdited = true; return null; }
+      if (key !== 'body' || labelEdited) return null;
+      return { label: v.body ? uniqueLabel(`eq:${slug(v.body)}`, ix.labels) : '' };
+    },
+    // KaTeX, not the document's own typesetting — see math_preview.js. It is
+    // fed the project's \newcommand definitions so a preview of notation the
+    // document defines is not wrong in exactly the documents that define it.
+    renderPreview: (v, mount) => {
+      renderMath(v.body || '\\;', mount, { macros: ix.macros, display: true });
+    },
+    onSubmit: (v) => insertBlockAtCursor(view(), equationBlock(v))
+  });
+}
+
+function referenceEquationPicker(view, project) {
+  const p = project();
+  const ix = projectIndex(p);
+  const all = environmentsOfKind(p, 'equation');
+  const labelled = all.filter(e => e.label);
+  const kind = refKindForEquations(ix.packages);
+
+  openPicker({
+    title: 'Reference an equation',
+    items: labelled,
+    text: (e) => `${e.label} ${mathSource(e).replace(/\s+/g, ' ')}`,
+    label: (e) => e.label,
+    // No equation number on the card: KaTeX numbers from its own counter, and
+    // a "(3)" here that the PDF disagrees with is worse than none.
+    preview: (e, mount) => { renderMath(mathSource(e), mount, { macros: ix.macros, fit: true }); },
+    empty: all.length
+      ? `${all.length} equation(s), none labelled — add a \\label to reference one`
+      : 'no equations to reference yet',
+    onPick: (e) => insertReference(view(), kind, e.label)
+  });
+}
+
 /* ── citations ───────────────────────────────────────────────────────── */
 
 /** `Smith, Jane and Doe, John` → `Smith et al.` — enough to tell entries apart. */
@@ -224,6 +283,8 @@ export function insertRows({ view, project }) {
     { type: 'action', label: 'Reference a figure…', run: () => referenceFigurePicker(view, project) },
     { type: 'action', label: 'Insert table…', run: () => insertTableDialog(view, project) },
     tableReferenceRow(view, project),
+    { type: 'action', label: 'Insert equation…', run: () => insertEquationDialog(view, project) },
+    { type: 'action', label: 'Reference an equation…', run: () => referenceEquationPicker(view, project) },
     citationRow(view, project)
   ];
 }

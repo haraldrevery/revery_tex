@@ -521,8 +521,10 @@ async function main() {
     })()`);
     check('the book fixture can be selected', switched);
 
+    // Again a file unique to this project: every fixture's main file is called
+    // main.tex, so docname alone does not say the switch has finished.
     await cdp.waitFor(
-      `document.getElementById('docname').textContent === 'main.tex' &&
+      `!!document.querySelector('#filetree .node[data-path="chapters/introduction.tex"]') &&
        document.querySelectorAll('#outline .node.sec').length > 0`,
       { what: 'the book outline', timeoutMs: 30000 });
 
@@ -689,9 +691,12 @@ async function main() {
       it && it.click();
       return !!it;
     })()`);
+    // Wait for a file only this project has. "the editor holds a document with
+    // \\documentclass" is true of the project that was already open, so it
+    // matches before the switch has happened and the checks below then run
+    // against the wrong project — which is how a suite becomes flaky.
     await cdp.waitFor(
-      `!!window.__reveryTexTest.view() &&
-       window.__reveryTexTest.view().state.doc.toString().includes('documentclass')`,
+      `!!document.querySelector('#filetree .node[data-path="chapter/problem_1.tex"]')`,
       { what: 'the homework project', timeoutMs: 30000 });
 
     const pick = await cdp.evaluate(`(async () => {
@@ -779,6 +784,145 @@ async function main() {
       /\\label\{fig:[^}]+\}/.test(figure.block || '') &&
       /width=0\.8\\linewidth/.test(figure.block || ''),
       (figure.block || '').replace(/\n\s*/g, ' ').slice(0, 120));
+
+    /* ── equations, with KaTeX ──────────────────────────────────────── */
+    // Still on the homework fixture: 29 equations, eq: labels, and amsmath.
+    const eq = await cdp.evaluate(`(async () => {
+      const view = window.__reveryTexTest.view();
+      view.dispatch({ selection: { anchor: view.state.doc.length } });
+
+      const open = () => {
+        document.getElementById('toolbox').click();
+        [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+          .find(b => /^insert equation/i.test(b.textContent.trim())).click();
+        return document.querySelector('.dlg');
+      };
+      const field = (panel, name) => [...panel.querySelectorAll('.dlg-row')]
+        .find(r => new RegExp(name, 'i').test(r.querySelector('.dlg-label').textContent))
+        .querySelector('input');
+      const type = (i, v) => { i.value = v; i.dispatchEvent(new Event('input', { bubbles: true })); };
+      const settle = () => new Promise(r => setTimeout(r, 400));
+
+      const panel = open();
+      if (!panel) return { opened: false };
+      type(field(panel, 'equation'), 'E = mc^2');
+      await settle();
+      const box = panel.querySelector('.dlg-preview');
+      const rendered = !!box.querySelector('.katex');
+      const derivedLabel = field(panel, 'label').value;
+
+      // A half-typed equation must show where it went wrong, not throw inside
+      // the dialog it is being typed into.
+      type(field(panel, 'equation'), 'E = \\\\frac{');
+      await settle();
+      const survivedGarbage = !!panel.querySelector('.dlg-preview').children.length;
+
+      type(field(panel, 'equation'), 'E = mc^2');
+      await settle();
+      [...panel.querySelectorAll('.dlg-foot button')]
+        .find(b => /insert/i.test(b.textContent)).click();
+      const numbered = view.state.doc.toString().slice(-90);
+
+      const panel2 = open();
+      type(field(panel2, 'equation'), 'a + b');
+      field(panel2, 'numbered').click();
+      await settle();
+      [...panel2.querySelectorAll('.dlg-foot button')]
+        .find(b => /insert/i.test(b.textContent)).click();
+      const starred = view.state.doc.toString().slice(-70);
+
+      return { opened: true, rendered, derivedLabel, survivedGarbage, numbered, starred };
+    })()`, true);
+
+    check('the equation dialog renders with KaTeX', eq.opened && eq.rendered);
+    check('the label is derived from the equation',
+      /^eq:e-mc/.test(eq.derivedLabel || ''), eq.derivedLabel);
+    check('a half-typed equation does not throw', eq.survivedGarbage);
+    check('inserting writes a numbered equation with its label',
+      /\\begin\{equation\}/.test(eq.numbered || '') && /\\label\{eq:[^}]+\}/.test(eq.numbered || ''),
+      (eq.numbered || '').replace(/\n\s*/g, ' ').slice(-70));
+    // \label inside equation* attaches to whatever counter last moved, so a
+    // \ref to it points somewhere arbitrary — and it compiles without a word.
+    check('an unnumbered equation gets no label',
+      /\\begin\{equation\*\}/.test(eq.starred || '') && !/\\label/.test(eq.starred || ''),
+      (eq.starred || '').replace(/\n\s*/g, ' ').slice(-60));
+
+    const macro = await cdp.evaluate(`(async () => {
+      const app = window.__reveryTexApp;
+      const view = window.__reveryTexTest.view();
+      const settle = () => new Promise(r => setTimeout(r, 400));
+      const open = () => {
+        document.getElementById('toolbox').click();
+        [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+          .find(b => /^insert equation/i.test(b.textContent.trim())).click();
+        return document.querySelector('.dlg');
+      };
+      const typeBody = (panel, v) => {
+        const i = [...panel.querySelectorAll('.dlg-row')]
+          .find(r => /equation/i.test(r.querySelector('.dlg-label').textContent))
+          .querySelector('input');
+        i.value = v; i.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+
+      let panel = open();
+      typeBody(panel, '\\\\myvec{x}');
+      await settle();
+      // KaTeX 0.18 does not mark an *undefined command* with .katex-error —
+      // that class is for a parse failure of the whole expression. What it does
+      // is render the command name in the configured errorColor, so that is
+      // what "this macro is unknown" actually looks like in the DOM.
+      const errorsBefore =
+        panel.querySelector('.dlg-preview').innerHTML.includes('var(--err)') ? 1 : 0;
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+
+      // Teach the document the macro, then ask again.
+      app.setBuffer('main.tex',
+        view.state.doc.toString() + '\\n\\\\newcommand{\\\\myvec}[1]{\\\\mathbf{#1}}\\n');
+      panel = open();
+      typeBody(panel, '\\\\myvec{x}');
+      await settle();
+      const html = panel.querySelector('.dlg-preview').innerHTML;
+      const errorsAfter = html.includes('var(--err)') ? 1 : 0;
+      const bold = html.includes('mathvariant="bold"');
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return { errorsBefore, errorsAfter, bold, rendered: html.includes('katex') };
+    })()`, true);
+
+    // The mitigation for KaTeX not seeing the preamble: it is handed the
+    // document's own \newcommand definitions. Without them a preview is wrong
+    // in exactly the documents that define their own notation.
+    check('an unknown macro is shown in the error colour, not silently dropped',
+      macro.errorsBefore > 0);
+    check('the document’s own macros are fed to the preview',
+      macro.errorsAfter === 0 && macro.bold && macro.rendered,
+      `error colour ${macro.errorsBefore} → ${macro.errorsAfter}, bold ${macro.bold}`);
+
+    const refEq = await cdp.evaluate(`(async () => {
+      const view = window.__reveryTexTest.view();
+      view.dispatch({ selection: { anchor: view.state.doc.length } });
+      document.getElementById('toolbox').click();
+      [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /reference an equation/i.test(b.textContent)).click();
+      const panel = document.querySelector('.dlg.picker');
+      if (!panel) return { opened: false };
+      await new Promise(r => setTimeout(r, 500));
+      const cards = [...panel.querySelectorAll('.picker-card')];
+      const withMath = cards.filter(c => c.querySelector('.picker-thumb .katex')).length;
+      cards[0]?.click();
+      return {
+        opened: true, count: cards.length, withMath,
+        labels: cards.slice(0, 3).map(c => c.querySelector('.picker-caption').textContent),
+        tail: view.state.doc.toString().slice(-24)
+      };
+    })()`, true);
+
+    check('equations can be referenced', refEq.opened && refEq.count > 0,
+      `${refEq.count}: ${(refEq.labels || []).join(' | ')}`);
+    check('their cards are rendered maths', refEq.withMath > 0,
+      `${refEq.withMath} of ${refEq.count} rendered`);
+    // amsmath is in this document's preamble, so \eqref exists. Without it the
+    // menu must fall back to \ref, which is defined everywhere.
+    check('picking one inserts an \\eqref', /\\eqref\{[^}]+\}$/.test(refEq.tail || ''), refEq.tail);
 
     const expected = /favicon|\/api\/projects/i;
     const real = pageErrors.filter(e => !expected.test(e));

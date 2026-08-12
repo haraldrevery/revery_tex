@@ -242,6 +242,22 @@ button.primary { color:var(--text); border-color:var(--accent) }
   padding:.55rem .9rem .7rem .9rem; border-top:1px solid var(--border);
 }
 
+/* KaTeX previews. The equation dialog renders rather than showing source,
+   because unlike a table the point of an equation is what it looks like. */
+.dlg-preview.dlg-render {
+  display:flex; align-items:center; justify-content:center;
+  min-height:4.5rem; white-space:normal; color:var(--text); overflow:auto;
+}
+.dlg-render .katex-display { margin:0 }
+/* The fallback when KaTeX cannot load or cannot parse: the source, plainly,
+   rather than an empty box that looks like the equation rendered to nothing. */
+.math-plain {
+  font-family:var(--font-mono); font-size:.7rem; color:var(--text-muted);
+  white-space:pre-wrap; text-align:left;
+}
+.picker-thumb .katex-display { margin:0 }
+.picker-thumb .katex { max-width:100%; color:var(--text) }
+
 /* ── pickers ────────────────────────────────────────────────────────── */
 /* A horizontal strip of cards. Wider than a form, because the point is to
    compare several previews at once. See picker.js. */

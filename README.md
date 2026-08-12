@@ -15,7 +15,7 @@ built the same way: vanilla JavaScript, no framework, no runtime bundler, no CDN
 ```bash
 git clone <repo> && cd revery_tex
 npm install                       # Tauri CLI
-npm install --prefix build_tools  # esbuild, CodeMirror, pdf.js
+npm install --prefix build_tools  # esbuild, CodeMirror, pdf.js, KaTeX
 
 # Browser (fastest loop — has test fixtures built in)
 npm run serve                     # http://localhost:8777/www/index.html
@@ -71,6 +71,8 @@ rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-t
 │    table_builder.js             grid → tabular; pure, no DOM                 │
 │    dialog.js                    modal shell + form with a live preview       │
 │    picker.js                    lazy card strip: figures, by thumbnail       │
+│    math_preview.js              KaTeX, loaded on first use                   │
+│    katex/                       vendored — see build_tools/vendor_assets.js  │
 │    settings.js                  one declarative table: load, apply, menu     │
 │    menus.js                     dropdown component (radio, stepper, action)  │
 │    settings_boot.js             pre-paint theme, so there is no flash        │
@@ -396,7 +398,9 @@ must be settled before any public release:
 - **`texlyre-busytex`** wrapper — **AGPL-3.0**. Currently vendored. `TexEngine`
   exists partly so it can be replaced with an MIT wrapper over
   [`busytex/busytex`](https://github.com/busytex/busytex) if the licence matters.
-- **pdf.js**, **CodeMirror** — Apache-2.0 and MIT.
+- **pdf.js**, **CodeMirror**, **KaTeX** — Apache-2.0, MIT and MIT. Vendored
+  into `www/` by `npm run vendor`; `npm test` fails if the copies drift from
+  the versions in `build_tools/`.
 - **Harald Revery fonts, logo and icons** — proprietary, not covered by
   Apache-2.0. See `font/FONT-LICENSE.txt`.
 - Do **not** copy Overleaf's `lezer-latex` grammar; it is AGPL-3.0. The editor

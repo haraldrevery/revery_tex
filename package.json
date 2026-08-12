@@ -12,6 +12,8 @@
     "gate": "node test/run_phase0.js",
     "test:web": "node test/run_web_backends.js",
     "build:texmf": "node build_tools/build_slim_texmf.js",
+    "vendor": "node build_tools/vendor_assets.js",
+    "vendor:check": "node build_tools/vendor_assets.js --check",
     "test": "node --test \"test/**/*.test.js\"",
     "start:electron": "env -u ELECTRON_RUN_AS_NODE electron .",
     "test:electron": "node test/run_electron.js",

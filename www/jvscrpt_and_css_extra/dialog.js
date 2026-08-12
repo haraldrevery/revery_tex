@@ -116,7 +116,7 @@ export function openModal({ title, className = 'dlg', onClose, onKey }) {
  * @param {(values: object, key: string) => object} [opts.onChange]  derive fields
  *        from each other — the label field following the caption, say
  */
-export function openDialog({ title, fields, preview, submitLabel = 'Insert', onSubmit, onChange }) {
+export function openDialog({ title, fields, preview, renderPreview, submitLabel = 'Insert', onSubmit, onChange }) {
   const values = {};
   for (const f of fields) values[f.key] = f.def;
 
@@ -132,8 +132,16 @@ export function openDialog({ title, fields, preview, submitLabel = 'Insert', onS
   });
   const { panel, body, foot, close } = modal;
 
-  const pre = preview ? document.createElement('pre') : null;
-  if (pre) pre.className = 'dlg-preview';
+  // Two shapes of preview: text (the table's LaTeX) or a rendered node (the
+  // equation's KaTeX). One element either way, so the layout does not fork.
+  const pre = preview ? document.createElement('pre')
+    : renderPreview ? document.createElement('div') : null;
+  if (pre) pre.className = `dlg-preview${renderPreview ? ' dlg-render' : ''}`;
+  const paint = () => {
+    if (!pre) return;
+    if (preview) pre.textContent = preview(values);
+    else renderPreview(values, pre);
+  };
 
   const inputs = new Map();
 
@@ -155,7 +163,7 @@ export function openDialog({ title, fields, preview, submitLabel = 'Insert', onS
   function changed(key) {
     if (onChange) Object.assign(values, onChange({ ...values }, key) || {});
     syncInputs();
-    if (pre) pre.textContent = preview(values);
+    paint();
   }
 
   for (const f of fields) {
@@ -210,7 +218,7 @@ export function openDialog({ title, fields, preview, submitLabel = 'Insert', onS
   }
 
   if (pre) {
-    pre.textContent = preview(values);
+    paint();
     panel.appendChild(pre);
   }
 

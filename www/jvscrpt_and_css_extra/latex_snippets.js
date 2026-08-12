@@ -139,6 +139,23 @@ export function escapeCaption(s) {
 }
 
 /**
+ * A displayed equation.
+ *
+ * The label is emitted only when the equation is numbered. `\label` inside
+ * `equation*` attaches to whatever counter last moved, so a `\ref` to it points
+ * somewhere arbitrary — and it compiles without complaint, which is what makes
+ * it worth refusing rather than passing through.
+ */
+export function equationBlock({ body = '', numbered = true, label = '' }) {
+  const env = numbered ? 'equation' : 'equation*';
+  const lines = [`\\begin{${env}}`];
+  if (numbered && label) lines.push(`  \\label{${label}}`);
+  lines.push(`  ${String(body).trim() || '% your equation here'}`);
+  lines.push(`\\end{${env}}`);
+  return lines.join('\n');
+}
+
+/**
  * A figure block around an image file.
  * `width=0.8\linewidth` rather than a bare include: an unscaled photograph
  * overflowing the text block is the single most common LaTeX surprise.
