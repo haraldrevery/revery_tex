@@ -321,9 +321,14 @@ button.primary { color:var(--text); border-color:var(--accent) }
 .picker-thumb .katex { max-width:100%; color:var(--text) }
 
 /* ── pickers ────────────────────────────────────────────────────────── */
-/* A horizontal strip of cards. Wider than a form, because the point is to
-   compare several previews at once. See picker.js. */
-.dlg.picker { min-width:min(46rem, 94vw); max-width:min(56rem, 96vw) }
+/* A wrapping grid of cards. Wider than a form, because the point is to compare
+   several previews at once — and a single row four cards wide compares four
+   things, which is what this was before. See picker.js.
+
+   Everything is sized off --picker-card, so the − / + stepper in the footer
+   changes one property and the grid, the thumbnails and the column count all
+   follow. */
+.dlg.picker { min-width:min(46rem, 94vw); max-width:min(56rem, 96vw); --picker-card:9.5rem }
 .picker-filter {
   width:100%; font-family:var(--font-mono); font-size:.72rem; color:var(--text);
   background:var(--bg); border:1px solid var(--border-md); border-radius:2px;
@@ -331,17 +336,24 @@ button.primary { color:var(--text); border-color:var(--accent) }
 }
 .picker-filter:focus { outline:none; border-color:var(--accent) }
 .picker-strip {
-  display:flex; gap:.5rem; overflow-x:auto; overflow-y:hidden;
-  padding:.4rem .1rem .6rem .1rem; scroll-snap-type:x proximity;
+  display:grid; gap:.5rem;
+  grid-template-columns:repeat(auto-fill, minmax(var(--picker-card), 1fr));
+  overflow-y:auto; overflow-x:hidden;
+  /* Bounded on purpose. Unbounded, a 25-image project grows the modal past the
+     window — and worse, leaves the observer below nothing to scroll, so every
+     thumbnail is built on the click that opens the picker. */
+  max-height:min(58vh, 30rem);
+  padding:.4rem .1rem .6rem .1rem;
 }
 .picker-card {
-  flex:none; width:9.5rem; display:flex; flex-direction:column; gap:.35rem;
+  display:flex; flex-direction:column; gap:.35rem;
   padding:.35rem; text-align:left; text-transform:none;
-  letter-spacing:var(--tracking-body); scroll-snap-align:start;
+  letter-spacing:var(--tracking-body);
 }
 .picker-card[hidden] { display:none }
 .picker-thumb {
-  height:6.5rem; display:flex; align-items:center; justify-content:center;
+  height:calc(var(--picker-card) * .68);
+  display:flex; align-items:center; justify-content:center;
   background:var(--bg); border:1px solid var(--border); overflow:hidden;
 }
 .picker-thumb img { max-width:100%; max-height:100%; object-fit:contain; display:block }
@@ -354,6 +366,14 @@ button.primary { color:var(--text); border-color:var(--accent) }
 }
 .picker-count { margin-right:auto; font-size:.6rem; color:var(--text-dim);
   letter-spacing:var(--tracking-wider); text-transform:uppercase }
+/* − XS + for the card size. The menu stepper's look, but not its classes:
+   .menu-step is a .menu-item and carries a menu row's padding and full width. */
+.picker-size { display:flex; align-items:center; gap:.3rem; margin-right:.6rem }
+.picker-size button { padding:.25rem .5rem .15rem .5rem; font-size:.72rem }
+.picker-size-value {
+  min-width:2.2rem; text-align:center; font-size:.6rem; color:var(--text-dim);
+  letter-spacing:var(--tracking-wider); text-transform:uppercase;
+}
 .picker-empty { color:var(--text-dim); font-size:.65rem; padding:1.4rem .4rem }
 .picker-strip::-webkit-scrollbar { width:8px; height:8px }
 .picker-strip::-webkit-scrollbar-thumb { background:var(--scrollbar); border-radius:2px }

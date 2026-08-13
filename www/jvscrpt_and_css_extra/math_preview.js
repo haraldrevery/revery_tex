@@ -90,8 +90,13 @@ export function mathSource(env) {
  * Scaling the finished layout keeps the proportions the reader needs to
  * recognise the equation. Never scales up — a two-symbol equation blown up to
  * fill a card looks like a different equation.
+ *
+ * Exported because the scale is computed once against the box as it was: resize
+ * that box — the picker's − / + stepper does — and the transform is stale until
+ * someone measures again. Safe to call repeatedly, and in either direction: the
+ * old transform is cleared before anything is measured.
  */
-function shrinkToFit(mount) {
+export function shrinkToFit(mount) {
   // The `.katex` span, not the `.katex-display` block around it: the block is
   // width:100% by definition, so measuring it says "already fits" for every
   // equation, however far the maths inside it runs past the edge.

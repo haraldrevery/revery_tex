@@ -12,8 +12,18 @@
 
 const KEY = 'revery_tex_settings';
 
-/** Applied to <html>, read by css_aesthetics/theme.css. */
-const root = document.documentElement;
+/**
+ * Applied to <html>, read by css_aesthetics/theme.css.
+ *
+ * Looked up per call rather than bound at import. Every value here reaches the
+ * page through this one element, but *importing* the table must not need a
+ * document: picker.js reads a remembered card size from this module, toolbox.js
+ * imports picker.js, and test/toolbox.test.js imports toolbox.js in Node to
+ * check pure functions like captionFromPath. A `document` dereference at module
+ * scope broke those four tests with a ReferenceError from a file they are not
+ * testing.
+ */
+const root = () => document.documentElement;
 
 /**
  * @typedef {object} Setting
@@ -61,9 +71,9 @@ export const SCHEMA = [
       { label: 'Forest', value: 'forest' }
     ],
     effect(v) {
-      root.setAttribute('data-theme', v);
+      root().setAttribute('data-theme', v);
       // Tells the browser which scrollbars and form controls to draw.
-      root.style.colorScheme = (v === 'dark' || v === 'forest') ? 'dark' : 'light';
+      root().style.colorScheme = (v === 'dark' || v === 'forest') ? 'dark' : 'light';
     }
   },
   {
@@ -91,7 +101,7 @@ export const SCHEMA = [
       // silently reset anyone using their own picture.
       { label: 'Your image', value: 'custom' }
     ],
-    effect: (v) => root.setAttribute('data-background', v)
+    effect: (v) => root().setAttribute('data-background', v)
   },
   {
     // How much of the photograph gets through. A stepper, and it stops at 40%:
@@ -123,7 +133,7 @@ export const SCHEMA = [
       { label: 'Harald Text', value: 'brand' },
       { label: 'System mono', value: 'system' }
     ],
-    effect: (v) => root.setAttribute('data-editor-font', v)
+    effect: (v) => root().setAttribute('data-editor-font', v)
   },
   {
     key: 'editorSize', label: 'Editor text size', def: 100, ui: 'stepper', group: 'editor',
@@ -159,7 +169,7 @@ export const SCHEMA = [
       { label: 'Dark', value: 'dark' },
       { label: 'Follow theme', value: 'auto' }
     ],
-    effect: (v) => root.setAttribute('data-pdf-theme', v)
+    effect: (v) => root().setAttribute('data-pdf-theme', v)
   },
   {
     // A toggle, because two arrangements is a yes/no dressed up as a list. The
@@ -173,7 +183,7 @@ export const SCHEMA = [
       { label: 'Editor · PDF', value: 'editor-first' },
       { label: 'PDF · Editor', value: 'pdf-first' }
     ],
-    effect: (v) => root.setAttribute('data-panel-order', v)
+    effect: (v) => root().setAttribute('data-panel-order', v)
   },
   {
     // A declared setting rather than a remembered-layout key, because it has a
@@ -256,7 +266,7 @@ export function save() {
 
 function applyOne(s) {
   const v = settings[s.key];
-  if (s.css) root.style.setProperty(s.css, (s.format || String)(v));
+  if (s.css) root().style.setProperty(s.css, (s.format || String)(v));
   if (s.effect) s.effect(v);
 }
 

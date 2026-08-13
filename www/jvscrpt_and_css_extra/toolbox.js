@@ -13,7 +13,7 @@ import { tableBlock, availableRules } from './table_builder.js';
 import { slug, uniqueLabel, figureBlock, equationBlock } from './latex_snippets.js';
 import { openDialog } from './dialog.js';
 import { openPicker } from './picker.js';
-import { renderMath, mathSource } from './math_preview.js';
+import { renderMath, mathSource, shrinkToFit } from './math_preview.js';
 
 /** One line of an environment's source, for the tooltip on a reference row. */
 function snippet(env, lines = 3) {
@@ -228,6 +228,10 @@ function referenceEquationPicker(view, project) {
     // No equation number on the card: KaTeX numbers from its own counter, and
     // a "(3)" here that the PDF disagrees with is worse than none.
     preview: (e, mount) => { renderMath(mathSource(e), mount, { macros: ix.macros, fit: true }); },
+    // `fit` bakes a scale computed against the card as it was, so a card that
+    // grows shows the same small equation in a bigger box. The figure pickers
+    // need no hook: an <img> is max-width/max-height and re-fits itself.
+    onResize: (e, mount) => shrinkToFit(mount),
     empty: all.length
       ? `${all.length} equation(s), none labelled — add a \\label to reference one`
       : 'no equations to reference yet',

@@ -956,14 +956,49 @@ async function main() {
       filterBox.value = '';
       filterBox.dispatchEvent(new Event('input', { bubbles: true }));
 
+      // A grid that wraps, not a single row scrolled sideways.
+      const strip = panel.querySelector('.picker-strip');
+      const cs = getComputedStyle(strip);
+      const grid = {
+        display: cs.display,
+        cols: cs.gridTemplateColumns.split(' ').filter(Boolean).length,
+        // More cards than fit one row, and the overflow is below rather than
+        // off to the right.
+        rows: Math.ceil(cards.length / cs.gridTemplateColumns.split(' ').filter(Boolean).length),
+        scrollsDown: strip.scrollHeight > strip.clientHeight + 1,
+        scrollsSideways: strip.scrollWidth > strip.clientWidth + 1
+      };
+
+      // − / + resize the cards. Read off the card itself, not the property:
+      // what matters is that the grid actually reflowed.
+      const sizeBtns = [...panel.querySelectorAll('.picker-size button')];
+      const cardW = () => cards[0].getBoundingClientRect().width;
+      const atOpen = cardW();
+      sizeBtns[1].click();
+      const afterPlus = cardW();
+      const colsAfterPlus = getComputedStyle(strip).gridTemplateColumns.split(' ').filter(Boolean).length;
+      sizeBtns[0].click(); sizeBtns[0].click();
+      const afterMinus = cardW();
+      // Walk to each end and check the buttons stop rather than wrapping.
+      for (let i = 0; i < 8; i++) sizeBtns[0].click();
+      const atFloor = { w: cardW(), minusOff: sizeBtns[0].disabled, plusOn: !sizeBtns[1].disabled };
+      for (let i = 0; i < 8; i++) sizeBtns[1].click();
+      const atCeil = { w: cardW(), plusOff: sizeBtns[1].disabled, minusOn: !sizeBtns[0].disabled };
+      // Back to the middle, and remember where, so the reopen check below knows
+      // what it is looking for.
+      sizeBtns[0].click(); sizeBtns[0].click();
+      const chosen = { w: cardW(), label: panel.querySelector('.picker-size-value').textContent.trim() };
+      const stored = JSON.parse(localStorage.getItem('revery_tex_settings') || '{}').pickerCardSize;
+
       // Every blob URL the picker made must be handed back on close.
       const live = new Set();
       const realCreate = URL.createObjectURL, realRevoke = URL.revokeObjectURL;
       URL.createObjectURL = (b) => { const u = realCreate.call(URL, b); live.add(u); return u; };
       URL.revokeObjectURL = (u) => { live.delete(u); return realRevoke.call(URL, u); };
-      // Scroll to the end so more cards render, then close.
-      const strip = panel.querySelector('.picker-strip');
-      strip.scrollLeft = strip.scrollWidth;
+      // Scroll to the end so more cards render, then close. Downwards: the grid
+      // wraps, so scrollLeft would move nothing and this would quietly stop
+      // testing anything at all.
+      strip.scrollTop = strip.scrollHeight;
       await new Promise(r => setTimeout(r, 250));
       const madeMore = live.size;
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
@@ -973,6 +1008,7 @@ async function main() {
       return {
         opened: true, total: cards.length, paintedEarly, afterFilter, countText,
         madeMore, leaked, closed: !document.querySelector('.dlg.picker'),
+        grid, atOpen, afterPlus, colsAfterPlus, afterMinus, atFloor, atCeil, chosen, stored,
         labels: cards.slice(0, 3).map(c => c.querySelector('.picker-caption').textContent),
         tips: cards.slice(0, 3).map(c => c.title)
       };
@@ -995,6 +1031,47 @@ async function main() {
       pick.madeMore > 0 && pick.leaked === 0,
       `${pick.madeMore} created after scrolling, ${pick.leaked} left live`);
     check('Escape closes the picker', pick.closed);
+
+    /* ── the grid, and sizing it ────────────────────────────────────── */
+    // The point of the dialog is comparing previews, and a single row scrolled
+    // sideways compares whatever four things happen to be in view.
+    check('cards lay out as a grid, not a sideways strip',
+      pick.grid?.display === 'grid' && pick.grid.cols > 1 && pick.grid.rows > 1,
+      `${pick.grid?.display}, ${pick.grid?.cols} columns × ${pick.grid?.rows} rows`);
+    check('the overflow is below, not off to the right',
+      pick.grid?.scrollsDown && !pick.grid?.scrollsSideways,
+      `down=${pick.grid?.scrollsDown} sideways=${pick.grid?.scrollsSideways}`);
+    check('+ grows the cards and − shrinks them',
+      pick.afterPlus > pick.atOpen && pick.afterMinus < pick.atOpen,
+      `${pick.atOpen?.toFixed(0)} → +${pick.afterPlus?.toFixed(0)} → −${pick.afterMinus?.toFixed(0)}px`);
+    // Bigger cards, fewer per row — the grid has to reflow, not just scale.
+    check('growing a card reflows the grid to fewer columns',
+      pick.colsAfterPlus < pick.grid?.cols, `${pick.grid?.cols} → ${pick.colsAfterPlus}`);
+    // Without this the ladder wraps and one more click jumps from XL to XS.
+    check('the steppers stop at both ends of the ladder',
+      pick.atFloor?.minusOff && pick.atFloor?.plusOn
+      && pick.atCeil?.plusOff && pick.atCeil?.minusOn
+      && pick.atCeil?.w > pick.atFloor?.w,
+      `${pick.atFloor?.w.toFixed(0)}px … ${pick.atCeil?.w.toFixed(0)}px`);
+    // Remembered layout, so it rides along in the settings store without being
+    // a SCHEMA entry — the same place the collapsed log panel is kept.
+    check('the chosen size is persisted', Number.isInteger(pick.stored),
+      `pickerCardSize=${pick.stored} (${pick.chosen?.label})`);
+
+    // Reopening must come back at the size it was left at, not the default.
+    const reopened = await cdp.evaluate(`(async () => {
+      document.getElementById('toolbox').click();
+      [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /^insert figure/i.test(b.textContent.trim())).click();
+      const panel = document.querySelector('.dlg.picker');
+      const w = panel.querySelector('.picker-card').getBoundingClientRect().width;
+      const label = panel.querySelector('.picker-size-value').textContent.trim();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return { w, label };
+    })()`, true);
+    check('and is still in force when the picker is reopened',
+      Math.abs(reopened.w - pick.chosen.w) < 2 && reopened.label === pick.chosen.label,
+      `${pick.chosen?.label} ${pick.chosen?.w.toFixed(0)}px → ${reopened.label} ${reopened.w.toFixed(0)}px`);
 
     const figure = await cdp.evaluate(`(() => {
       const view = window.__reveryTexTest.view();
@@ -1143,9 +1220,30 @@ async function main() {
       await new Promise(r => setTimeout(r, 500));
       const cards = [...panel.querySelectorAll('.picker-card')];
       const withMath = cards.filter(c => c.querySelector('.picker-thumb .katex')).length;
+
+      // The fit option bakes a scale into the .katex span, measured against the
+      // card as it was. Grow the card and that number has to be recomputed, or
+      // the equation stays small in a big box — which is the whole reason for
+      // asking for a bigger box.
+      const sizeBtns = [...panel.querySelectorAll('.picker-size button')];
+      // An equation that actually needed shrinking: one already scaled below 1
+      // has somewhere to grow to.
+      const scaleOf = (el) => {
+        const m = /scale\\(([\\d.]+)\\)/.exec(el?.style.transform || '');
+        return m ? Number(m[1]) : 1;
+      };
+      const shrunk = cards.map(c => c.querySelector('.picker-thumb .katex'))
+        .find(el => el && scaleOf(el) < 1);
+      const before = scaleOf(shrunk);
+      for (let i = 0; i < 3; i++) sizeBtns[1].click();
+      await new Promise(r => setTimeout(r, 120));
+      const after = scaleOf(shrunk);
+      for (let i = 0; i < 3; i++) sizeBtns[0].click();
+
       cards[0]?.click();
       return {
         opened: true, count: cards.length, withMath,
+        refit: { hadOne: !!shrunk, before, after },
         labels: cards.slice(0, 3).map(c => c.querySelector('.picker-caption').textContent),
         tail: view.state.doc.toString().slice(-24)
       };
@@ -1155,6 +1253,11 @@ async function main() {
       `${refEq.count}: ${(refEq.labels || []).join(' | ')}`);
     check('their cards are rendered maths', refEq.withMath > 0,
       `${refEq.withMath} of ${refEq.count} rendered`);
+    // Without the re-fit hook this passes at the old scale forever: the card is
+    // bigger and the equation inside it is exactly as small as before.
+    check('growing a card re-fits the maths inside it',
+      refEq.refit?.hadOne && refEq.refit.after > refEq.refit.before,
+      `scale ${refEq.refit?.before} → ${refEq.refit?.after}`);
     // amsmath is in this document's preamble, so \eqref exists. Without it the
     // menu must fall back to \ref, which is defined everywhere.
     check('picking one inserts an \\eqref', /\\eqref\{[^}]+\}$/.test(refEq.tail || ''), refEq.tail);
