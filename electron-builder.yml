@@ -60,3 +60,27 @@ linux:
 
 deb:
   priority: optional
+
+# The `files:` whitelist above is platform-independent, so the Windows targets
+# inherit it unchanged — including the busytex exclusion. That is the point of
+# it being a whitelist: a new target cannot quietly ship a different payload.
+#
+# `msi` downloads the WiX toolset on first use, so the first Windows build needs
+# network. Both targets are built by `npm run installers` when it runs on
+# Windows; neither can be cross-built from Linux.
+win:
+  target:
+    - nsis
+    - msi
+  icon: tauri/icons/icon.ico
+
+nsis:
+  # Not one-click. The payload is ~120 MB of wasm and texmf, and a one-click
+  # installer shows no progress and offers no directory choice — the wrong shape
+  # for something that size, on a machine where 120 MB may not be free.
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  # Per-user, so installing needs no elevation. The app writes only to the
+  # project directory the user picks, so there is nothing a machine-wide install
+  # would buy.
+  perMachine: false

@@ -24,6 +24,9 @@ npm run serve                     # http://localhost:8777/www/index.html
 npm run start:tauri               # first Rust build takes ~1 min
 npm run start:electron
 REVERY_TEX_OPEN=/path/to/project npm run start:tauri   # open straight into a folder
+
+# Installers for whatever OS you are on
+npm run installers                # .deb + .rpm on Linux, .msi + .exe on Windows
 ```
 
 **The engine binaries are committed** (`www/engine/dist/`, 97 MB), so a fresh
@@ -286,8 +289,7 @@ Pointed at `REVERY_TEX_BIN` it runs against the **packaged** app rather than the
 repo checkout, which is what catches a file the installer's whitelist dropped.
 
 ```bash
-npm run build:tauri && npm run build:electron
-npm run verify:installers                        # no upstream tree, engine present, size sane
+npm run installers                               # builds and verifies — see below
 npm run test:tauri:engine                        # release build compiles over tauri://localhost
 ```
 
@@ -341,16 +343,77 @@ match Revery Notebook's zero-test-dependency convention.
 
 ---
 
+## Building installers
+
+```bash
+npm run installers                # every installer this machine can build
+```
+
+Both shells, then a verification pass. What comes out depends on the OS you run
+it on:
+
+| Host | Shell | Artifacts |
+|---|---|---|
+| Linux | Tauri | `tauri/target/release/bundle/deb/`, `.../rpm/` |
+| Linux | Electron | `dist-electron/*.deb`, `dist-electron/*.rpm` |
+| Windows | Tauri | `tauri/target/release/bundle/msi/`, `.../nsis/` |
+| Windows | Electron | `dist-electron/*.msi`, `dist-electron/*Setup*.exe` |
+
+The `.exe` is an NSIS installer — there is no bundler target named `exe`. It is
+not one-click: 120 MB deserves a progress bar and a directory choice. It
+installs per-user, so it needs no elevation.
+
+Narrow it to one shell when you only want the one:
+
+```bash
+npm run installers -- tauri       # ~53 MB deb; www/ embedded in the binary
+npm run installers -- electron    # ~120 MB deb; www/ as files beside the exe
+npm run verify:installers         # re-check what is already built
+```
+
+Three things about the command are deliberate.
+
+**It is host-native.** Tauri needs the MSVC toolchain to produce a Windows
+binary and cannot cross-build to one, so Windows installers come from a Windows
+machine or a Windows CI runner. There is no flag to fake it — a command that
+appeared to work and emitted an installer nobody could run would be worse than
+not having one. macOS exits with a message rather than a build; there is no
+`mac:` block in `electron-builder.yml` to build against.
+
+**It builds one shell at a time.** `rpmbuild` on this payload peaks around
+2.3 GB and runs multithreaded. A Tauri release build alongside it has taken the
+machine down. Tauri goes first, so a failure surfaces before the slow half.
+
+**It checks the version before it starts.** The version lives in four files that
+no tool keeps in agreement (`package.json`, `tauri.conf.json`, `Cargo.toml`,
+`Cargo.lock`) and `npm run version:set 0.2.0` is what moves them together. The
+moment before packaging is the last one where drift is still cheap; after it,
+it is an installer, a window title and an about box claiming three numbers.
+
+Verification is `test/verify_installers.js`: no upstream busytex tree, engine
+actually present, no source maps or tarballs, size in range. On Linux it reads
+the real file list out of the package. On Windows it can only check size — an
+NSIS installer carries the app as a nested archive, so there is no listing to
+assert against, and size is what catches both a package that grew by a whole
+directory and one that lost the engine.
+
+The target lists live in `build_tools/build_installers.js`; `test/build_installers.test.js`
+pins both halves, because on any given machine only one of them ever runs.
+
+---
+
 ## Using your own TeX Live
 
 Settings → **LaTeX engine → System TeX Live**, on the desktop only. It closes
 the two things the bundled engine cannot do: **biber**, which no WASM build has,
 and packages outside the 62 MB slim bundle.
 
-Linux only in practice. Both packagers build `deb` and `rpm` and nothing else,
-and while the tool lookup has a Windows branch in each shell, no Windows build
-ships and none of it has ever run — treat MiKTeX as untested rather than
-supported.
+Both packagers build `deb` and `rpm` on Linux and `msi` and `exe` on Windows —
+see [Building installers](#building-installers). The lookup is the same
+hand-walked PATH search in either shell, so it finds a TeX Live or a MiKTeX
+wherever the platform puts it; on Windows it accepts `.exe` and nothing else,
+matching `tauri/src/tex_run.rs`, so a `.bat` or `.cmd` on PATH cannot become the
+compiler.
 
 The bundled engine stays the default because it always works — no install, no
 PATH, the same result on every machine.
@@ -444,7 +507,7 @@ Each of these cost real debugging time:
 | `www/` | the entire app — every shell loads this folder |
 | `www/engine/dist/` | TeX Live WASM + slim texmf, committed build output |
 | `engine_upstream/busytex/` | 649 MB upstream release, gitignored — **outside `www/` on purpose** |
-| `build_tools/` | texmf repacker, CodeMirror bundler, LZ4 codec extractor |
+| `build_tools/` | texmf repacker, CodeMirror bundler, LZ4 codec extractor, installer build |
 | `tauri/` | desktop shell; `src/main.rs` is the whole backend |
 | `test/` | dev server, the gate, CDP client |
 | `vendor/` | provenance copies of third-party source |

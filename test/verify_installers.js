@@ -15,6 +15,9 @@
 // Also verifies the engine is actually present, because the opposite mistake —
 // a whitelist so tight the app ships without its compiler — fails at runtime in
 // front of a user rather than here.
+//
+// On Windows the same script checks the .msi and .exe, but with less to go on:
+// see verifyOpaque() below.
 
 const fs = require('fs');
 const path = require('path');
@@ -81,6 +84,34 @@ function verify(label, file, listing, installedKb) {
   check('size is in the expected range', mb > 40 && mb < 300, `${mb.toFixed(0)} MB`);
 }
 
+/**
+ * The Windows installers, which cannot be opened the way a .deb can.
+ *
+ * There is no dpkg-deb equivalent in the box, and even with 7z the useful
+ * content is out of reach: an NSIS installer carries the app as a *nested*
+ * archive, so a listing shows `$PLUGINSDIR` and `app-64.7z` rather than
+ * anything named busytex.wasm. Asserting on filenames here would be asserting
+ * on nothing.
+ *
+ * Size is what survives that, and size is what actually catches the failure
+ * this script was written for. The 649 MB leak was visible as a .deb seven
+ * times too big; compressed into an .exe it is still several times too big.
+ * A package that lost the engine is dramatically too small. Both show up in a
+ * single number, so that number is checked and the rest is stated plainly
+ * rather than faked.
+ */
+function verifyOpaque(label, file) {
+  const mb = fs.statSync(file).size / 1e6;
+  console.log(`\n${label}  ${mb.toFixed(0)} MB  ${path.basename(file)}  (contents not inspectable)`);
+  checked++;
+
+  // Compressed, so the floor is lower than the Linux one: NSIS puts LZMA over
+  // the same ~120 MB of wasm and texmf. The ceiling is unchanged — nothing
+  // legitimate compresses to more than the uncompressed Electron .deb.
+  check('size is in the expected range', mb > 25 && mb < 300,
+    mb <= 25 ? `${mb.toFixed(0)} MB — too small to hold a TeX distribution` : `${mb.toFixed(0)} MB`);
+}
+
 const dirs = ['dist-electron', path.join('tauri', 'target', 'release', 'bundle')];
 const found = [];
 
@@ -90,22 +121,26 @@ for (const dir of dirs) {
   const walk = (d) => {
     for (const e of fs.readdirSync(d, { withFileTypes: true })) {
       const p = path.join(d, e.name);
-      if (e.isDirectory()) walk(p);
-      else if (/\.(deb|rpm)$/.test(e.name)) found.push(p);
+      // `*-unpacked/` is the app tree electron-builder packs *into* the
+      // installer. On Windows it holds a .exe that matches the pattern below
+      // and is not an installer at all.
+      if (e.isDirectory()) { if (!/unpacked/.test(e.name)) walk(p); }
+      else if (/\.(deb|rpm|msi|exe)$/.test(e.name)) found.push(p);
     }
   };
   walk(full);
 }
 
 if (!found.length) {
-  console.error('No .deb or .rpm found. Build one first:\n' +
-    '  npm run build:electron\n' +
-    '  npm run build:tauri');
+  console.error('No installer found. Build one first:\n' +
+    '  npm run installers');
   process.exit(1);
 }
 
 for (const file of found) {
-  if (file.endsWith('.deb')) {
+  if (/\.(msi|exe)$/.test(file)) {
+    verifyOpaque(file.endsWith('.msi') ? 'msi' : 'exe', file);
+  } else if (file.endsWith('.deb')) {
     if (!have('dpkg-deb')) { console.log(`\nskipping ${path.basename(file)} — dpkg-deb not installed`); continue; }
     const listing = execFileSync('dpkg-deb', ['-c', file], { encoding: 'utf8', maxBuffer: 1 << 26 })
       .split('\n').map(l => l.trim().split(/\s+/).slice(5).join(' ')).filter(Boolean);
