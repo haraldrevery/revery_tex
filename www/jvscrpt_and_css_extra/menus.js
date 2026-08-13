@@ -11,15 +11,17 @@
 //   { type: 'stepper', ... }         − value + on one line, for scales
 //   { type: 'submenu', ... }         a nested panel: `options` for a choice
 //                                    (themes), `actions` for a list (tables)
+//   { type: 'toggle',  label, on, off, get(), set(v) }   one ■/□ row
 //   { type: 'action',  label, run() }
 //   { type: 'divider' }
 //   { type: 'note',    label }       non-interactive, for stating a limitation
 //
-// Most rows are flat — a label with its choices beneath, each prefixed ■ or □ —
-// because a submenu costs hover intent, an open delay and edge flipping, and
-// every one of those is a bug surface. Themes get one anyway: four colour
-// schemes are the least-changed setting here and do not deserve four permanent
-// rows at the top of the menu.
+// A setting with two choices is a toggle, one with several is a submenu, and a
+// scale is a stepper — so what is left as a flat headed list is the case where
+// neither shape fits. The flat list is still the honest default: a submenu costs
+// hover intent, an open delay and edge flipping, and every one of those is a bug
+// surface. It is worth paying where the choices would otherwise crowd out
+// everything else (four themes, eight backgrounds), and not worth paying for two.
 //
 // SelectMenu at the bottom replaces `<select>`, which draws the operating
 // system's own popup in system fonts and cannot show the ■ marker.
@@ -272,6 +274,36 @@ function createMenu(spec, opts = {}) {
           }
         }
         el.appendChild(wrap);
+        continue;
+      }
+
+      if (row.type === 'toggle') {
+        // Two choices as one row, Revery Notebook's idiom. As a headed list this
+        // is three lines to say one thing, and the head repeats what the two
+        // options already spell out.
+        const b = document.createElement('button');
+        b.className = 'menu-item menu-toggle';
+        // menuitemcheckbox, not menuitemradio: there is one control here whose
+        // state is on or off, not two controls of which one is chosen.
+        b.setAttribute('role', 'menuitemcheckbox');
+        const on = row.get() === row.on;
+        b.setAttribute('aria-checked', String(on));
+        b.append(
+          Object.assign(document.createElement('span'), {
+            className: 'menu-item-check', textContent: on ? '■' : '□'
+          }),
+          Object.assign(document.createElement('span'), { textContent: row.label })
+        );
+        // Same focus restore as the radio rows below: render() replaces the
+        // element that has focus, and without this the keyboard user is dropped
+        // to the body mid-menu.
+        b.onclick = () => {
+          const at = items().indexOf(b);
+          row.set(on ? row.off : row.on);
+          render();
+          focusAt(at);
+        };
+        el.appendChild(b);
         continue;
       }
 

@@ -28,9 +28,20 @@ const root = document.documentElement;
  *   into the DOM. Must be declared, so that "shown in the menu but wired to
  *   nothing" stays a test failure rather than a category the test learns to
  *   ignore.
- * @property {'stepper'} [ui]  render as - value + instead of a list of choices.
- *   For scales: fourteen percentages as fourteen rows makes the menu a column
- *   nobody can scan.
+ * @property {'stepper'|'submenu'|'toggle'} [ui]  how the menu renders it, when a
+ *   flat list of choices is the wrong shape. `stepper` is - value + for scales:
+ *   fourteen percentages as fourteen rows makes the menu a column nobody can
+ *   scan. `submenu` is a trigger echoing the current value, with the choices in
+ *   a panel to the side. `toggle` is one ■/□ row, for two-option settings.
+ * @property {*} [on]  which option value the ■ means. Required by `toggle`, and
+ *   deliberately not defaulted to the first option: a toggle that is silently
+ *   inverted looks like the setting itself being backwards.
+ * @property {string} [toggleLabel]  what the ■/□ row says, when `label` does not
+ *   read as a statement. "Panel order" means nothing next to a checkbox; "PDF
+ *   before editor" does. `label` stays the setting's canonical name.
+ * @property {string} group  cluster id. The menu emits a divider wherever this
+ *   changes, so related settings sit together instead of every setting being
+ *   fenced off from its neighbours.
  */
 
 const PERCENT = (from, to, step) => {
@@ -42,7 +53,7 @@ const PERCENT = (from, to, step) => {
 /** @type {Setting[]} */
 export const SCHEMA = [
   {
-    key: 'theme', label: 'Theme', def: 'dark', ui: 'submenu',
+    key: 'theme', label: 'Theme', def: 'dark', ui: 'submenu', group: 'appearance',
     options: [
       { label: 'Dark', value: 'dark' },
       { label: 'Light', value: 'light' },
@@ -64,7 +75,7 @@ export const SCHEMA = [
     // keyed off [data-background], so settings_boot.js can apply the choice
     // before first paint without knowing what any of them mean — the same rule
     // the font stacks follow.
-    key: 'background', label: 'Background', def: 'none', ui: 'submenu',
+    key: 'background', label: 'Background', def: 'none', ui: 'submenu', group: 'appearance',
     options: [
       { label: 'None', value: 'none' },
       { label: 'Galdhøpiggen', value: 'bg_1' },
@@ -88,6 +99,7 @@ export const SCHEMA = [
     // suffers. The stylesheet veils the image with the theme's own background
     // colour at 1 − this, so the value means what it says on every theme.
     key: 'backgroundOpacity', label: 'Background strength', def: 8, ui: 'stepper',
+    group: 'appearance',
     options: PERCENT(2, 40, 2),
     css: '--texture-opacity', format: (v) => String(v / 100)
   },
@@ -96,7 +108,7 @@ export const SCHEMA = [
     // in rem. The editor and PDF have their own scales below.
     // 120% by default: at 100% the mono chrome is legible but tight on a
     // high-DPI laptop, which is what this is mostly used on.
-    key: 'uiSize', label: 'UI size', def: 120, ui: 'stepper',
+    key: 'uiSize', label: 'UI size', def: 120, ui: 'stepper', group: 'appearance',
     options: PERCENT(80, 160, 10),
     css: '--ui-scale', format: (v) => String(v / 100)
   },
@@ -105,7 +117,7 @@ export const SCHEMA = [
     // Keeping font stacks out of JS means the pre-paint script (settings_boot.js)
     // can just copy the stored string onto <html> without knowing what any of
     // the values mean — no duplicated font list to drift.
-    key: 'editorFont', label: 'Editor font', def: 'mono',
+    key: 'editorFont', label: 'Editor font', def: 'mono', ui: 'submenu', group: 'editor',
     options: [
       { label: 'Harald Mono', value: 'mono' },
       { label: 'Harald Text', value: 'brand' },
@@ -114,12 +126,13 @@ export const SCHEMA = [
     effect: (v) => root.setAttribute('data-editor-font', v)
   },
   {
-    key: 'editorSize', label: 'Editor text size', def: 100, ui: 'stepper',
+    key: 'editorSize', label: 'Editor text size', def: 100, ui: 'stepper', group: 'editor',
     options: PERCENT(70, 200, 10),
     css: '--editor-scale', format: (v) => String(v / 100)
   },
   {
-    key: 'editorLineHeight', label: 'Editor line height', def: 160,
+    key: 'editorLineHeight', label: 'Editor line height', def: 160, ui: 'submenu',
+    group: 'editor',
     options: [
       { label: 'Tight', value: 130 },
       { label: 'Normal', value: 160 },
@@ -140,7 +153,7 @@ export const SCHEMA = [
     //
     // Off by default: inverting a photograph turns it into a negative, and that
     // is not something to do to someone's figures uninvited.
-    key: 'pdfTheme', label: 'PDF preview', def: 'off',
+    key: 'pdfTheme', label: 'PDF preview', def: 'off', ui: 'submenu', group: 'preview',
     options: [
       { label: 'Off', value: 'off' },
       { label: 'Dark', value: 'dark' },
@@ -149,7 +162,13 @@ export const SCHEMA = [
     effect: (v) => root.setAttribute('data-pdf-theme', v)
   },
   {
+    // A toggle, because two arrangements is a yes/no dressed up as a list. The
+    // ■ has to stand for something you can read off the row, so it stands for
+    // the non-default arrangement rather than for "Panel order", which as a
+    // checkbox label means nothing.
     key: 'panelOrder', label: 'Panel order', def: 'editor-first',
+    ui: 'toggle', on: 'pdf-first', toggleLabel: 'PDF before editor',
+    group: 'preview',
     options: [
       { label: 'Editor · PDF', value: 'editor-first' },
       { label: 'PDF · Editor', value: 'pdf-first' }
@@ -157,15 +176,19 @@ export const SCHEMA = [
     effect: (v) => root.setAttribute('data-panel-order', v)
   },
   {
-    // Off matters for large documents, where a 20-second recompile on every
-    // Ctrl+S is worse than pressing Ctrl+Enter when you actually want one.
-    key: 'autoCompile', label: 'Compile after save', def: true, appliedBy: 'app',
+    // A declared setting rather than a remembered-layout key, because it has a
+    // control of its own in the topbar and belongs in the reset. Sits with the
+    // preview because both are about what the right-hand side of the window
+    // shows.
+    key: 'showOutline', label: 'Outline panel', def: true, appliedBy: 'app',
+    ui: 'toggle', on: true, toggleLabel: 'Show outline panel', group: 'preview',
     options: [{ label: 'On', value: true }, { label: 'Off', value: false }]
   },
   {
-    // A declared setting rather than a remembered-layout key, because it has a
-    // control of its own in the topbar and belongs in the reset.
-    key: 'showOutline', label: 'Outline panel', def: true, appliedBy: 'app',
+    // Off matters for large documents, where a 20-second recompile on every
+    // Ctrl+S is worse than pressing Ctrl+Enter when you actually want one.
+    key: 'autoCompile', label: 'Compile after save', def: true, appliedBy: 'app',
+    ui: 'toggle', on: true, group: 'behaviour',
     options: [{ label: 'On', value: true }, { label: 'Off', value: false }]
   },
   {
@@ -174,6 +197,8 @@ export const SCHEMA = [
     // and not obviously worth trading for a menu that also sits in the topbar.
     // Off by default means nobody loses them without choosing to.
     key: 'contextToolbox', label: 'Right-click menu', def: 'browser', appliedBy: 'app',
+    ui: 'toggle', on: 'toolbox', toggleLabel: 'Toolbox on right-click',
+    group: 'behaviour',
     options: [
       { label: 'Browser menu', value: 'browser' },
       { label: 'Toolbox', value: 'toolbox' }
@@ -184,7 +209,12 @@ export const SCHEMA = [
     // same result on every machine. A system TeX is the escape hatch for the
     // two things WASM cannot do — biber, and packages outside the slim bundle.
     // The app narrows this to what can actually run; see engineSource().
+    //
+    // The one two-option setting left as a flat list: picking wrong is the only
+    // setting here that stops compiles working, so both choices stay spelled out
+    // rather than hiding behind a ■ you have to already understand.
     key: 'engineSource', label: 'LaTeX engine', def: 'bundled', appliedBy: 'app',
+    group: 'engine',
     options: [
       { label: 'Bundled (offline)', value: 'bundled' },
       { label: 'System TeX Live', value: 'system' }

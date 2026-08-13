@@ -216,6 +216,14 @@ button.primary { color:var(--text); border-color:var(--accent) }
 .menu-item:focus-visible { box-shadow:inset 2px 0 0 var(--accent) }
 .menu-divider { height:1px; background:var(--theme-divider); margin:.3rem 0 }
 
+/* A two-option setting as a single ■/□ row — Revery Notebook's idiom.
+   The marker is its own element, not part of the label text as in the radio
+   rows, so the fixed column below can hold every label on one left edge; ■ and
+   □ are not the same width in every mono face. */
+.menu-item.menu-toggle { display:flex; align-items:baseline; gap:.5rem }
+.menu-item-check { flex:0 0 1em; text-align:center; opacity:.65 }
+.menu-item[aria-checked="true"] .menu-item-check { opacity:1 }
+
 /* Submenus, opening sideways like Revery Notebook's.
    Mounted on <body> and positioned fixed by menus.js: the parent menu scrolls,
    and an overflow container clips any descendant positioned outside it. */

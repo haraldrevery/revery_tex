@@ -109,20 +109,34 @@ async function pickBackgroundImage() {
 /** Build the settings menu from the schema, so a new setting needs no wiring. */
 function settingsMenuSpec() {
   const rows = [];
+  // Dividers come from the schema's `group`, not from one after every setting:
+  // a fence between every pair of rows separates nothing, and doubles the height
+  // of a menu whose whole problem was height.
+  let group = null;
   for (const s of settings.SCHEMA) {
     // Offering a system TeX where no process can be started would be a control
     // that silently does nothing. Hide it instead of letting it lie.
     if (s.key === 'engineSource' && !NativeTexEngine.available(NativeAPI)) continue;
+    if (group !== null && s.group !== group) rows.push({ type: 'divider' });
+    group = s.group;
     const row = {
       // The schema says how a setting is rendered — `submenu` for the ones with
-      // enough choices to crowd the menu (theme, background), `stepper` for
-      // scales, a flat list otherwise.
+      // enough choices to crowd the menu (theme, background), `toggle` for the
+      // two-option ones, `stepper` for scales, a flat list otherwise.
       type: s.ui || 'radio',
-      label: s.label,
+      // A toggle's label has to read as a statement beside a ■, which the
+      // setting's own name often does not; see `toggleLabel` in the schema.
+      label: s.ui === 'toggle' ? (s.toggleLabel ?? s.label) : s.label,
       options: s.options,
       get: () => settings.settings[s.key],
       set: (v) => settings.set(s.key, v)
     };
+    if (s.ui === 'toggle') {
+      // The off value is derived rather than declared, so a two-option setting
+      // cannot end up with an `on` and an `off` that disagree with `options`.
+      row.on = s.on;
+      row.off = s.options.find(o => o.value !== s.on).value;
+    }
     if (s.key === 'background') {
       // "Your image" is a choice only once there is one; before that it would
       // select a background that paints nothing.
@@ -141,8 +155,8 @@ function settingsMenuSpec() {
       ];
     }
     rows.push(row);
-    rows.push({ type: 'divider' });
   }
+  rows.push({ type: 'divider' });
   rows.push({
     type: 'note',
     label: 'The preview is a rendered PDF, so its typography comes from the document, not from here.'

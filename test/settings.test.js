@@ -143,6 +143,27 @@ test('every schema entry has a default that is one of its own options', async ()
   }
 });
 
+test('every toggle has two options and an on-value among them', async () => {
+  // A toggle row asks the schema which value the ■ means and derives the other.
+  // With three options it would render a control that can only reach two of
+  // them; with an `on` that is not an option it would render permanently off
+  // and do nothing on click. Both are invisible until someone opens the menu.
+  const { mod } = await load(undefined);
+  for (const s of mod.SCHEMA.filter(e => e.ui === 'toggle')) {
+    assert.equal(s.options.length, 2,
+      `${s.key}: a toggle can only reach two values, it has ${s.options.length}`);
+    assert.ok(s.options.some(o => o.value === s.on),
+      `${s.key}: on ${JSON.stringify(s.on)} is not one of its options`);
+  }
+});
+
+test('every schema entry declares the group its divider comes from', async () => {
+  const { mod } = await load(undefined);
+  for (const s of mod.SCHEMA) {
+    assert.ok(s.group, `${s.key}: no group — it would silently join its neighbour's cluster`);
+  }
+});
+
 test('every schema entry actually does something on apply', async () => {
   // A setting that is persisted and shown but applies nowhere is the failure
   // this table structure exists to make impossible.

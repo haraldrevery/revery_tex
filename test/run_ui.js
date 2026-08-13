@@ -101,6 +101,8 @@ async function main() {
         steppers: menu.querySelectorAll('.menu-stepper').length,
         submenus: document.querySelectorAll('.submenu').length,
         subTriggers: menu.querySelectorAll('.menu-item.has-submenu').length,
+        toggles: menu.querySelectorAll('.menu-item.menu-toggle').length,
+        dividers: menu.querySelectorAll('.menu-divider').length,
         themeButton: !!document.getElementById('theme'),
         selects: document.querySelectorAll('select').length
       };
@@ -113,31 +115,50 @@ async function main() {
       const s = await import('./jvscrpt_and_css_extra/settings.js');
       const shown = s.SCHEMA.filter(e => e.key !== 'engineSource');
       return {
-        headed: shown.filter(e => e.ui !== 'submenu').length,
+        // Only radios and steppers carry a .menu-head; submenus and toggles are
+        // a single row that names itself.
+        headed: shown.filter(e => e.ui !== 'submenu' && e.ui !== 'toggle').length,
         radios: shown.filter(e => !e.ui).length,
         steppers: shown.filter(e => e.ui === 'stepper').length,
-        submenus: shown.filter(e => e.ui === 'submenu').length
+        submenus: shown.filter(e => e.ui === 'submenu').length,
+        toggles: shown.filter(e => e.ui === 'toggle').length,
+        // A toggle shows ■ only when it is currently on, so the expected mark
+        // count depends on the live values, not on the shape of the schema.
+        checkedToggles: shown.filter(e => e.ui === 'toggle' && s.settings[e.key] === e.on).length,
+        // One divider between clusters, plus the one before the closing notes.
+        groups: new Set(shown.map(e => e.group)).size
       };
     })()`, true);
 
     check('menu opens', opened.open);
-    // One head per setting, plus the theme submenu trigger, which has none.
-    // engineSource is hidden where no process can be started, which is every
-    // browser — see settingsMenuSpec.
+    // One head per setting that is neither a submenu nor a toggle — those name
+    // themselves in their single row. engineSource is hidden where no process
+    // can be started, which is every browser — see settingsMenuSpec.
     check('has a row per setting',
       opened.heads.length === schema.headed,
       `${opened.heads.length} of ${schema.headed}: ${opened.heads.join(' · ')}`);
-    // Scales are steppers and theme is a submenu, so only the remaining
-    // list-style settings carry a ■ in the top level.
-    check('marks one choice per top-level list setting',
-      opened.checked.length === schema.radios,
+    // Everything with a ■ at the top level is now a toggle that happens to be
+    // on: the list-style settings are all behind submenus, and engineSource —
+    // the one that is still a flat list — is hidden in the browser.
+    check('marks every toggle that is on',
+      opened.checked.length === schema.radios + schema.checkedToggles,
       `${opened.checked.length} marked: ${opened.checked.join(' | ')}`);
     check('scales render as steppers', opened.steppers === schema.steppers,
       `${opened.steppers} of ${schema.steppers}`);
-    // Theme and background: the two settings with enough choices to crowd the
-    // menu as a flat list.
+    // Theme, background, editor font, line height and PDF preview: the settings
+    // with enough choices to crowd the menu as a flat list.
     check('the long lists are submenus', opened.subTriggers === schema.submenus,
       `${opened.subTriggers} of ${schema.submenus} triggers`);
+    // The two-option settings, each one row instead of a head plus two choices.
+    check('two-option settings are single toggle rows',
+      opened.toggles === schema.toggles,
+      `${opened.toggles} of ${schema.toggles}`);
+    // Dividers fence off clusters, not individual settings — the whole point of
+    // the compaction. One per boundary between groups (so groups − 1), plus the
+    // two that close the menu off: one before the notes, one before Reset.
+    check('dividers separate clusters, not every row',
+      opened.dividers === schema.groups - 1 + 2,
+      `${opened.dividers} dividers for ${schema.groups} groups`);
     check('the standalone Theme button is gone', !opened.themeButton);
     check('no native <select> in the topbar', opened.selects === 0, `${opened.selects} selects`);
     check('button reports expanded', opened.expanded === 'true');
@@ -151,10 +172,18 @@ async function main() {
         if (b) b.click();
         return !!b;
       };
+      // By label, not "the first submenu trigger": five settings are submenus
+      // now, and a reorder of the schema would silently point this at another
+      // one — which still opens a panel, so it would pass while testing nothing.
+      const openSub = (label) => {
+        const t = [...document.querySelectorAll('.menu-item.has-submenu')]
+          .find(x => x.firstElementChild?.textContent.trim() === label);
+        t?.click();
+        return !!t;
+      };
       const before = getComputedStyle(document.documentElement).fontSize;
       // Theme lives behind a submenu now: open it, then pick.
-      document.querySelector('.menu-item.has-submenu')?.click();
-      const okTheme = pick('Forest');
+      const okTheme = openSub('Theme') && pick('Forest');
       // By label, not by position: the schema's order is not this test's
       // business, and a stepper added above UI size would silently retarget it.
       const stepperFor = (label) => {
@@ -193,7 +222,15 @@ async function main() {
           .find(x => x.textContent.includes(label));
         if (b) b.click();
       };
+      // Both live behind submenus now. Re-found each time: choosing an option
+      // re-renders the menu, which tears every panel down and rebuilds it.
+      const openSub = (label) => {
+        [...document.querySelectorAll('.menu-item.has-submenu')]
+          .find(x => x.firstElementChild?.textContent.trim() === label)?.click();
+      };
+      openSub('Editor font');
       pick('Harald Text');
+      openSub('Editor line height');
       pick('Relaxed');
       const sc = document.querySelector('.cm-scroller');
       const cs = sc ? getComputedStyle(sc) : null;
@@ -220,7 +257,9 @@ async function main() {
     /* ── the theme submenu ──────────────────────────────────────────── */
     const sub = await cdp.evaluate(`(() => {
       document.getElementById('settings').click();
-      const trigger = document.querySelector('.menu-item.has-submenu');
+      // Named, not positional — see openSub above.
+      const trigger = [...document.querySelectorAll('.menu-item.has-submenu')]
+        .find(x => x.firstElementChild?.textContent.trim() === 'Theme');
       const label = trigger.textContent;
       trigger.click();
       const panel = document.querySelector('.submenu:not([hidden])');
@@ -247,7 +286,8 @@ async function main() {
       const pick = (l) => [...document.querySelectorAll('.menu-container .menu-item, .submenu .menu-item')]
         .find(x => x.textContent.includes(l))?.click();
       document.getElementById('settings').click();
-      document.querySelector('.menu-item.has-submenu')?.click();
+      [...document.querySelectorAll('.menu-item.has-submenu')]
+        .find(x => x.firstElementChild?.textContent.trim() === 'Theme')?.click();
       pick('Paper');
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     })()`);
@@ -509,8 +549,10 @@ async function main() {
     // Turn it on through the settings menu, the way a user would.
     await cdp.evaluate(`(() => {
       document.getElementById('settings').click();
-      const row = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
-        .find(b => /Toolbox$/.test(b.textContent.trim()));
+      // One ■/□ row now, not a "Browser menu / Toolbox" pair — and it is off, so
+      // clicking it turns it on.
+      const row = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-toggle')]
+        .find(b => /Toolbox on right-click/i.test(b.textContent));
       row.click();
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       return !!row;
@@ -1403,8 +1445,20 @@ async function main() {
       const ev = (el, t, dt) => el.dispatchEvent(
         new DragEvent(t, { bubbles: true, cancelable: true, dataTransfer: dt }));
       const dir = () => rows().find(r => r.dataset.dir && !r.dataset.dir.includes('/'));
-      const file = () => rows().find(r => r.dataset.path && !r.dataset.path.includes('/')
-        && !r.classList.contains('main'));
+      // Any draggable file that is not already inside the folder it is about to
+      // be dragged onto — dropping a file into its own parent is a no-op, and
+      // the tree is right not to light up for it.
+      //
+      // This used to ask for a file at the top level, which the homework fixture
+      // cannot supply by the time this runs: it has exactly two root files, and
+      // the drag test above moves the one that is not the main file into
+      // chapter/. What is under test here is whether the highlight clears, and
+      // that does not care where the dragged file lives.
+      const file = () => {
+        const target = dir()?.dataset.dir;
+        return rows().find(r => r.dataset.path && !r.classList.contains('main')
+          && r.dataset.path.split('/')[0] !== target);
+      };
 
       // Over the panel, then over a row: exactly one is ever lit.
       let dt = new DataTransfer();
