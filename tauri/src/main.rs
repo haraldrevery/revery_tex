@@ -387,6 +387,41 @@ fn write_file(
     write_file_impl(&path, &content, &get_root(&state)?, want.as_ref())
 }
 
+/// Write bytes rather than text — an image or a font dropped into the project.
+///
+/// Base64 in, mirroring `read_binary_file` in the other direction, and a
+/// separate command rather than a mode on `write_file`: every existing caller
+/// passes UTF-8, and one function guessing which it was handed is how a figure
+/// gets a mangled re-encode written over it.
+///
+/// No `expect` stamp. These come from a drop, not from an editor buffer, so
+/// there is no read-time identity that could have gone stale — the caller
+/// refuses a path that already exists instead of racing it.
+///
+/// Same containment as every other write: `safe_path_inside` against the
+/// canonicalised root, parents created, atomic replace.
+fn write_binary_impl(path: &str, b64: &str, root: &Path) -> Result<FileStamp, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let abs = safe_path_inside(&root.join(path).to_string_lossy(), root)?;
+    let bytes = STANDARD
+        .decode(b64.as_bytes())
+        .map_err(|e| format!("Cannot decode {path}: {e}"))?;
+    if let Some(parent) = abs.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
+    }
+    atomic_write_file(&tmp_for(&abs), &abs, &bytes)?;
+    stamp_of(&abs)
+}
+
+#[tauri::command]
+fn write_binary_file(
+    path: String,
+    content: String,
+    state: State<'_, RootPath>,
+) -> Result<FileStamp, String> {
+    write_binary_impl(&path, &content, &get_root(&state)?)
+}
+
 /* ── delete and rename ───────────────────────────────────────────────── */
 //
 // The first operations here that destroy something. Every rule they follow is
@@ -578,6 +613,7 @@ fn main() {
             read_text_file,
             read_binary_file,
             write_file,
+            write_binary_file,
             delete_file,
             rename_file,
             write_backup,
@@ -713,6 +749,44 @@ mod tests {
         let root = tmpdir("save-nested");
         write_file_impl("chapters/new/intro.tex", "hello", &root, None).unwrap();
         assert_eq!(fs::read_to_string(root.join("chapters/new/intro.tex")).unwrap(), "hello");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    // The binary write. Mirrors the Node cases in test/fs_core.test.js — a
+    // containment rule enforced on one write path and not the other is not
+    // enforced, and this is a second way to put bytes on a user's disk.
+    #[test]
+    fn binary_write_round_trips_bytes_untouched() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let root = tmpdir("binwrite");
+        // A PNG header: the 0x0D 0x0A pair a text round-trip mangles, and a
+        // 0x00 that would truncate a C string.
+        let png: [u8; 10] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff];
+        write_binary_impl("fig/logo.png", &STANDARD.encode(png), &root).unwrap();
+        assert_eq!(fs::read(root.join("fig/logo.png")).unwrap(), png);
+        assert!(!root.join("fig/logo.png.revery_tmp").exists(), "temp must not survive");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn binary_write_refuses_to_escape_the_root() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let root = tmpdir("bin-escape");
+        let outside = tmpdir("bin-escape-outside");
+        fs::write(outside.join("victim.png"), b"do not touch").unwrap();
+
+        let rel = format!("../{}/victim.png", outside.file_name().unwrap().to_string_lossy());
+        assert!(write_binary_impl(&rel, &STANDARD.encode(b"pwned"), &root).is_err());
+        assert_eq!(fs::read_to_string(outside.join("victim.png")).unwrap(), "do not touch");
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn binary_write_rejects_malformed_base64_rather_than_writing_rubbish() {
+        let root = tmpdir("bin-b64");
+        assert!(write_binary_impl("x.png", "not!valid!base64", &root).is_err());
+        assert!(!root.join("x.png").exists(), "nothing may be left behind");
         fs::remove_dir_all(&root).ok();
     }
 

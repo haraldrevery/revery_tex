@@ -169,8 +169,18 @@ export class WasmTexEngine {
       // rather than swallowed.
       let runBibtex = false;
       if (bibtex === 'biber') {
-        this._log('warn', 'this document uses biblatex, which needs biber — no WASM build has it. ' +
-                          'Using the .bbl in the project if there is one; a system TeX Live can build it.');
+        // Three ways forward, named, because "biber is unavailable" on its own
+        // leaves someone with an empty bibliography and nothing to try. The
+        // backend switch is a real option now that biblatex.bst is in the
+        // bundle — and it is offered, never taken automatically: it changes how
+        // the bibliography sorts and how names are parsed, so it is the
+        // author's call, not the engine's.
+        this._log('warn', 'this document uses biblatex, which needs biber — no WASM build has it, ' +
+                          'because biber is Perl.');
+        this._log('warn', '  · using the .bbl in the project if it ships one (citations may be stale)');
+        this._log('warn', '  · or set \\usepackage[backend=bibtex]{biblatex} — bundled bibtex8 can ' +
+                          'build it, with weaker sorting, name handling and UTF-8');
+        this._log('warn', '  · or switch to a system TeX Live on the desktop, which has real biber');
       } else if (bibtex === 'bibtex' || bibtex === true) {
         runBibtex = true;
       }

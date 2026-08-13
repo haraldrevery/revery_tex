@@ -21,6 +21,22 @@ function b64ToBytes(b64) {
   return out;
 }
 
+/**
+ * Bytes to base64, for the two shells whose IPC carries strings.
+ *
+ * Chunked: `String.fromCharCode(...bytes)` spreads every byte into an argument
+ * list and blows the stack somewhere around a few hundred KB — which is a small
+ * image, so it would fail on exactly the files this exists to carry.
+ */
+function bytesToB64(bytes) {
+  let bin = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+
 /** Desktop: real files, via commands that validate every path against the root. */
 const tauriImpl = {
   env: 'tauri',
@@ -32,6 +48,7 @@ const tauriImpl = {
   readTextFile: (path) => invoke('read_text_file', { path }),
   readBinaryFile: (path) => invoke('read_binary_file', { path }).then(b64ToBytes),
   writeFile: (path, content, expect) => invoke('write_file', { path, content, expect: expect || null }),
+  writeBinaryFile: (path, bytes) => invoke('write_binary_file', { path, content: bytesToB64(bytes) }),
   deleteFile: (path) => invoke('delete_file', { path }),
   renameFile: (from, to) => invoke('rename_file', { from, to }),
 
@@ -74,6 +91,7 @@ const electronImpl = isElectron ? {
   readTextFile: (path) => window.electronAPI.readTextFile(path),
   readBinaryFile: (path) => window.electronAPI.readBinaryFile(path).then(b64ToBytes),
   writeFile: (path, content, expect) => window.electronAPI.writeFile(path, content, expect || null),
+  writeBinaryFile: (path, bytes) => window.electronAPI.writeBinaryFile(path, bytesToB64(bytes)),
   deleteFile: (path) => window.electronAPI.deleteFile(path),
   renameFile: (from, to) => window.electronAPI.renameFile(from, to),
 

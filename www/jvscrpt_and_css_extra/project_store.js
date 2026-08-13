@@ -70,7 +70,17 @@ export function inferBibTool(src) {
   if (/\\(?:addbibresource|printbibliography)|\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{biblatex\}/.test(src)) {
     return 'biber';
   }
-  if (/\\bibliography\{|\\bibliographystyle\{/.test(src)) return 'bibtex';
+  // \bibliography{} and nothing else. It is what writes \bibdata into the .aux,
+  // and \bibdata is the only thing BibTeX can act on — without it the run ends
+  // in "I found no \bibdata command".
+  //
+  // \bibliographystyle alone is not enough, and used to be accepted here. It is
+  // inert on its own and people leave it behind: examensLatexv5 sets
+  // \bibliographystyle{vancouver}, has \bibliography{kallor} commented out, and
+  // hand-writes its bibliography in manuellreferens.tex. That document needs no
+  // tool at all, and running one on it reported a citation failure for a
+  // bibliography that was already correct.
+  if (/\\bibliography\{/.test(src)) return 'bibtex';
   return null;
 }
 

@@ -424,6 +424,16 @@ button.primary { color:var(--text); border-color:var(--accent) }
    The focus ring is deliberately kept for that reason. */
 .node.binary, .node.dim-note { color:var(--text-dim); cursor:default }
 .node.binary:hover { background:none; color:var(--text-dim) }
+/* Drag and drop. The row being carried dims; the folder it would land in is
+   outlined rather than filled, because the fill is already what hover means and
+   the two happen at once. */
+.node.dragging { opacity:.4 }
+.node.dropinto { background:var(--bg-hover); color:var(--text);
+  box-shadow:inset 0 0 0 1px var(--accent) }
+/* A drop anywhere else in the panel means the project root, so the panel itself
+   is the target and says so. */
+#filetree.droproot { box-shadow:inset 0 0 0 1px var(--accent) }
+
 .node.main::after { content:' ■'; color:var(--accent) }
 .node.dirty::after { content:' •'; color:var(--warn) }
 .node.main.dirty::after { content:' ■ •'; color:var(--warn) }

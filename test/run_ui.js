@@ -66,8 +66,13 @@ async function main() {
   await requireServer();
   const { cdp, cleanup, pageErrors } = await launch({ url: BASE, port: CDP_PORT });
   try {
+    // Answered, and also *recorded*. A confirm() that stops a destructive
+    // action is a feature, and the only way to assert one fired is to keep
+    // what it said — accepting it silently makes it invisible to every test.
+    const dialogs = [];
     cdp.on((msg) => {
       if (msg.method === 'Page.javascriptDialogOpening') {
+        dialogs.push(msg.params.message || '');
         cdp.send('Page.handleJavaScriptDialog', { accept: true }).catch(() => {});
       }
     });
@@ -1291,6 +1296,184 @@ async function main() {
     })()`, true);
     // The harness answers confirm() with OK, so this is the confirmed path.
     check('delete removes the file', !deleted.paths.includes('notes/renamed.tex'), deleted.status);
+
+    /* ── drag and drop in the tree ──────────────────────────────────── */
+    // Real drag gestures cannot be synthesised over CDP without the OS drag
+    // loop, so these dispatch the DragEvents the handlers actually listen for,
+    // carrying a real DataTransfer. That exercises every line except the
+    // browser's own drag rendering.
+    const dnd = await cdp.evaluate(`(async () => {
+      const rows = () => [...document.querySelectorAll('#filetree .node')];
+      const paths = () => rows().filter(r => r.dataset.path).map(r => r.dataset.path);
+      const rowFor = (p) => rows().find(r => r.dataset.path === p);
+      const dirRow = (d) => rows().find(r => r.dataset.dir === d);
+
+      const drag = (fromEl, toEl) => {
+        const dt = new DataTransfer();
+        fromEl.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+        toEl.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
+        toEl.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+        fromEl.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
+      };
+
+      const mainPath = document.querySelector('#filetree .node.main')?.dataset.path;
+
+      // 1. file → folder. Deliberately a file at the *root* and a folder that
+      //    is not already its parent, or the move is correctly a no-op and the
+      //    test would be measuring its own setup.
+      const folder = rows().find(r => r.dataset.dir && !r.dataset.dir.includes('/'));
+      const folderPath = folder ? folder.dataset.dir : null;
+      const mover = rows().find(r => r.dataset.path
+        && !r.dataset.path.includes('/')       // at the root
+        && r.dataset.path !== mainPath);       // not the main file
+      const movedFrom = mover ? mover.dataset.path : null;
+
+      let landed = null;
+      if (folder && mover) {
+        drag(mover, folder);
+        await new Promise(r => setTimeout(r, 80));
+        // An earlier test folded this directory and the fold is persisted, so
+        // the row that just arrived inside it is not rendered. Open it before
+        // looking, or this measures the fold rather than the move.
+        const reFolder = rows().find(r => r.dataset.dir === folderPath);
+        if (reFolder && reFolder.classList.contains('folded')) {
+          reFolder.click();
+          await new Promise(r => setTimeout(r, 80));
+        }
+        landed = paths().find(p => p === folderPath + '/' + movedFrom);
+      }
+
+      // 2. the main file must not even offer to be dragged
+      const mainRow = document.querySelector('#filetree .node.main');
+      const mainDraggable = mainRow ? mainRow.draggable : null;
+
+      // 3. a folder cannot be dropped into itself. Asserted on the tree, not on
+      //    the status line — the refusal is silent by design (dragover never
+      //    accepts, so drop never fires) and the status line still holds
+      //    whatever the previous test left there.
+      const selfDir = rows().find(r => r.dataset.dir);
+      const beforeSelf = paths().join('|');
+      if (selfDir) {
+        drag(selfDir, selfDir);
+        await new Promise(r => setTimeout(r, 60));
+      }
+      const selfUnchanged = paths().join('|') === beforeSelf;
+
+      // 4. a file dropped on the window must not navigate away
+      const ev = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() });
+      document.getElementById('editor').dispatchEvent(ev);
+      const windowDropPrevented = ev.defaultPrevented;
+
+      const now = paths();
+      return {
+        movedFrom, folderPath, landed,
+        // Row counts are not the invariant here — folding changes them. These
+        // are: the file is at its new path exactly once, and gone from the old.
+        copiesAtNewPath: now.filter(p => p === folderPath + '/' + movedFrom).length,
+        stillAtOldPath: now.includes(movedFrom),
+        mainDraggable, selfUnchanged, windowDropPrevented,
+        rowsAreDraggable: rows().filter(r => r.draggable).length
+      };
+    })()`, true);
+    check('tree rows are draggable', dnd.rowsAreDraggable > 0, `${dnd.rowsAreDraggable} draggable rows`);
+    check('dragging a file onto a folder moves it',
+      !!dnd.landed, `${dnd.movedFrom} → ${dnd.landed || 'did not move'}`);
+    check('the file is moved, not copied',
+      dnd.copiesAtNewPath === 1 && !dnd.stillAtOldPath,
+      `${dnd.copiesAtNewPath} at the new path, ${dnd.stillAtOldPath ? 'still' : 'gone'} from the old`);
+    check('the main file cannot be dragged', dnd.mainDraggable === false, String(dnd.mainDraggable));
+    check('a folder refuses to be dropped into itself', dnd.selfUnchanged);
+    // Without a handler the browser navigates to the dropped file and the app
+    // is simply gone, unsaved work with it.
+    check('a file dropped outside the tree does not navigate away', dnd.windowDropPrevented);
+
+    // The highlight must belong to a drag that is actually happening. It did
+    // not: a row's drop calls stopPropagation, so the container's drop — the
+    // only thing clearing the panel outline — never ran after a successful drop
+    // onto a folder, and the panel stayed lit until a reload. A cancelled drag
+    // left it the same way.
+    const glow = await cdp.evaluate(`(async () => {
+      const tree = document.getElementById('filetree');
+      const rows = () => [...tree.querySelectorAll('.node')];
+      const lit = () => ({
+        rows: document.querySelectorAll('.node.dropinto').length,
+        dragging: document.querySelectorAll('.node.dragging').length,
+        panel: tree.classList.contains('droproot')
+      });
+      const ev = (el, t, dt) => el.dispatchEvent(
+        new DragEvent(t, { bubbles: true, cancelable: true, dataTransfer: dt }));
+      const dir = () => rows().find(r => r.dataset.dir && !r.dataset.dir.includes('/'));
+      const file = () => rows().find(r => r.dataset.path && !r.dataset.path.includes('/')
+        && !r.classList.contains('main'));
+
+      // Over the panel, then over a row: exactly one is ever lit.
+      let dt = new DataTransfer();
+      ev(file(), 'dragstart', dt);
+      ev(tree, 'dragover', dt);
+      const onPanel = lit();
+      ev(dir(), 'dragover', dt);
+      const onRow = lit();
+      ev(dir(), 'drop', dt);
+      await new Promise(r => setTimeout(r, 200));
+      const afterDrop = lit();
+
+      // A drag ended without a drop — Escape, or released over nothing.
+      dt = new DataTransfer();
+      const src = file();
+      if (src) { ev(src, 'dragstart', dt); ev(tree, 'dragover', dt); ev(src, 'dragend', dt); }
+      await new Promise(r => setTimeout(r, 80));
+      const afterCancel = lit();
+
+      return { onPanel, onRow, afterDrop, afterCancel };
+    })()`, true);
+    check('the panel lights up while a drag is over it',
+      glow.onPanel.panel && glow.onPanel.rows === 0);
+    check('a row and the panel are never lit at once',
+      glow.onRow.rows === 1 && !glow.onRow.panel,
+      `rows=${glow.onRow.rows} panel=${glow.onRow.panel}`);
+    check('every highlight clears once the drop is done',
+      !glow.afterDrop.panel && glow.afterDrop.rows === 0 && glow.afterDrop.dragging === 0,
+      JSON.stringify(glow.afterDrop));
+    check('and clears when a drag is cancelled instead',
+      !glow.afterCancel.panel && glow.afterCancel.rows === 0 && glow.afterCancel.dragging === 0,
+      JSON.stringify(glow.afterCancel));
+
+    // Moving a file that something \include's breaks the reference, and LaTeX
+    // only *warns* about a missing \include — so the document still compiles,
+    // shorter, with nothing to say why. That is how the homework template
+    // silently lost five pages.
+    dialogs.length = 0;
+    const inc = await cdp.evaluate(`(async () => {
+      const tree = document.getElementById('filetree');
+      const rows = () => [...tree.querySelectorAll('.node')];
+      const ev = (el, t, dt) => el.dispatchEvent(
+        new DragEvent(t, { bubbles: true, cancelable: true, dataTransfer: dt }));
+      const m = await import('./jvscrpt_and_css_extra/document_model.js');
+
+      // A file the main document actually reads, found through the same index
+      // the app warns from.
+      const included = rows().find(r => r.dataset.path
+        && /\\.tex$/.test(r.dataset.path)
+        && !r.classList.contains('main'));
+      if (!included) return { skipped: true };
+      const dt = new DataTransfer();
+      const dir = rows().find(r => r.dataset.dir
+        && !r.dataset.dir.includes('/')
+        && !included.dataset.path.startsWith(r.dataset.dir + '/'));
+      if (!dir) return { skipped: true };
+      ev(included, 'dragstart', dt);
+      ev(dir, 'dragover', dt);
+      ev(dir, 'drop', dt);
+      await new Promise(r => setTimeout(r, 250));
+      return { skipped: false, moved: included.dataset.path, into: dir.dataset.dir };
+    })()`, true);
+    if (inc.skipped) {
+      check('a move that breaks an \\include asks first', true, 'no suitable file in this fixture');
+    } else {
+      check('a move that breaks an \\include asks first',
+        dialogs.some(d => /\\input\/\\include|will break/i.test(d)),
+        dialogs[0] ? dialogs[0].split('\n')[0] : 'no dialog was shown');
+    }
 
     /* ── background texture ─────────────────────────────────────────── */
     const texture = await cdp.evaluate(`(async () => {

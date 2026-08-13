@@ -1,14 +1,14 @@
 {
-  "generated": "2026-08-11T14:51:22.047Z",
+  "generated": "2026-08-13T00:53:09.001Z",
   "parts": [
     {
       "part": "core",
       "name": "texlive-slim-core",
-      "files": 1231,
-      "virtualBytes": 35795996,
-      "dataBytes": 21753753,
-      "jsBytes": 683634,
-      "package_uuid": "sha256-f06637ce72251825243dc0022c4840adc5bbdf1e04e69e1496e6b58e43b00ca4"
+      "files": 1240,
+      "virtualBytes": 36027848,
+      "dataBytes": 21860571,
+      "jsBytes": 686152,
+      "package_uuid": "sha256-922319185c682e339de884c2aed9790ae35da68fd0cfeed63dffee7ca9c2f93a"
     },
     {
       "part": "icu",
@@ -127,9 +127,9 @@
     "count": 309
   },
   "totals": {
-    "files": 3229,
-    "virtualBytes": 107938659,
-    "dataBytes": 65580178
+    "files": 3238,
+    "virtualBytes": 108170511,
+    "dataBytes": 65686996
   },
   "byReason": {
     "infra": {
@@ -143,6 +143,10 @@
     "common": {
       "n": 359,
       "b": 25961649
+    },
+    "always": {
+      "n": 9,
+      "b": 231852
     },
     "traced": {
       "n": 306,

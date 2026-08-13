@@ -337,6 +337,30 @@ export const environmentsOfKind = (project, kind) =>
   projectIndex(project).environments.filter(e => e.kind === kind);
 
 /**
+ * Which files `\input` or `\include` the given path.
+ *
+ * For warning before a move. Moving a file is a filesystem operation and the
+ * `\include{...}` naming it is text, so nothing keeps the two in step — and
+ * LaTeX treats a missing `\include` as a *warning*, not an error. The document
+ * then compiles, shorter, with no failure anywhere: the homework template lost
+ * five pages this way and the only sign was a page count.
+ *
+ * Uses the same `resolveInput` the include graph is built from, so "what the
+ * document actually reads" and "what a move would break" cannot disagree.
+ *
+ * @returns {string[]} paths of the referencing files, sorted
+ */
+export function referencesTo(project, target) {
+  if (!project || !target) return [];
+  const { inputs } = projectIndex(project);
+  const out = [];
+  for (const [from, raws] of Object.entries(inputs)) {
+    if (raws.some(raw => resolveInput(raw, from, project.files) === target)) out.push(from);
+  }
+  return out.sort();
+}
+
+/**
  * Sections in reading order, each flagged with whether the document includes it.
  *
  * Files the main file never reads still appear, at the end and marked — a

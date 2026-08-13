@@ -97,6 +97,66 @@ test('write refuses to escape the root, leaving the target untouched', () => {
   fs.rmSync(outside, { recursive: true, force: true });
 });
 
+/* ── the binary write ─────────────────────────────────────────────────── */
+//
+// A second way to write to disk gets the same scrutiny as the first. These
+// mirror the text cases above, because a containment rule enforced on one write
+// path and not the other is not enforced.
+
+test('binary write round-trips bytes untouched', () => {
+  const root = tmpdir('binwrite');
+  // A PNG header, including the 0x0D 0x0A pair that a text round-trip mangles
+  // and a 0x00 that would truncate a C string.
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
+  core.writeBinaryFile(root, 'fig/logo.png', png.toString('base64'));
+  assert.deepEqual(core.readBinaryFile(root, 'fig/logo.png'), png.toString('base64'));
+  assert.deepEqual(fs.readFileSync(path.join(root, 'fig', 'logo.png')), png);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('binary write creates missing subdirectories', () => {
+  const root = tmpdir('binmkdir');
+  core.writeBinaryFile(root, 'a/b/c/x.png', Buffer.from([1, 2, 3]).toString('base64'));
+  assert.ok(fs.existsSync(path.join(root, 'a', 'b', 'c', 'x.png')));
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('binary write refuses to escape the root, leaving the target untouched', () => {
+  const root = tmpdir('bin-escape');
+  const outside = tmpdir('bin-escape-outside');
+  const victim = path.join(outside, 'victim.png');
+  fs.writeFileSync(victim, 'do not touch');
+
+  const rel = path.join('..', path.basename(outside), 'victim.png');
+  assert.throws(() => core.writeBinaryFile(root, rel, Buffer.from('pwned').toString('base64')),
+    /escapes/);
+  assert.equal(fs.readFileSync(victim, 'utf8'), 'do not touch');
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(outside, { recursive: true, force: true });
+});
+
+test('binary write refuses to create through an escaping symlink',
+  { skip: process.platform === 'win32' }, () => {
+    const root = tmpdir('bin-symlink');
+    const outside = tmpdir('bin-symlink-outside');
+    fs.symlinkSync(outside, path.join(root, 'out'));
+    assert.throws(() => core.writeBinaryFile(root, 'out/evil.png', 'AAAA'), /escapes/);
+    assert.ok(!fs.existsSync(path.join(outside, 'evil.png')));
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  });
+
+test('repeated binary writes keep the last one and leave no junk', () => {
+  const root = tmpdir('bin-repeat');
+  for (let i = 0; i < 5; i++) {
+    core.writeBinaryFile(root, 'x.bin', Buffer.from([i, i, i]).toString('base64'));
+  }
+  assert.deepEqual(fs.readFileSync(path.join(root, 'x.bin')), Buffer.from([4, 4, 4]));
+  const junk = fs.readdirSync(root).filter(f => /revery_(tmp|bak)/.test(f));
+  assert.deepEqual(junk, [], `left behind: ${junk}`);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
 test('repeated saves keep the last write and leave no junk', () => {
   const root = tmpdir('save-repeat');
   for (let i = 0; i < 5; i++) core.writeFile(root, 'main.tex', `revision ${i}`);
@@ -269,12 +329,14 @@ test('both shells refuse the same things', () => {
   const rust = fs.readFileSync(
     path.join(__dirname, '..', 'tauri', 'src', 'main.rs'), 'utf8');
   for (const marker of ['fn delete_file_impl', 'fn rename_file_impl',
+                        'fn write_binary_file',
                         'it does not exist', 'that already exists',
                         'remove_dir(', 'safe_path_inside']) {
     assert.ok(rust.includes(marker), `Rust is missing ${marker}`);
   }
   const js = fs.readFileSync(path.join(__dirname, '..', 'electron', 'fs_core.js'), 'utf8');
   for (const marker of ['function deleteFile', 'function renameFile',
+                        'function writeBinaryFile',
                         'it does not exist', 'that already exists',
                         'rmdirSync', 'safePathInside']) {
     assert.ok(js.includes(marker), `Electron is missing ${marker}`);
@@ -282,8 +344,13 @@ test('both shells refuse the same things', () => {
   // And both are reachable from their shells.
   const main = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.js'), 'utf8');
   assert.ok(main.includes('fs:deleteFile') && main.includes('fs:renameFile'));
+  assert.ok(main.includes('fs:writeBinaryFile'), 'the binary write must be exposed over IPC');
   assert.ok(rust.includes('delete_file,') && rust.includes('rename_file,'),
     'commands must be in the Tauri invoke handler, or the renderer cannot call them');
+  // The one most easily forgotten: a command that exists but is not registered
+  // fails at runtime only, with "command not found", and only on Tauri.
+  assert.ok(rust.includes('write_binary_file,'),
+    'write_binary_file is not in the invoke handler — the renderer cannot call it');
 });
 
 test('backup keys are stable and distinct', () => {

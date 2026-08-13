@@ -87,7 +87,7 @@ rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-t
         │ TexEngine.compile()                │ NativeAPI.readTextFile() …
         ▼                                    ▼
    WASM TeX Live 2026            tauri/src/main.rs  ·  electron/fs_core.js
-   (Web Worker)                  same 9 operations, same containment rule
+   (Web Worker)                  same 10 operations, same containment rule
 ```
 
 ### Two abstractions, and the rule they share
@@ -113,7 +113,7 @@ const r = await engine.compile({
 Swapping the WASM backend for a native one (Tectonic, a system TeX Live) is a
 single-file change.
 
-**`NativeAPI`** (`native_api.js`) — touches the filesystem. Nine calls, four
+**`NativeAPI`** (`native_api.js`) — touches the filesystem. Ten calls, four
 backends, and the UI hides whatever a backend cannot do:
 
 ```js
@@ -132,6 +132,38 @@ if (NativeAPI.openFolder) { /* show the Open button */ }
 to the folder a project came from, and a method by that name which cannot save
 is exactly the half-truth that loses someone's work. The app offers Import
 instead, and shows a standing bar saying where the work is being kept.
+
+`writeBinaryFile` is the tenth call, added for files dragged in from the
+desktop. It is separate from `writeFile` rather than a flag on it: every other
+caller passes a string and means UTF-8, and one function deciding which it was
+handed by sniffing the argument is one coercion away from writing
+`[object Object]` over someone's figure. It carries no `expect` stamp either —
+a dropped file has no read-time identity that could have gone stale, so the
+caller refuses an existing path instead of racing it.
+
+### The Files panel
+
+Drag a row onto a folder to move it; onto the panel background to move it to the
+project root. Rename and drag are the same operation and share one
+`moveEntry()`, because two copies of its guards is how a drop ends up able to
+move the main file that rename refuses to touch. A folder dropped into its own
+descendant is refused — it is the one move that silently destroys a subtree.
+
+Files dragged in from the desktop are added to the project. Everywhere *else* on
+the page, a drop is cancelled and nothing happens: with no handler at all the
+browser navigates to the dropped file, and the app — with any unsaved work in it
+— is simply gone.
+
+**Moving a file that something `\include`s asks first.** The move is a
+filesystem operation and the `\include{chapter/problem_5}` naming it is text;
+nothing keeps the two in step, and **LaTeX treats a missing `\include` as a
+warning, not an error** — so the document still compiles, shorter, with no
+failure anywhere to say why. The only visible sign is a page count. The warning
+names the referencing files and lets you go ahead; it never rewrites your
+source, because those paths are the author's text and come in several
+spellings. `referencesTo()` in `document_model.js` answers the question from the
+same include graph the outline is built from, so "what the document reads" and
+"what a move would break" cannot disagree.
 
 ### Settings are a table, not a variable each
 
@@ -191,6 +223,13 @@ output. From there:
    files it rejects, so `\setsansfont{Latin Modern Sans}` needs a font present
    that no trace will ever mention.
 5. A curated list of common packages absent from the test documents.
+6. `ALWAYS_DIRS`, for directories a trace **cannot** reach. Currently the
+   BibTeX styles: `bibtex/bst/base/` and `bibtex/bst/biblatex/`. This is the
+   blind spot of a trace-driven build, and it shipped for real — bibtex8 is in
+   the wasm and wired into all three drivers, but no test document used classic
+   `\bibliography`, so no trace ever opened a `.bst`, so the bundle contained
+   none of them and `\bibliographystyle{plain}` failed for every real document
+   while the gate stayed green. The `bibtex` gate fixture now covers it.
 
 Output is four data packages, each under the 50 MB git limit, plus the ~21 MB
 ICU data XeTeX cannot start without. The build is **deterministic** — rebuilding
@@ -279,11 +318,19 @@ Protocol and compiles four real LaTeX projects, asserting exact page counts:
 | `book-legacy` | XeLaTeX | 14 |
 | `book` | XeLaTeX + makeindex | 49 |
 | `homework` | XeLaTeX | 27 |
+| `bibtex` | pdfLaTeX + bibtex8 | 1, and the citations must resolve |
 | `missing-pkg` | — | must **fail**, naming `pgfornament.sty` |
 
-That last row matters as much as the others: with a slim texmf, "package not in
-the bundle" is the most likely failure, so the app naming it is a tested feature
-rather than an error path.
+The last two rows matter as much as the others. With a slim texmf, "package not
+in the bundle" is the most likely failure, so the app naming it is a tested
+feature rather than an error path.
+
+And `bibtex` is there because a page count is not always enough: a document with
+no `.bst` still typesets, at the right length, with `[?]` where every citation
+should be. So that row also asserts what the log must **not** contain
+(`rejectLog` in `test/serve.js`) — no missing style file, no undefined citation.
+It exists because classic BibTeX was broken in every shipped bundle and five
+green page counts said nothing about it.
 
 Fixtures live in `../latex_project_tests/`. `test/serve.js` applies a small
 in-flight patch overlay to `homework` (EPS logo → PNG, system fonts → Latin
@@ -326,8 +373,12 @@ a document that compiles in one shell and not the other is undiagnosable.
 
 ## Known limits
 
-- **No biber in the bundled engine.** No WASM build has it — ship a prebuilt
-  `.bbl`, or switch to a system TeX Live on the desktop. `makeindex` works.
+- **No biber in the bundled engine.** No WASM build has it, because biber is
+  Perl. Three ways round it, and the app names all three in the log: ship a
+  prebuilt `.bbl`, set `\usepackage[backend=bibtex]{biblatex}` so bundled
+  bibtex8 builds it (weaker sorting, name handling and UTF-8 — it is biblatex's
+  legacy backend), or switch to a system TeX Live on the desktop. Classic
+  BibTeX and `makeindex` both work as they are.
 - **Fonts must be referenced by file, not by system name** — WASM has no host
   font database. `\setmainfont{Times New Roman}` cannot work.
 - **No EPS.** That needs Ghostscript. Convert to PDF or PNG first.

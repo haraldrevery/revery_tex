@@ -20,7 +20,7 @@ const CDP_PORT = Number(process.env.CDP_PORT) || 9333;
 const TIMEOUT_MS = Number(process.env.COMPILE_TIMEOUT) || 900000;
 const LOG_DIR = path.join(__dirname, '..', 'build_tools', 'phase0_logs');
 
-const ALL = ['cv', 'book-legacy', 'book', 'homework', 'missing-pkg'];
+const ALL = ['cv', 'book-legacy', 'book', 'homework', 'bibtex', 'missing-pkg'];
 const targets = process.argv.slice(2).filter(a => !a.startsWith('-'));
 const wanted = targets.length ? targets : ALL;
 
@@ -186,10 +186,16 @@ async function evaluate(cdp, expression, awaitPromise = true) {
     let failures = 0;
     for (const r of results) {
       const expected = r.expectPages;
+      // Some failures typeset perfectly. A missing .bst renders [?] where the
+      // citation should be and still produces the right page count, so a
+      // project can name a pattern its log must not contain.
+      const badLog = r.rejectLog && r.log
+        ? (new RegExp(r.rejectLog).exec(r.log) || [null])[0]
+        : null;
       // A project marked expectFailure must fail *and* name the package.
       const pass = r.expectFailure
         ? (!r.ok && (r.missingPackages || []).some(m => m.includes(r.expectFailure)))
-        : r.ok && (expected == null || r.pages === expected);
+        : r.ok && (expected == null || r.pages === expected) && !badLog;
       if (!pass) failures++;
       console.log(
         `  ${pass ? 'PASS' : 'FAIL'}  ${r.project.padEnd(13)} ` +
@@ -198,6 +204,11 @@ async function evaluate(cdp, expression, awaitPromise = true) {
           : `pages=${String(r.pages ?? '-').padStart(3)} expected=${String(expected ?? '-').padStart(3)}`) +
         `  ${r.seconds}s`
       );
+      // Without this the right page count and a FAIL sit side by side with no
+      // explanation anywhere.
+      if (badLog) {
+        console.log(`        the log contains what this project forbids: "${badLog.trim()}"`);
+      }
       if (pass && r.expectPagesWhy) {
         console.log(`        note: reference build is ${r.referencePages}pp — ${r.expectPagesWhy}`);
       }

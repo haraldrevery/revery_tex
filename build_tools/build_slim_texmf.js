@@ -53,6 +53,25 @@ const COMMON_PACKAGES = [
   'threeparttable', 'makecell', 'colortbl', 'rotating', 'pdflscape', 'afterpage'
 ];
 
+// Directories no trace can ever reach, kept whole regardless.
+//
+// COMMON_PACKAGES matches path *segments*, which cannot express these: the
+// segment for bibtex/bst/base/ is `base`, which also names the LaTeX kernel at
+// tex/latex/base/. So they get their own rule.
+//
+// This is the case the trace-driven build cannot see by construction. bibtex8
+// is compiled into busytex.wasm and wired into all three drivers, but not one
+// test document uses classic \bibliography — cv and homework hand-write a
+// thebibliography, book uses biblatex, missing-pkg fails on purpose. So no
+// trace ever opened a .bst, the repacker kept none of them, and every real
+// document saying \bibliographystyle{plain} failed with "I couldn't open style
+// file plain.bst". Shipping a bibliography engine with no styles to run is not
+// a slim bundle, it is a broken one.
+const ALWAYS_DIRS = [
+  '/bibtex/bst/base/',      // plain, unsrt, abbrv, alpha, acm, apalike, ieeetr, siam
+  '/bibtex/bst/biblatex/'   // biblatex's bibtex backend, for documents with no biber
+];
+
 // Dropped outright. .afm are Type1 metrics consumed by fontinst/afm2tfm at
 // distribution-build time; TeX itself reads .tfm and the .pfb. /source/ and
 // /doc/ are never opened at runtime.
@@ -166,6 +185,8 @@ function selectFiles(all, traced) {
     if (tracedDirs.has(dir) && CLOSURE_ROOTS.some(r => n.includes(r))) {
       reasons.set(n, 'closure'); return true;
     }
+
+    if (ALWAYS_DIRS.some(d => n.includes(d))) { reasons.set(n, 'always'); return true; }
 
     const segs = n.split('/');
     if (COMMON_PACKAGES.some(c => segs.includes(c))) { reasons.set(n, 'common'); return true; }

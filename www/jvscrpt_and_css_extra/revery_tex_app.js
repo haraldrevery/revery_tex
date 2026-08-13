@@ -29,8 +29,9 @@ import {
 } from './background_image.js';
 import { initOutline, refreshOutline, scheduleOutline, applyOutlineVisibility } from './outline.js';
 import { buildTree, flattenTree, normalizePath } from './file_tree.js';
+import { referencesTo } from './document_model.js';
 import { $, download } from './dom.js';
-import { readProjectFromDisk, readProjectFromFixture } from './project_store.js';
+import { readProjectFromDisk, readProjectFromFixture, TEXT_EXT_RE } from './project_store.js';
 import {
   initLogConsole, rawLog, clearLog, setStatus, showTab, togglePanel,
   setIssues, getIssues, hasErrors, logText
@@ -495,10 +496,306 @@ function renderTree() {
       else n.onclick = () => openFile(node.path);
       shown++;
     }
+    makeRowDraggable(n, node);
     tree.appendChild(n);
   }
 
   $('filecount').textContent = `${shown} file${shown === 1 ? '' : 's'}`;
+}
+
+// ── drag and drop in the tree ──────────────────────────────────────────
+//
+// Two different drags land here and they are not the same thing:
+//
+//   - a row dragged from this tree, which *moves* it (dragOrigin is set)
+//   - a file dragged in from the desktop, which *adds* it
+//
+// `dataTransfer.types` is the only thing readable during dragover — the actual
+// data is withheld until drop — so an internal drag is recognised by the
+// private MIME below, and anything carrying 'Files' is an import.
+
+const DRAG_MIME = 'application/x-revery-tex-path';
+
+/** The row being dragged. dataTransfer cannot be read during dragover. */
+let dragOrigin = null;
+
+// Two node shapes reach here and they mark a directory differently: the render
+// loop passes `flattenTree` nodes, which carry `type: 'dir'`, while the
+// context-menu handler builds `{ path, dir: true }`. Reading only one of them
+// made every drop resolve to the project root, so a file dropped onto a folder
+// was silently a no-op — it "moved" to where it already was.
+const isDirNode = (node) => !!node && (node.type === 'dir' || node.dir === true);
+
+/** Where a drop would land: '' is the project root. */
+const dropTargetOf = (node) => (!node ? '' : isDirNode(node) ? node.path : dirOf(node.path));
+
+/** True if this drag is a move within the tree rather than an import. */
+const isInternalDrag = (e) => [...(e.dataTransfer?.types || [])].includes(DRAG_MIME);
+
+/**
+ * Every trace of a drag, gone. The single place that undoes what a drag set up.
+ *
+ * There must be exactly one of these and every terminal path must reach it.
+ * When the cleanup was split across the handlers that happened to be firing,
+ * two paths had no cleanup at all and the panel kept its drop outline until the
+ * page was reloaded:
+ *
+ *   - a row's `drop` calls `stopPropagation()`, so the container's `drop` —
+ *     which was the only thing clearing `droproot` — never ran after a
+ *     successful drop onto a folder.
+ *   - a successful move calls `renderTree()`, which replaces every row
+ *     including the one being dragged. `dragend` fires on a node that is no
+ *     longer in the document, so nothing listening on the tree hears it and
+ *     `dragOrigin` stayed set — after which the next hover behaved as though a
+ *     drag were still in progress.
+ */
+function endDrag() {
+  dragOrigin = null;
+  for (const n of document.querySelectorAll('.node.dropinto')) n.classList.remove('dropinto');
+  for (const n of document.querySelectorAll('.node.dragging')) n.classList.remove('dragging');
+  $('filetree').classList.remove('droproot');
+}
+
+// The backstop, on the document rather than on any row: a drag cancelled with
+// Escape, dropped on another application, or ended on an element that has been
+// re-rendered since it started still has to clear the highlight.
+//
+// The phases are not interchangeable. `dragend` may capture — by then the drag
+// is over and nothing left to run reads its state. `drop` must **bubble**: in
+// the capture phase this fires before the row's own handler, and clearing
+// `dragOrigin` first left that handler with nothing to move. Every drop
+// silently did nothing.
+document.addEventListener('dragend', endDrag, true);
+document.addEventListener('drop', endDrag);
+
+function makeRowDraggable(el, node) {
+  const path = node.path;
+  const isDir = isDirNode(node);
+
+  // The main file cannot move, so it does not offer to.
+  el.draggable = !(!isDir && path === project.main);
+
+  el.addEventListener('dragstart', (e) => {
+    dragOrigin = { path, isDir };
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData(DRAG_MIME, path);
+    // Plain text too, so dragging a path into the editor inserts it — free,
+    // and the obvious thing to expect.
+    e.dataTransfer.setData('text/plain', path);
+    el.classList.add('dragging');
+  });
+  el.addEventListener('dragend', endDrag);
+
+  // Only folders take a drop; a file row targets the folder that holds it, so
+  // dropping onto a sibling means "into this directory" rather than nothing.
+  el.addEventListener('dragover', (e) => {
+    if (!canAcceptDrop(node)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = isInternalDrag(e) ? 'move' : 'copy';
+    highlightDrop(el);
+  });
+  el.addEventListener('drop', (e) => {
+    if (!canAcceptDrop(node)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    handleDrop(e, dropTargetOf(node));
+  });
+}
+
+function canAcceptDrop(node) {
+  if (!project) return false;
+  if (!dragOrigin) return true;                 // an import can land anywhere
+  const to = dropTargetOf(node);
+  // Already there — nothing to do, so nothing lights up.
+  if (dirOf(dragOrigin.path) === to) return false;
+  if (dragOrigin.isDir && (to === dragOrigin.path || to.startsWith(`${dragOrigin.path}/`))) {
+    return false;                               // into itself
+  }
+  return true;
+}
+
+/**
+ * Light exactly one drop target: a row, or the panel itself, never both.
+ *
+ * The mutual exclusion has to live here. A row's `dragover` calls
+ * `stopPropagation()`, so moving from the panel background onto a row leaves
+ * the container's handler unaware — and the panel kept the outline it had
+ * gained a moment earlier while the row lit up beside it.
+ */
+function highlightDrop(el) {
+  for (const n of document.querySelectorAll('.node.dropinto')) n.classList.remove('dropinto');
+  if (el) el.classList.add('dropinto');
+  $('filetree').classList.toggle('droproot', !el);
+}
+
+/**
+ * Ask before a move that would leave an `\include` pointing at nothing.
+ *
+ * A move is a filesystem operation; the `\include{chapter/problem_5}` naming
+ * the file is text, and nothing keeps the two in step. LaTeX treats a missing
+ * `\include` as a **warning**, so the document still compiles — just shorter,
+ * with no error anywhere to say why. The homework template lost five pages to
+ * exactly this, and the only visible sign was a page count.
+ *
+ * A warning rather than a rewrite: the paths are the author's text, they come
+ * in several spellings, and silently editing files the user has not opened to
+ * fix a drag is a larger liberty than the drag itself.
+ *
+ * @returns {boolean} whether to go ahead
+ */
+function confirmBreaksIncludes(from, isDir, to) {
+  const moving = isDir ? filesUnder(from) : [from];
+  const broken = [];
+  for (const path of moving) {
+    for (const by of referencesTo(project, path)) {
+      // A folder moving wholesale keeps its internal references intact, so a
+      // reference from inside the moved set is not broken by the move.
+      if (!moving.includes(by)) broken.push({ path, by });
+    }
+  }
+  if (!broken.length) return true;
+
+  const lines = broken.slice(0, 8)
+    .map(b => `  ${b.by} → \\input/\\include of ${b.path}`)
+    .join('\n');
+  const more = broken.length > 8 ? `\n  …and ${broken.length - 8} more` : '';
+  const dest = isDir ? to : (dirOf(to) || 'the project root');
+  return confirm(
+    `Moving "${from}" to ${dest} will break ${broken.length} ` +
+    `reference${broken.length > 1 ? 's' : ''}:\n\n${lines}${more}\n\n` +
+    `LaTeX only warns about a missing \\include, so the document will still ` +
+    `compile — just without that content.\n\nMove anyway?`
+  );
+}
+
+/** A drop onto a folder, a file's folder, or the empty space below the tree. */
+async function handleDrop(e, parent) {
+  // Read what the drag carried, then clear every trace of it *before* anything
+  // below re-renders the tree — the highlight belongs to rows that are about to
+  // stop existing, and this is the last moment they can be found.
+  const files = e.dataTransfer?.files;
+  const origin = dragOrigin;
+  endDrag();
+
+  if (files && files.length) { await importDroppedFiles(files, parent); return; }
+  if (!origin) return;
+  const name = origin.path.split('/').pop();
+  const to = normalizePath(name, parent);
+  await moveEntry(origin.path, to, origin.isDir);
+}
+
+/** Bigger than any figure, and small enough that the zip backend survives it. */
+const MAX_DROP_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Add files dragged in from the desktop.
+ *
+ * Text files land as text so they are editable; everything else stays bytes and
+ * is written through `writeBinaryFile` — a backend that cannot do that (there is
+ * none today, but the rule is presence, not environment) simply does not get
+ * the feature, exactly as with `openFolder`.
+ */
+async function importDroppedFiles(fileList, parent) {
+  if (!project) return;
+  const dropped = [...fileList];
+  const added = [];
+  let refused = 0;
+
+  for (const file of dropped) {
+    const path = normalizePath(file.name, parent);
+    if (!path) { setStatus(`✗ "${file.name}" is not a usable file name`, 'err'); refused++; continue; }
+    if (project.files.has(path)) {
+      // Never silently replace: the file being dropped on is as likely to be
+      // the one someone wanted to keep.
+      setStatus(`✗ ${path} already exists — rename it first`, 'err');
+      refused++;
+      continue;
+    }
+    if (file.size > MAX_DROP_BYTES) {
+      setStatus(`✗ ${file.name} is ${(file.size / 1e6).toFixed(0)} MB — too large to add`, 'err');
+      refused++;
+      continue;
+    }
+
+    const isText = TEXT_EXT_RE.test(path);
+    try {
+      if (isText) {
+        const content = await file.text();
+        project.files.set(path, { content, binary: false, dirty: true, stamp: null });
+        if (canWriteDisk() && NativeAPI.writeFile) {
+          const stamp = await NativeAPI.writeFile(path, content, null);
+          Object.assign(project.files.get(path), { stamp, dirty: false });
+        }
+      } else {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        // A binary the app cannot persist is still worth holding in memory: it
+        // compiles, and Export zip gets it out. Say so rather than refusing.
+        project.files.set(path, { content: bytes, binary: true, dirty: false, stamp: null });
+        if (canWriteDisk()) {
+          if (NativeAPI.writeBinaryFile) {
+            await NativeAPI.writeBinaryFile(path, bytes);
+          } else {
+            rawLog('wrn', `${path} is held in memory only — this backend cannot write binary files`);
+          }
+        }
+      }
+      emptyDirs.delete(dirOf(path));
+      added.push(path);
+    } catch (err) {
+      project.files.delete(path);
+      setStatus(`✗ ${path}: ${err.message || err}`, 'err');
+      rawLog('err', `could not add ${path}: ${err.message || err}`);
+      refused++;
+    }
+  }
+
+  if (added.length) {
+    renderTree();
+    refreshDirty();
+    scheduleOutline();
+    for (const p of added) rawLog('inf', `added ${p}`);
+    setStatus(`added ${added.length} file(s)${refused ? `, ${refused} refused` : ''}`, 'ok');
+    // Opening the one file someone just dropped is what they meant; opening one
+    // of twelve is a guess, so several stay where they are.
+    if (added.length === 1 && !project.files.get(added[0]).binary) openFile(added[0]);
+  }
+}
+
+// The tree's own background: a drop here means the project root. Registered on
+// the container so the empty space below the last row is a real target.
+$('filetree').addEventListener('dragover', (e) => {
+  if (!project) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = isInternalDrag(e) ? 'move' : 'copy';
+  highlightDrop(null);          // null means "the panel itself" — see above
+});
+// Leaving the panel, by `relatedTarget` rather than by `target`. dragleave also
+// fires every time the pointer crosses from the container onto a row inside it,
+// and those are not leaving — testing `target === #filetree` was the wrong half
+// of that: it missed the real exit whenever the pointer left from over a row.
+$('filetree').addEventListener('dragleave', (e) => {
+  if (!e.relatedTarget || !$('filetree').contains(e.relatedTarget)) {
+    $('filetree').classList.remove('droproot');
+  }
+});
+$('filetree').addEventListener('drop', async (e) => {
+  if (!project) return;
+  e.preventDefault();
+  await handleDrop(e, '');
+});
+
+// Everything else on the page. Without this a file dropped anywhere outside the
+// tree is handled by the browser, which navigates to it — the app is replaced
+// by a PDF viewer and the session is gone. There was no handler at all before.
+for (const type of ['dragover', 'drop']) {
+  window.addEventListener(type, (e) => {
+    if ($('filetree').contains(e.target)) return;
+    e.preventDefault();
+    if (type === 'drop' && e.dataTransfer?.files?.length) {
+      setStatus('drop files onto the Files panel to add them to the project', 'warn');
+    }
+  });
 }
 
 // ── creating, renaming and deleting ────────────────────────────────────
@@ -576,6 +873,72 @@ async function moveOne(from, to) {
   if (currentPath === from) { currentPath = to; $('editortitle').textContent = to; }
 }
 
+/**
+ * Move a file or a whole folder from one path to another.
+ *
+ * The single place the guards live, because rename and drag-and-drop are the
+ * same operation reached two ways. Two copies of these checks is how a drop
+ * ends up able to move the main file that rename refuses to touch.
+ *
+ * @returns {Promise<boolean>} whether anything moved
+ */
+async function moveEntry(from, to, isDir) {
+  if (!to || to === from) return false;
+
+  const moving = isDir ? filesUnder(from) : [from];
+
+  if (!isDir && from === project.main) {
+    setStatus('✗ the main file is what gets compiled — move it outside the app', 'err');
+    return false;
+  }
+  if (isDir && moving.includes(project.main)) {
+    setStatus('✗ that folder holds the main file', 'err');
+    return false;
+  }
+  // A folder cannot go inside itself: every path being moved is also a path
+  // being moved *into*, so the loop below would rewrite each file forever and
+  // the subtree would be gone from the tree with no way back.
+  if (isDir && (to === from || to.startsWith(`${from}/`))) {
+    setStatus('✗ a folder cannot be moved into itself', 'err');
+    return false;
+  }
+
+  const targets = moving.map(p => (isDir ? to + p.slice(from.length) : to));
+  const clash = targets.find(t => project.files.has(t));
+  if (clash) { setStatus(`✗ ${clash} already exists`, 'err'); return false; }
+
+  // Here rather than in the drop handler, so a rename is warned about too: both
+  // reach this function precisely so a check cannot exist on one path only.
+  if (!confirmBreaksIncludes(from, isDir, to)) return false;
+
+  let moved = 0;
+  try {
+    for (let i = 0; i < moving.length; i++) { await moveOne(moving[i], targets[i]); moved++; }
+  } catch (err) {
+    // Partway through a folder move: say so rather than pretending it worked.
+    setStatus(`✗ ${err.message || err}`, 'err');
+    rawLog('err', `move stopped partway — ${moved} of ${moving.length} files: ${err.message || err}`);
+  }
+
+  if (isDir) {
+    emptyDirs.delete(from);
+    // The folded state is keyed by path, so without this the folder reopens
+    // under its new name and a fold survives under a path that no longer
+    // exists — invisible, and it accumulates.
+    for (const d of [...collapsedDirs]) {
+      if (d === from || d.startsWith(`${from}/`)) {
+        collapsedDirs.delete(d);
+        collapsedDirs.add(to + d.slice(from.length));
+      }
+    }
+    rememberCollapsed();
+  }
+  renderTree();
+  refreshDirty();
+  scheduleOutline();
+  return moved > 0;
+}
+
 async function renameEntry(path, isDir) {
   if (!isDir && path === project.main) {
     setStatus('✗ the main file is what gets compiled — rename it outside the app', 'err');
@@ -583,29 +946,7 @@ async function renameEntry(path, isDir) {
   }
   askName({ title: isDir ? 'Rename folder' : 'Rename file', label: 'New path',
             def: path, submitLabel: 'Rename' }, async (raw) => {
-    const to = normalizePath(raw);
-    if (!to || to === path) return;
-
-    const moving = isDir ? filesUnder(path) : [path];
-    if (isDir && moving.some(p => p === project.main)) {
-      setStatus('✗ that folder holds the main file', 'err');
-      return;
-    }
-    const targets = moving.map(p => (isDir ? to + p.slice(path.length) : to));
-    const clash = targets.find(t => project.files.has(t));
-    if (clash) { setStatus(`✗ ${clash} already exists`, 'err'); return; }
-
-    try {
-      for (let i = 0; i < moving.length; i++) await moveOne(moving[i], targets[i]);
-    } catch (err) {
-      // Partway through a folder move: say so rather than pretending it worked.
-      setStatus(`✗ ${err.message || err}`, 'err');
-      rawLog('err', `rename stopped partway: ${err.message || err}`);
-    }
-    if (isDir) { emptyDirs.delete(path); }
-    renderTree();
-    refreshDirty();
-    scheduleOutline();
+    await moveEntry(path, normalizePath(raw), isDir);
   });
 }
 

@@ -197,6 +197,19 @@ export const webFsImpl = {
   },
 
   /**
+   * Write bytes rather than text. `createWritable` already takes a BufferSource,
+   * so this is the same call without the UTF-8 assumption — and without the
+   * `expect` check, because a dropped file has no read-time stamp to compare.
+   */
+  async writeBinaryFile(path, bytes) {
+    const handle = await handleForCreate(path);
+    const w = await handle.createWritable();
+    await w.write(bytes);
+    await w.close();
+    return stampOf(await handle.getFile());
+  },
+
+  /**
    * Remove a file, or an empty directory.
    *
    * Same refusals as the desktop backends: `removeEntry` without `recursive`

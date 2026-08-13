@@ -170,6 +170,60 @@ const PROJECTS = {
       }
     ]
   }
+,
+  // Synthetic, and the one nothing covered: classic BibTeX, end to end.
+  //
+  // bibtex8 is compiled into busytex.wasm and wired into all three drivers, but
+  // no real fixture uses \bibliography — cv and homework hand-write a
+  // thebibliography, book uses biblatex. So the trace-driven repacker never saw
+  // a .bst opened and kept none of them, and \bibliographystyle{plain} failed
+  // with "I couldn't open style file plain.bst" for every real document while
+  // the gate stayed green at 5/5.
+  //
+  // Page count alone would not have caught it either: the document still
+  // typesets, it just renders [?] where the citation should be. So this asserts
+  // the log as well.
+  bibtex: {
+    inline: [
+      {
+        path: 'main.tex',
+        content: [
+          '\\documentclass{article}',
+          '\\begin{document}',
+          'Knuth wrote about typesetting \\cite{knuth84}, and so did Lamport \\cite{lamport94}.',
+          '\\bibliographystyle{plain}',
+          '\\bibliography{refs}',
+          '\\end{document}'
+        ].join('\n')
+      },
+      {
+        path: 'refs.bib',
+        content: [
+          '@book{knuth84,',
+          '  author    = {Knuth, Donald E.},',
+          '  title     = {The {\\TeX}book},',
+          '  publisher = {Addison-Wesley},',
+          '  year      = {1984}',
+          '}',
+          '@book{lamport94,',
+          '  author    = {Lamport, Leslie},',
+          '  title     = {{\\LaTeX}: A Document Preparation System},',
+          '  publisher = {Addison-Wesley},',
+          '  year      = {1994}',
+          '}'
+        ].join('\n')
+      }
+    ],
+    main: 'main.tex',
+    engine: 'pdftex',
+    bibtex: 'bibtex',
+    rerun: true,
+    // Two \cite calls and a two-entry bibliography fit on one page.
+    expectPages: 1,
+    // A page count cannot tell a resolved citation from a [?]. These can.
+    rejectLog: "couldn't open style file|I found no \\\\bibdata|Citation .* undefined|LaTeX Warning: There were undefined references",
+    note: 'Classic BibTeX: proves plain.bst is in the bundle and citations resolve.'
+  }
 };
 
 function applyPatches(spec, rel, text) {
@@ -276,7 +330,10 @@ const server = http.createServer((req, res) => {
       key, dir: s.dir, main: s.main, engine: s.engine,
       expectPages: s.expectPages, referencePages: s.referencePages || null,
       expectPagesWhy: s.expectPagesWhy || null, note: s.note || null,
-      expectFailure: s.expectFailure || null
+      expectFailure: s.expectFailure || null,
+      // A string, not a RegExp: this crosses an HTTP boundary as JSON, and a
+      // RegExp serialises to {}. Compiled by the harness that reads it.
+      rejectLog: s.rejectLog || null
     }));
     return send(res, 200, JSON.stringify(list), MIME['.json']);
   }

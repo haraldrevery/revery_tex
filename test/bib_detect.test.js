@@ -43,6 +43,19 @@ test('a document with no bibliography needs no tool', async () => {
   assert.equal(await inferBibTool(''), null);
 });
 
+test('\\bibliographystyle alone is not a bibliography', async () => {
+  // It writes no \bibdata, so BibTeX would end in "I found no \bibdata command".
+  // It is also the single most common leftover in a real document: people
+  // migrate to a hand-written thebibliography, comment out \bibliography, and
+  // leave the style line behind. Running the tool on that reports a citation
+  // failure for a bibliography that was already correct.
+  assert.equal(await inferBibTool('\\bibliographystyle{plain}'), null);
+  assert.equal(await inferBibTool('\\bibliographystyle{vancouver}\n%\\bibliography{kallor}'), null);
+  // …and a manual list still needs nothing, however many \cite calls it has.
+  assert.equal(await inferBibTool(
+    '\\cite{a}\\begin{thebibliography}{9}\\bibitem{a}A.\\end{thebibliography}'), null);
+});
+
 test('biblatex wins when both shapes appear', async () => {
   // \bibliographystyle is inert under biblatex but people leave it behind when
   // they migrate. Running bibtex on that document would rebuild the .bbl in the
@@ -60,6 +73,24 @@ test('the book fixture is detected as biblatex', { skip: !haveFixtures }, async 
   const src = fs.readFileSync(path.join(FIXTURES, 'hrldrvry_book_templt_v2', 'main.tex'), 'utf8');
   assert.equal(await inferBibTool(src), 'biber',
     'the book template uses \\addbibresource and \\printbibliography');
+});
+
+test('the thesis fixture needs no bibliography tool', { skip: !haveFixtures }, async () => {
+  // examensLatexv5 is the document that exposed this. It keeps an uncommented
+  // \bibliographystyle{vancouver}, has \bibliography{kallor} commented out, and
+  // writes its bibliography by hand in manuellreferens.tex. It used to come
+  // back as 'bibtex', so every compile ran bibtex8 on a document with no
+  // \bibdata and reported the failure as a citation error.
+  const dir = path.join(FIXTURES, 'examensLatexv5');
+  if (!fs.existsSync(dir)) return;
+  const src = fs.readFileSync(path.join(dir, 'main.tex'), 'utf8');
+  assert.equal(await inferBibTool(src), null);
+});
+
+test('the homework fixture needs no bibliography tool', { skip: !haveFixtures }, async () => {
+  const src = fs.readFileSync(path.join(FIXTURES, 'homework_template', 'main.tex'), 'utf8');
+  assert.equal(await inferBibTool(src), null,
+    'homework hand-writes its bibliography; both bib commands are commented out');
 });
 
 /* ── the engine must run the named tool, or none ──────────────────────── */

@@ -196,6 +196,29 @@ function writeFile(root, rel, content, expect = null) {
   return stampOf(abs);
 }
 
+/**
+ * Write bytes rather than text — an image or a font dropped into the project.
+ *
+ * Deliberately a separate call rather than a flag on writeFile. Every existing
+ * caller passes a string and gets UTF-8; a function that decides which it meant
+ * by sniffing the argument is one coercion away from writing "[object Object]"
+ * over someone's figure.
+ *
+ * Same containment as every other write: safePathInside, atomic replace. No
+ * `expect` stamp, because these arrive from a drop rather than from an editor
+ * buffer, so there is no read-time identity to have gone stale — the caller
+ * refuses an existing path instead.
+ *
+ * @param {string} b64 base64, because this crosses an IPC boundary that has no
+ *   structured-clone for Buffers in every Electron version we support.
+ */
+function writeBinaryFile(root, rel, b64) {
+  const abs = safePathInside(rel, root);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  atomicWriteFile(abs, Buffer.from(String(b64), 'base64'));
+  return stampOf(abs);
+}
+
 /* ── delete and rename ───────────────────────────────────────────────── */
 //
 // Mirrors tauri/src/main.rs exactly, including the refusals. Same
@@ -263,6 +286,7 @@ function discardBackup(backupDir, root, rel) {
 
 module.exports = {
   safePath, safePathInside, atomicWriteFile, isCrossDeviceErr, tmpFor,
-  readDirectory, readTextFile, readBinaryFile, writeFile, deleteFile, renameFile, stampOf,
+  readDirectory, readTextFile, readBinaryFile, writeFile, writeBinaryFile,
+  deleteFile, renameFile, stampOf,
   writeBackup, listStaleBackups, discardBackup, backupKey
 };

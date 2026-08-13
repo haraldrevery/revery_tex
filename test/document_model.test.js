@@ -274,3 +274,57 @@ test('an empty or missing project is safe', async () => {
   assert.deepEqual(ix.labels, []);
   assert.deepEqual(ix.environments, []);
 });
+
+/* ── what a move would break ─────────────────────────────────────────── */
+//
+// This exists because a move broke a real document silently. `problem_5.tex`
+// was dragged out of `chapter/` while `main.tex` still said
+// `\include{chapter/problem_5}`, and LaTeX treats a missing \include as a
+// warning — so the compile succeeded, five pages shorter, with nothing to say
+// why. The only visible sign was the page count.
+
+test('referencesTo names the files that \\input or \\include a path', async () => {
+  const { referencesTo } = await mod();
+  const p = project({
+    'main.tex': '\\include{chapter/problem_5}\n\\input{intro}',
+    'chapter/problem_5.tex': 'body',
+    'intro.tex': 'hello',
+    'unrelated.tex': 'nothing here'
+  });
+  assert.deepEqual(referencesTo(p, 'chapter/problem_5.tex'), ['main.tex']);
+  assert.deepEqual(referencesTo(p, 'intro.tex'), ['main.tex']);
+  assert.deepEqual(referencesTo(p, 'unrelated.tex'), []);
+});
+
+test('referencesTo finds every referrer, not just the first', async () => {
+  const { referencesTo } = await mod();
+  const p = project({
+    'main.tex': '\\input{shared}',
+    'other.tex': '\\input{shared}',
+    'shared.tex': 'x'
+  });
+  assert.deepEqual(referencesTo(p, 'shared.tex'), ['main.tex', 'other.tex']);
+});
+
+test('referencesTo resolves the spellings TeX allows', async () => {
+  const { referencesTo } = await mod();
+  // Extension omitted, an explicit .tex, and a ./ prefix all name one file.
+  for (const ref of ['chapter/a', 'chapter/a.tex', './chapter/a']) {
+    const p = project({ 'main.tex': `\\input{${ref}}`, 'chapter/a.tex': 'x' });
+    assert.deepEqual(referencesTo(p, 'chapter/a.tex'), ['main.tex'], ref);
+  }
+});
+
+test('a commented-out include is not a reference', async () => {
+  const { referencesTo } = await mod();
+  // Moving a file whose only \include is commented out breaks nothing, and
+  // warning about it would train people to click through the warning.
+  const p = project({ 'main.tex': '% \\include{chapter/old}', 'chapter/old.tex': 'x' });
+  assert.deepEqual(referencesTo(p, 'chapter/old.tex'), []);
+});
+
+test('referencesTo is safe on an empty project', async () => {
+  const { referencesTo } = await mod();
+  assert.deepEqual(referencesTo(null, 'a.tex'), []);
+  assert.deepEqual(referencesTo(project({}), ''), []);
+});

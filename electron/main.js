@@ -125,6 +125,7 @@ handle('fs:readDirectory', () => core.readDirectory(requireRoot()));
 handle('fs:readTextFile', (p) => core.readTextFile(requireRoot(), p));
 handle('fs:readBinaryFile', (p) => core.readBinaryFile(requireRoot(), p));
 handle('fs:writeFile', (p, c, expect) => core.writeFile(requireRoot(), p, c, expect || null));
+handle('fs:writeBinaryFile', (p, b64) => core.writeBinaryFile(requireRoot(), p, b64));
 handle('fs:deleteFile', (p) => core.deleteFile(requireRoot(), p));
 handle('fs:renameFile', (from, to) => core.renameFile(requireRoot(), from, to));
 handle('fs:writeBackup', (p, c) => core.writeBackup(backupDir(), requireRoot(), p, c));

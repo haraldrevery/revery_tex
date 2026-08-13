@@ -188,6 +188,19 @@ export const webZipImpl = {
   },
 
   /**
+   * Write bytes rather than text. The store holds bytes already, so this is the
+   * plain form and `writeFile` is the one doing extra work by encoding. No
+   * `expect`: a dropped file has no read-time stamp to have gone stale.
+   */
+  async writeBinaryFile(path, bytes) {
+    const existing = await getFile(path);
+    let mtime_ms = Date.now();
+    if (existing && mtime_ms <= existing.mtime_ms) mtime_ms = existing.mtime_ms + 1;
+    await run(FILES, 'readwrite', (s) => s.put({ path, bytes, mtime_ms }));
+    return { mtime_ms, size: bytes.length };
+  },
+
+  /**
    * Remove a file. There are no directories in this store — a path is a key —
    * so a folder disappears when the last file under it does, which is also
    * what a zip does.
