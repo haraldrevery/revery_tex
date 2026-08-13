@@ -56,11 +56,18 @@ function render(sections) {
       box.appendChild(head);
     }
 
-    const n = document.createElement('div');
+    // A button, for the same reason the file tree's rows are: clicking a
+    // heading moves the cursor and the preview, and that was unreachable
+    // without a mouse.
+    const n = document.createElement('button');
+    n.type = 'button';
     n.className = 'node sec' + (s.included ? '' : ' orphan');
     n.style.paddingLeft = `calc(1rem + ${Math.min(s.level - base, 4) * 0.7}rem)`;
     n.textContent = s.title || '(untitled)';
     n.title = `${s.file}:${s.line}`;
+    // The visible label is the heading alone; the level is what tells a screen
+    // reader whether this is a chapter or a subsection, and indentation cannot.
+    n.setAttribute('aria-label', `level ${s.level} — ${s.title || 'untitled'}`);
     n.onclick = () => jump(s.file, s.line);
     box.appendChild(n);
     rows.push({ file: s.file, line: s.line, el: n });

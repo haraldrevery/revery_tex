@@ -152,6 +152,12 @@ button {
   transition:color .15s, border-color .15s, background .15s;
 }
 button:hover:not(:disabled) { color:var(--text); border-color:var(--accent); background:var(--bg-hover) }
+/* Keyboard focus has to be visible somewhere. :focus-visible rather than
+   :focus, so a click does not leave a ring behind — the same distinction
+   .menu-item already made, applied to the controls that had none. */
+button:focus { outline:none }
+button:focus-visible { border-color:var(--accent); color:var(--text);
+  box-shadow:0 0 0 2px var(--bg), 0 0 0 3px var(--accent) }
 button:disabled { opacity:.35; cursor:default }
 button.primary { color:var(--text); border-color:var(--accent) }
 
@@ -378,11 +384,30 @@ button.primary { color:var(--text); border-color:var(--accent) }
 
 /* ── file tree ──────────────────────────────────────────────────────── */
 #filetree { flex:1; overflow:auto; padding:4px 0 }
+/* Rows are <button>, not <div>. They were divs with an onclick, which meant the
+   file tree and the outline — the two things the app is actually navigated with
+   — could not be reached by keyboard at all, while the menus, dialogs and the
+   picker all could. A button gets focus, Enter and Space for free; everything
+   below is the reset that makes one look like a row again. */
 .node {
+  display:block; width:100%; box-sizing:border-box; text-align:left;
+  background:none; border:0; border-radius:0; margin:0;
+  /* Undo the topbar button idiom the base rule sets — these are rows of file
+     names and headings, not controls, and they keep the pane's own face. */
+  font-family:inherit; text-transform:none; letter-spacing:normal;
+  line-height:inherit; transition:none;
   padding:.22rem .6rem .16rem 1rem; cursor:pointer; white-space:nowrap;
   overflow:hidden; text-overflow:ellipsis; font-size:.7rem; color:var(--text-muted);
 }
 .node:hover { background:var(--bg-hover); color:var(--text) }
+/* Focus is shown, but only for the keyboard: an inset bar on the other side
+   from the .active/.here marker, so a focused row that is also the current one
+   still reads as both. */
+.node:focus { outline:none }
+.node:focus-visible { background:var(--bg-hover); color:var(--text);
+  box-shadow:inset -2px 0 0 var(--accent) }
+.node.active:focus-visible, .node.sec.here:focus-visible {
+  box-shadow:inset 2px 0 0 var(--accent), inset -2px 0 0 var(--accent) }
 /* An inset shadow, not a border: rows are indented inline by depth, and a
    border would shift the text sideways as the selection moves. */
 .node.active { color:var(--text); box-shadow:inset 2px 0 0 var(--accent) }
@@ -394,7 +419,10 @@ button.primary { color:var(--text); border-color:var(--accent) }
 .node.dir:hover { color:var(--text) }
 /* Binaries are shown so you can see what \includegraphics can point at, and
    dimmed because opening one would put bytes in the editor. */
-.node.binary { color:var(--text-dim); cursor:default }
+/* Dimmed and not hoverable, but still focusable: a binary row cannot be opened,
+   yet it is right-clickable for Rename and Delete, so it stays a real target.
+   The focus ring is deliberately kept for that reason. */
+.node.binary, .node.dim-note { color:var(--text-dim); cursor:default }
 .node.binary:hover { background:none; color:var(--text-dim) }
 .node.main::after { content:' ■'; color:var(--accent) }
 .node.dirty::after { content:' •'; color:var(--warn) }
@@ -419,8 +447,8 @@ button.primary { color:var(--text); border-color:var(--accent) }
    chapter whose include is commented out is exactly what you go looking for,
    but dimmed so it cannot be mistaken for part of the compiled document. */
 .node.orphan { opacity:.55; font-style:italic }
-.node.dim-note { color:var(--text-dim); cursor:default; font-size:.66rem }
-.node.dim-note:hover { background:none }
+.node.dim-note { font-size:.66rem }
+.node.dim-note:hover, .node.dim-note:focus-visible { background:none; box-shadow:none }
 
 /* ── editor ─────────────────────────────────────────────────────────── */
 #editor { flex:1; min-height:0; overflow:hidden }

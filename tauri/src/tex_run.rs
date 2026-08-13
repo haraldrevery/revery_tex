@@ -223,12 +223,19 @@ fn argv_for(tool: &str, main_file: &str) -> Vec<String> {
             "-file-line-error".into(),
             // \write18 executes shell commands from inside the document.
             "-no-shell-escape".into(),
+            // Without this TeX Live writes no .synctex.gz at all, and the app's
+            // click-to-source silently does nothing. A fixed flag, not a setting.
+            "-synctex=1".into(),
             // Stop TeX writing outside the project directory.
             "-output-directory=.".into(),
             format!("./{main_file}"),
         ],
         "bibtex" => vec![stem],
-        "biber" => vec!["--nosafe-mode-off-placeholder".into(), stem],
+        // The stem and nothing else. Biber has no safe mode and no shell-escape
+        // switch, so there is no flag to pass here — and an unrecognised one
+        // makes Getopt::Long print usage and exit non-zero, which is a
+        // bibliography that never builds.
+        "biber" => vec![stem],
         "makeindex" => vec![format!("{stem}.idx")],
         _ => vec![],
     }
@@ -254,7 +261,10 @@ pub fn run_tool(
         || main_file.starts_with('-')
         || main_file.contains('\0')
         || Path::new(main_file).is_absolute()
-        || main_file.split('/').any(|c| c == "..")
+        // Both separators — see the note in electron/tex_run.js. Containment is
+        // enforced by the caller's canonicalised root, so this is the check
+        // that must not depend on that one.
+        || main_file.split(['/', '\\']).any(|c| c == "..")
     {
         return Err(format!("{main_file} is not a valid file name for a compile"));
     }

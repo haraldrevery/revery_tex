@@ -449,7 +449,19 @@ function renderTree() {
 
   let shown = 0;
   for (const node of rows) {
-    const n = document.createElement('div');
+    // A button, not a div with an onclick. The tree is how this app is
+    // navigated, and as a div it could not be reached by keyboard at all —
+    // while every menu and dialog could. A button brings focus, Enter and
+    // Space with it, and `aria-expanded` on the directory rows below is
+    // natively meaningful on a button, where on a bare div it announced
+    // nothing at all.
+    //
+    // Deliberately *not* role="tree"/"treeitem". That pattern owes the reader
+    // arrow-key navigation and a roving tabindex, and claiming it without them
+    // tells a screen-reader user to press keys that do nothing. A list of
+    // buttons is what this is, so that is what it says it is.
+    const n = document.createElement('button');
+    n.type = 'button';
     n.textContent = node.name;
     n.title = node.path;
     // Indent by depth. The old render put every directory's files at the same
@@ -475,7 +487,12 @@ function renderTree() {
         + (f && f.dirty ? ' dirty' : '');
       n.dataset.path = node.path;
       // Binaries stay visible and stay unopenable: the editor would show bytes.
-      if (!node.binary) n.onclick = () => openFile(node.path);
+      // aria-disabled, never the `disabled` property — a disabled button
+      // receives no mouse events at all, which would take right-click Rename
+      // and Delete away from exactly the files most likely to need them. It
+      // stays focusable and announced as unavailable; only opening is refused.
+      if (node.binary) n.setAttribute('aria-disabled', 'true');
+      else n.onclick = () => openFile(node.path);
       shown++;
     }
     tree.appendChild(n);

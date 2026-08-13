@@ -46,7 +46,11 @@ function isExecutable(p) {
 function findTool(name) {
   if (!ALLOWED.includes(name)) return null;
   const dirs = (process.env.PATH || '').split(path.delimiter);
-  const exts = process.platform === 'win32' ? ['.exe', '.bat', '.cmd', ''] : [''];
+  // `.exe` only, matching tauri/src/tex_run.rs — and not `.bat`/`.cmd` for a
+  // second reason: Node refuses to spawn either without `shell: true` (the
+  // fix for CVE-2024-27980), and a shell is the one thing this must never
+  // use. Accepting them here only ever produced a confusing spawn error.
+  const exts = process.platform === 'win32' ? ['.exe', ''] : [''];
   for (const dir of dirs) {
     if (!dir) continue;                 // an empty PATH entry means "." — never search it
     for (const ext of exts) {
@@ -75,11 +79,18 @@ function argvFor(tool, mainFile) {
         '-halt-on-error',
         '-file-line-error',
         '-no-shell-escape',            // \write18 runs shell commands
+        // Without this TeX Live writes no .synctex.gz at all, and the app's
+        // click-to-source silently does nothing. A fixed flag, not a setting.
+        '-synctex=1',
         '-output-directory=.',         // stop TeX writing outside the project
         `./${mainFile}`                // ./ so a leading dash is never an option
       ];
     case 'bibtex': return [stem];
-    case 'biber': return ['--nosafe-mode-off-placeholder', stem];
+    // The stem and nothing else. Biber has no safe mode and no shell-escape
+    // switch, so there is no flag to pass here — and an unrecognised one makes
+    // Getopt::Long print usage and exit non-zero, which is a bibliography that
+    // never builds.
+    case 'biber': return [stem];
     case 'makeindex': return [`${stem}.idx`];
     default: return [];
   }
@@ -92,7 +103,11 @@ function validMainFile(mainFile) {
     && !mainFile.startsWith('-')
     && !mainFile.includes('\0')
     && !path.isAbsolute(mainFile)
-    && !mainFile.split('/').includes('..');
+    // Both separators. Containment is enforced above this by safePathInside,
+    // so a backslash escape was never live — but this check exists to be the
+    // one that does not depend on the other, and on Windows it was splitting
+    // on '/' alone and would have waved `sub\..\..\x.tex` through.
+    && !mainFile.split(/[/\\]/).includes('..');
 }
 
 /* ── running ──────────────────────────────────────────────────────────── */

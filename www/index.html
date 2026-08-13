@@ -6,9 +6,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!-- 'wasm-unsafe-eval' is required for the engine. Keep in sync with
      tauri/tauri.conf.json — a mismatch shows up only at runtime, as a refusal
-     to instantiate WebAssembly. -->
+     to instantiate WebAssembly.
+
+     No 'unsafe-inline' in script-src, and nothing on this page needs it: there
+     is no inline <script> and no inline handler. settings_boot.js is an
+     external classic script for exactly this reason. It was granted here and
+     not in the Tauri config, which meant the browser build ran with its main
+     XSS protection off while the desktop build did not. -->
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'">
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'">
 <link rel="stylesheet" href="./css_aesthetics/theme.css">
 <!-- Before the stylesheet paints anything: sets the persisted theme and scales,
      so the app does not flash the default theme first. Must stay a blocking
@@ -45,7 +51,9 @@
   <aside id="sidebar">
     <div class="panehead"><span>Files</span><div class="spacer"></div><span id="filecount" class="dim"></span>
       <button id="newfile" title="New file or folder">+</button></div>
-    <div id="filetree"></div>
+    <!-- A labelled group of buttons, not role="tree": see renderTree() for why
+         the tree pattern is not claimed here. -->
+    <div id="filetree" role="group" aria-label="Project files"></div>
   </aside>
   <div class="vdiv" data-resize="sidebar"></div>
 
@@ -68,7 +76,7 @@
   <div class="vdiv" data-resize="outline"></div>
   <aside id="outlinepane">
     <div class="panehead"><span>Outline</span><div class="spacer"></div><span id="outlinecount" class="dim"></span></div>
-    <div id="outline"></div>
+    <div id="outline" role="group" aria-label="Document outline"></div>
   </aside>
 </div>
 

@@ -61,9 +61,16 @@ WebAssembly. Those binaries are NOT covered by the Apache License.
 BRAND ASSETS — NOT COVERED BY THE APACHE LICENSE
 ────────────────────────────────────────────────────────────────────────
 
-The Harald Revery typefaces (font/, www/fonts/), the Revery logo and the
-application icons (tauri/icons/) are proprietary. See font/FONT-LICENSE.txt.
+The Harald Revery typefaces (font/, www/fonts/), the Revery logo, the
+application icons (tauri/icons/) and the background photographs
+(www/image_assets/) are proprietary. See font/FONT-LICENSE.txt.
 
-You may keep and use them unmodified, in place, solely to build, run and
-distribute this software. Extracting them for other work, or shipping a
-fork under this branding, is not permitted.
+The photographs are the same brand assets Revery Notebook ships under its
+LICENSE-ASSETS, which permits use only within that software. They are here
+with the copyright holder's intent, and are not covered by the Apache
+License. Both installers ship them: they are part of www/, which every
+shell loads whole.
+
+You may keep and use all of the above unmodified, in place, solely to build,
+run and distribute this software. Extracting them for other work, or shipping
+a fork under this branding, is not permitted.

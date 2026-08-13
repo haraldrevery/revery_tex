@@ -68,6 +68,32 @@ test('the engine the app actually loads is present', () => {
   }
 });
 
+// Every top-level directory under www/ that this project did not write itself.
+// Anything not on this list must be named in NOTICE before it can ship.
+const OURS = new Set(['css_aesthetics', 'jvscrpt_and_css_extra']);
+
+test('everything shipped under www/ is accounted for in NOTICE', () => {
+  // The same structural argument as the size ceiling above, on the other axis.
+  // The background photographs arrived in www/image_assets/, rode into both
+  // installers, and were proprietary — and NOTICE still listed only the fonts
+  // and the icons. A directory is easy to add and easy to forget; the licence
+  // consequence of adding one is not.
+  //
+  // jvscrpt_and_css_extra/ holds both our code and vendored copies, so its
+  // third-party parts (pdfjs, katex, codemirror-bundle.js, texlyre_busytex.js)
+  // are named individually in NOTICE rather than by directory.
+  const notice = fs.readFileSync(path.join(ROOT, 'NOTICE'), 'utf8');
+  const dirs = fs.readdirSync(WWW, { withFileTypes: true })
+    .filter(e => e.isDirectory())
+    .map(e => e.name);
+
+  const unaccounted = dirs.filter(d => !OURS.has(d) && !notice.includes(`www/${d}`));
+  assert.deepEqual(unaccounted, [],
+    `www/${unaccounted.join(', www/')} ships to every user and NOTICE does not mention it.\n` +
+    '  Add it to NOTICE with its licence, or to OURS in this test if it is our own\n' +
+    '  Apache-licensed code.');
+});
+
 test('no archives or upstream tarballs under www/', () => {
   const { files } = measure(WWW);
   const archives = files.filter(f => /\.(tar\.gz|tgz|zip)$/.test(f.path));

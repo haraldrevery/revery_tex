@@ -1144,6 +1144,51 @@ async function main() {
       tree.foldedRows < tree.unfoldedRows && tree.stillThere,
       `${tree.unfoldedRows} → ${tree.foldedRows} rows, ${tree.firstDir} kept`);
 
+    // The tree and the outline were divs with an onclick: the two panes this
+    // app is navigated with could not be reached without a mouse, while every
+    // menu and dialog could.
+    const rowKeys = await cdp.evaluate(`(async () => {
+      const row = [...document.querySelectorAll('#filetree .node[data-path]')]
+        .find(r => !r.hasAttribute('aria-disabled'));
+      // This is the assertion that matters: a div without a tabindex cannot
+      // become activeElement, so .focus() landing here is what proves the row
+      // is reachable by keyboard at all. A synthetic KeyboardEvent would not
+      // prove it — dispatchEvent never triggers a button's default action.
+      row.focus();
+      const focused = document.activeElement === row;
+      const tag = row.tagName;
+      row.click();
+      await new Promise(r => setTimeout(r, 60));
+      const opened = document.getElementById('editortitle').textContent === row.dataset.path;
+
+      const dir = document.querySelector('#filetree .node[data-dir]');
+      const expanded = dir && dir.getAttribute('aria-expanded');
+
+      const binary = document.querySelector('#filetree .node.binary');
+      // aria-disabled, never the disabled property: a disabled button gets no
+      // mouse events, which would take right-click Rename away from it.
+      const binaryFocusable = !!binary && !binary.disabled
+        && binary.getAttribute('aria-disabled') === 'true';
+
+      const sec = document.querySelector('#outline .node.sec');
+      return {
+        tag, focused, opened, expanded, binaryFocusable,
+        outlineTag: sec ? sec.tagName : null,
+        // A half-claimed ARIA tree owes the reader arrow keys and a roving
+        // tabindex; this is a group of buttons and should say so.
+        claimsTree: !!document.querySelector('[role="tree"], [role="treeitem"]')
+      };
+    })()`, true);
+    check('file rows are focusable buttons',
+      rowKeys.tag === 'BUTTON' && rowKeys.focused, rowKeys.tag);
+    check('a focused row opens its file', rowKeys.opened);
+    check('directory rows report their fold state',
+      rowKeys.expanded === 'true' || rowKeys.expanded === 'false', String(rowKeys.expanded));
+    check('binary rows stay focusable and right-clickable', rowKeys.binaryFocusable);
+    check('outline headings are focusable buttons too',
+      rowKeys.outlineTag === 'BUTTON', rowKeys.outlineTag);
+    check('no ARIA tree pattern is claimed without arrow keys', !rowKeys.claimsTree);
+
     const made = await cdp.evaluate(`(async () => {
       const rows = () => [...document.querySelectorAll('#filetree .node')];
       const open = (label) => {

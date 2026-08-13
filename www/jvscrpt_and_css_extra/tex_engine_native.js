@@ -145,9 +145,17 @@ export class NativeTexEngine {
     // Success is a PDF on disk, never an exit code — the last pass's status
     // hides a fatal error in an earlier one, which is the same trap the WASM
     // wrapper sets.
-    const pdfPath = mainFile.replace(/\.tex$/i, '.pdf');
+    //
+    // By basename, not beside the source. The shell pins cwd to the project
+    // root and passes -output-directory=. , so every artefact lands at the root
+    // however deep the main file sits — `src/main.tex` produces `main.pdf`, not
+    // `src/main.pdf`. Reading beside the source found nothing and reported "the
+    // compiler produced no PDF" over a log that had compiled cleanly. This is
+    // also what bibtex and makeindex already assume, since their stems come
+    // from the basename too.
+    const stem = mainFile.split('/').pop().replace(/\.tex$/i, '');
     let pdf = null;
-    try { pdf = await this.api.readBinaryFile(pdfPath); } catch { /* none produced */ }
+    try { pdf = await this.api.readBinaryFile(`${stem}.pdf`); } catch { /* none produced */ }
 
     if (!pdf || !pdf.length) {
       const first = diagnostics.find(d => d.severity === 'error');
@@ -160,8 +168,15 @@ export class NativeTexEngine {
       };
     }
 
+    // Same root, same reason. Not fatal if absent — but say so, because a
+    // silent miss here is click-to-source doing nothing with no explanation.
     let synctex = null;
-    try { synctex = await this.api.readBinaryFile(mainFile.replace(/\.tex$/i, '.synctex.gz')); } catch { }
+    try {
+      synctex = await this.api.readBinaryFile(`${stem}.synctex.gz`);
+    } catch {
+      this.onLog(`${stem}.synctex.gz was not written — click-to-source is unavailable ` +
+                 `for this compile`, 'wrn');
+    }
 
     return {
       success: true,

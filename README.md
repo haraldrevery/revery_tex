@@ -294,11 +294,16 @@ match Revery Notebook's zero-test-dependency convention.
 
 ---
 
-## Using your own TeX Live or MiKTeX
+## Using your own TeX Live
 
 Settings → **LaTeX engine → System TeX Live**, on the desktop only. It closes
 the two things the bundled engine cannot do: **biber**, which no WASM build has,
 and packages outside the 62 MB slim bundle.
+
+Linux only in practice. Both packagers build `deb` and `rpm` and nothing else,
+and while the tool lookup has a Windows branch in each shell, no Windows build
+ships and none of it has ever run — treat MiKTeX as untested rather than
+supported.
 
 The bundled engine stays the default because it always works — no install, no
 PATH, the same result on every machine.
@@ -354,6 +359,12 @@ Each of these cost real debugging time:
   `www/engine_check.html` and `tauri/tauri.conf.json`. Without it the engine
   simply refuses to start. Revery Notebook's configs omit it because they run no
   WASM; do not copy them verbatim.
+- **`'unsafe-inline'` must be in none of them except `engine_check.html`**, which
+  is a self-contained page with a real inline `<script type="module">` that
+  Tauri hashes at bundle time. `index.html` has no inline script and no inline
+  handler — it carried the grant anyway, which meant the browser build ran with
+  its main XSS protection off while the desktop build did not. The three CSPs
+  drifting apart is only ever visible at runtime, in one shell.
 - **Paths handed to the Web Worker must be absolute.** A relative path is
   re-resolved against the worker's own location, which is already inside
   `engine/dist/`, producing `engine/dist/engine/dist/busytex.js`.

@@ -19,6 +19,10 @@ const only = process.argv.slice(2).filter(a => !a.startsWith('-'));
 
 /** Suites in the order a failure is most useful: cheapest and most basic first. */
 const SUITES = [
+  // Cheapest of the lot, and the one most easily forgotten: package.json,
+  // tauri.conf.json, Cargo.toml and Cargo.lock all carry the version, and
+  // nothing else here would notice them drifting apart.
+  { name: 'version', cmd: ['node', 'build_tools/sync_version.js', '--check'] },
   { name: 'unit', cmd: ['npm', 'test'] },
   { name: 'rust', cmd: ['cargo', 'test', '--manifest-path', 'tauri/Cargo.toml'] },
   { name: 'gate', cmd: ['node', 'test/run_phase0.js'] },
