@@ -1475,6 +1475,281 @@ async function main() {
         dialogs[0] ? dialogs[0].split('\n')[0] : 'no dialog was shown');
     }
 
+    /* ── completion and snippets ────────────────────────────────────── */
+    // The source itself is driven through __reveryTexTest.completeAt, which
+    // runs it over a synthetic document: what the dropdown *would* show, with
+    // no popup timing to race. Only the key handling needs real keystrokes,
+    // because the whole question there is which of the three claimants on Tab
+    // wins — and that is decided by extension precedence, which no unit test
+    // can see.
+    await cdp.evaluate('window.__reveryTexApp.compile("book")', true);
+
+    const complete = (doc) =>
+      cdp.evaluate(`window.__reveryTexTest.completeAt(${JSON.stringify(doc)})`, true);
+    const suppressed = (doc) =>
+      cdp.evaluate(`window.__reveryTexTest.suppressedAt(${JSON.stringify(doc)})`, true);
+
+    const refs = await complete('\\ref{');
+    check('\\ref{ offers the project\'s own labels', !!refs && refs.options.length > 0,
+      refs ? `${refs.options.length} labels` : 'nothing offered');
+    // A bare key is the thing that sends people back to the PDF to check which
+    // equation `eq:3` was; the context is the feature, not decoration.
+    check('every label says what it labels',
+      !!refs && refs.options.every(o => o.detail) &&
+      refs.options.some(o => o.detail !== 'label'),
+      refs?.options[0] ? `${refs.options[0].label} → ${refs.options[0].detail}` : '');
+
+    const eqrefs = await complete('\\eqref{');
+    check('\\eqref floats equations to the top',
+      !!eqrefs && eqrefs.options.some(o => /^equation/.test(o.detail || '')),
+      eqrefs?.options.find(o => /^equation/.test(o.detail || ''))?.label);
+
+    const cites = await complete('\\cite{');
+    check('\\cite{ offers keys with their author and year',
+      !!cites && cites.options.length > 0 && cites.options.some(o => o.detail !== 'citation'),
+      cites?.options[0] ? `${cites.options[0].label} → ${cites.options[0].detail}` : '');
+    // \cite takes a list. Anchoring at the brace — as this used to — means the
+    // second key you type replaces every key already there.
+    const cite2 = await complete('\\cite{foo,ba');
+    check('a second citation key replaces only itself',
+      cite2?.replacing === 'ba', `would replace ${JSON.stringify(cite2?.replacing)}`);
+
+    const frac = await complete('\\fra');
+    check('a command completes to a template, not bare text',
+      !!frac && frac.options.some(o => o.label === '\\frac' && o.snippet));
+    const beginFig = await complete('\\begin{fig');
+    check('\\begin{ offers environments as templates',
+      !!beginFig && beginFig.options.some(o => o.label === 'figure' && o.snippet));
+    check('\\end{ offers names only — a template there would write a second \\end',
+      (await complete('\\end{fig'))?.options.every(o => !o.snippet));
+
+    check('completion keeps quiet in a comment', (await complete('% see \\se')) === null);
+    check('completion keeps quiet inside verbatim',
+      await suppressed('\\begin{verbatim}\n\\se'));
+    check('and speaks again once the verbatim ends',
+      !(await suppressed('\\begin{verbatim}\nx\n\\end{verbatim}\n\\se')));
+    check('an escaped percent is not a comment', !(await suppressed('100\\% of \\se')));
+
+    // ── the keys ──
+    const KEY = {
+      Tab: { key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, text: '\t' },
+      Enter: { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, text: '\r' }
+    };
+    const press = async (name) => {
+      const k = KEY[name];
+      await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...k });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'char', ...k });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...k });
+      await sleep(140);
+    };
+    const typeText = async (s) => {
+      for (const ch of s) {
+        await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', text: ch, unmodifiedText: ch, key: ch });
+        await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ch });
+      }
+      await sleep(280);
+    };
+    const setDoc = async (text) => {
+      await cdp.evaluate(`(() => {
+        const v = window.__reveryTexTest.view();
+        const t = ${JSON.stringify(text)};
+        v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: t },
+                     selection: { anchor: t.length } });
+        v.focus();
+      })()`, true);
+      await sleep(120);
+    };
+    const docText = () => cdp.evaluate('window.__reveryTexTest.view().state.doc.toString()', true);
+    const caret = () => cdp.evaluate('window.__reveryTexTest.view().state.selection.main.head', true);
+
+    // The keystroke checks below replace the open buffer wholesale. That is
+    // fine for them and ruinous for everything after: SyncTeX maps PDF
+    // positions onto source lines, and a four-character document clamps every
+    // lookup to the same place, so the next section's inverse-search checks
+    // silently stop moving the cursor. Put the file back when done.
+    const savedDoc = await cdp.evaluate('window.__reveryTexTest.view().state.doc.toString()', true);
+
+    await setDoc('');
+    await typeText('\\frac');
+    check('typing a command opens the dropdown with an entry already selected',
+      await cdp.evaluate('!!document.querySelector(".cm-tooltip-autocomplete li[aria-selected]")', true));
+    await press('Tab');
+    check('Tab accepts it and writes the braces', (await docText()) === '\\frac{}{}',
+      JSON.stringify(await docText()));
+    check('the cursor lands in the first field', (await caret()) === 6, String(await caret()));
+    await press('Tab');
+    check('Tab again moves to the next field', (await caret()) === 8, String(await caret()));
+
+    // The binding that must survive all of the above.
+    await setDoc('hello');
+    await press('Tab');
+    check('Tab with no completion and no snippet still indents',
+      (await docText()) !== 'hello', JSON.stringify(await docText()));
+
+    await setDoc('');
+    await typeText('\\begin{figu');
+    await press('Tab');
+    const figBlock = await docText();
+    check('an environment completes to its whole scaffold',
+      figBlock.startsWith('\\begin{figure}[htbp]') && figBlock.trimEnd().endsWith('\\end{figure}'),
+      JSON.stringify(figBlock.slice(0, 40)));
+    // Templates indent with tabs, which CodeMirror expands to one indent unit
+    // each. Spaces in the template would be copied literally on top of that.
+    check('the scaffold is indented by one unit, not by stray spaces',
+      /^\s\s\\centering$/m.test(figBlock), JSON.stringify(figBlock.split('\n')[1]));
+
+    await setDoc('\\ref{');
+    await typeText('s');
+    if (!await cdp.evaluate('!!document.querySelector(".cm-tooltip-autocomplete li[aria-selected]")', true)) {
+      check('Enter accepts a label', false, 'the label dropdown never opened');
+    } else {
+      await press('Enter');
+      const afterRef = await docText();
+      check('Enter accepts a label rather than breaking the line',
+        !afterRef.includes('\n') && afterRef.length > '\\ref{s'.length, JSON.stringify(afterRef));
+    }
+    // …and stays a newline everywhere else, which is why the accept is gated on
+    // what is selected rather than on the popup merely being open.
+    await setDoc('');
+    await typeText('\\se');
+    await press('Enter');
+    check('Enter over the command list still inserts a newline',
+      (await docText()).includes('\n'), JSON.stringify(await docText()));
+
+    await setDoc(savedDoc);
+    check('the buffer is back as it was before the keystroke checks',
+      (await docText()) === savedDoc, `${(await docText()).length} vs ${savedDoc.length} chars`);
+
+    /* ── PDF hyperlinks ─────────────────────────────────────────────── */
+    // The link layer is a hit test over annotation rectangles rather than DOM
+    // (see pdf_links.js), so there is no element to query and nothing here can
+    // be checked by looking at the page. The geometry is unit-tested in
+    // test/pdf_links.test.js; what only a browser can answer is whether a real
+    // press-and-release at a link's coordinates moves the PDF and leaves the
+    // editor alone — the two halves of "a link beats SyncTeX".
+    const SETTLE = `(async () => {
+      const box = document.getElementById('pdf');
+      for (let last = -1, still = 0; still < 3; ) {
+        await new Promise(r => setTimeout(r, 100));
+        if (box.scrollTop === last) still++; else { still = 0; last = box.scrollTop; }
+      }
+    })()`;
+    const PAGE_AT_TOP = `(() => {
+      const box = document.getElementById('pdf');
+      const y = box.scrollTop + box.clientHeight / 3;
+      let hit = null;
+      for (const c of box.querySelectorAll('canvas.pdfpage')) if (c.offsetTop <= y) hit = c;
+      return hit ? Number(hit.dataset.page) : null;
+    })()`;
+    const head = () => cdp.evaluate('window.__reveryTexTest.view().state.selection.main.head', true);
+
+    const compiled = await cdp.evaluate('window.__reveryTexApp.compile("book")', true);
+    const allLinks = await cdp.evaluate('window.__reveryTexApp.pdfLinks()', true);
+    const internal = allLinks.filter(l => l.target);
+    check('hyperref links are found in the compiled PDF', internal.length > 0,
+      `${internal.length} internal, ${allLinks.length - internal.length} external`);
+    check('every link rect and target is inside the document',
+      allLinks.every(l => l.x1 >= 0 && l.y1 >= 0 && l.x2 > l.x1 && l.y2 > l.y1)
+      && internal.every(l => l.target.page >= 1 && l.target.page <= compiled.pages));
+
+    // Scroll the link's page into view first: a rect on page 9 is nowhere near
+    // the viewport, and a synthetic click at its coordinates would hit nothing
+    // while looking exactly like a broken feature.
+    const spot = internal.length ? await cdp.evaluate(`(async () => {
+      const l = (await window.__reveryTexApp.pdfLinks()).filter(x => x.target)[0];
+      const box = document.getElementById('pdf');
+      const c = box.querySelector('canvas.pdfpage[data-page="' + l.page + '"]');
+      const s0 = c.getBoundingClientRect().width / Number(c.dataset.natural);
+      box.scrollTo({ top: c.offsetTop + l.y1 * s0 - 100, behavior: 'instant' });
+      await new Promise(r => setTimeout(r, 150));
+      const rr = c.getBoundingClientRect();
+      const s = rr.width / Number(c.dataset.natural);
+      return { x: rr.left + ((l.x1 + l.x2) / 2) * s, y: rr.top + ((l.y1 + l.y2) / 2) * s,
+               fromPage: l.page, toPage: l.target.page };
+    })()`, true) : null;
+
+    if (!spot) {
+      check('a link can be clicked', false, 'the book fixture produced no internal links');
+    } else {
+      await cdp.send('Input.dispatchMouseEvent',
+        { type: 'mouseMoved', x: spot.x, y: spot.y, buttons: 0 });
+      await sleep(200);
+      check('hovering a link shows the pointer cursor',
+        await cdp.evaluate('document.getElementById("pdf").classList.contains("pdf-overlink")', true));
+
+      const before = await head();
+      for (const type of ['mousePressed', 'mouseReleased']) {
+        await cdp.send('Input.dispatchMouseEvent',
+          { type, x: spot.x, y: spot.y, button: 'left', buttons: 1, clickCount: 1 });
+      }
+      await cdp.evaluate(SETTLE, true);
+      const landed = await cdp.evaluate(PAGE_AT_TOP, true);
+      check('clicking a link scrolls the PDF to its destination',
+        landed === spot.toPage, `landed on page ${landed}, expected ${spot.toPage}`);
+      // The whole point of the branch: a reader clicking "Figure 3" wants the
+      // figure, not the line where the \ref was typed. Both firing would move
+      // two panes at once for one click.
+      check('SyncTeX inverse search does not also fire', (await head()) === before);
+
+      await realClick(cdp, `document.getElementById('pdfback')`);
+      await cdp.evaluate(SETTLE, true);
+      check('Back returns to where the link was followed from',
+        (await cdp.evaluate(PAGE_AT_TOP, true)) === spot.fromPage);
+      check('and disables itself with nothing left to go back to',
+        await cdp.evaluate('document.getElementById("pdfback").disabled', true));
+
+      // Alt is the escape hatch, so inverse search stays reachable on a page
+      // that is nothing but cross-references.
+      const beforeAlt = await head();
+      for (const type of ['mousePressed', 'mouseReleased']) {
+        await cdp.send('Input.dispatchMouseEvent',
+          { type, x: spot.x, y: spot.y, button: 'left', buttons: 1, clickCount: 1, modifiers: 1 });
+      }
+      await sleep(500);
+      check('alt+click on a link still does inverse search', (await head()) !== beforeAlt);
+
+      // …and a click that is not on a link must be completely unaffected.
+      const blank = await cdp.evaluate(`(async () => {
+        const box = document.getElementById('pdf');
+        const view = box.getBoundingClientRect();
+        const ls = await window.__reveryTexApp.pdfLinks();
+        for (const c of box.querySelectorAll('canvas.pdfpage')) {
+          const rr = c.getBoundingClientRect();
+          if (rr.bottom < view.top + 20 || rr.top > view.bottom - 20) continue;
+          const page = Number(c.dataset.page);
+          const s = rr.width / Number(c.dataset.natural);
+          const on = ls.filter(l => l.page === page);
+          const px = (rr.width / s) / 2;
+          for (let py = 40; py < rr.height / s - 40; py += 20) {
+            if (on.some(l => px >= l.x1 && px <= l.x2 && py >= l.y1 && py <= l.y2)) continue;
+            const cy = rr.top + py * s;
+            if (cy < view.top + 10 || cy > view.bottom - 10) continue;
+            return { x: rr.left + px * s, y: cy };
+          }
+        }
+        return null;
+      })()`, true);
+      if (!blank) {
+        check('a plain click off a link still does inverse search', true, 'no link-free spot visible');
+      } else {
+        await cdp.evaluate('window.__reveryTexTest.view().dispatch({ selection: { anchor: 0 } })', true);
+        for (const type of ['mousePressed', 'mouseReleased']) {
+          await cdp.send('Input.dispatchMouseEvent',
+            { type, x: blank.x, y: blank.y, button: 'left', buttons: 1, clickCount: 1 });
+        }
+        await sleep(500);
+        check('a plain click off a link still does inverse search', (await head()) !== 0);
+      }
+    }
+
+    // A document without hyperref has no links at all, and must behave exactly
+    // as it did before any of this existed.
+    await cdp.evaluate('window.__reveryTexApp.compile("cv")', true);
+    const cvLinks = await cdp.evaluate('window.__reveryTexApp.pdfLinks()', true);
+    check('a document with no cross-references has no internal links',
+      cvLinks.every(l => !l.target),
+      `${cvLinks.length} link(s), all external`);
+
     /* ── background texture ─────────────────────────────────────────── */
     const texture = await cdp.evaluate(`(async () => {
       const s = await import('./jvscrpt_and_css_extra/settings.js');

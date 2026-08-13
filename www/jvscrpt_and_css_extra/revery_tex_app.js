@@ -16,7 +16,10 @@ import { NativeTexEngine } from './tex_engine_native.js';
 import { createEngineHost } from './engine_host.js';
 import { PdfPreview } from './pdf_preview.js';
 import { NativeAPI } from './native_api.js';
-import { latexEditingExtensions, setDiagnostics, beginEndInsertion } from './latex_editor.js';
+import {
+  latexEditingExtensions, setDiagnostics, beginEndInsertion,
+  latexCompletionSource, suppressCompletion
+} from './latex_editor.js';
 import { SyncTex } from './synctex.js';
 import { writeZip } from './zip_core.js';
 import * as settings from './settings.js';
@@ -216,8 +219,15 @@ function makeEditor() {
       CM.highlightSelectionMatches(),
       CM.EditorView.lineWrapping,
       CM.keymap.of([
+        // `...CM.completionKeymap` used to be spread here and never had any
+        // effect: autocompletion() installs it itself at Prec.highest. Dropped
+        // rather than left in place implying the order below matters to it.
         ...CM.defaultKeymap, ...CM.historyKeymap,
-        ...CM.searchKeymap, ...CM.completionKeymap, ...CM.foldKeymap,
+        ...CM.searchKeymap, ...CM.foldKeymap,
+        // Tab and Enter over an open completion are claimed at Prec.highest by
+        // latexCompletionKeymap(), part of latexEditingExtensions above. Both
+        // report false when nothing is selected, so this stays the binding that
+        // runs the rest of the time.
         CM.indentWithTab,
         // Ctrl+S must mean save. Compile moves to Ctrl+Enter.
         { key: 'Mod-s', preventDefault: true, run: () => { saveAll(); return true; } },
@@ -1309,14 +1319,47 @@ async function showPdf(bytes, pages) {
   $('pdf').style.display = 'block';
   if (!preview) {
     preview = new PdfPreview($('pdf'));
-    preview.onPageClick(({ page, x, y }) => {
+    preview.onPageClick(({ page, x, y, link, native }) => {
+      // A hyperref link wins over inverse search: clicking "Figure 3" means
+      // "show me figure 3", not "show me where I typed \ref{fig:3}". Alt keeps
+      // the old behaviour reachable for a click that lands on a link by
+      // accident — and, in a document that is nothing but cross-references,
+      // deliberately.
+      if (link && !native.altKey) {
+        if (link.target) {
+          preview.goToLink(link);
+          $('pdfback').disabled = !preview.canGoBack();
+          setStatus(`→ page ${link.target.page}`, 'ok');
+        } else if (link.url) {
+          // External links are recognised but not opened: there is no
+          // openExternal anywhere in NativeAPI yet, and a click that silently
+          // did nothing would read as a bug. Naming the URL says which it is.
+          setStatus(link.url);
+        }
+        return;
+      }
       const hit = syncTex.fromPdf(page, x, y);
       if (!hit) return;
       if (hit.file && project.files.has(hit.file) && hit.file !== currentPath) openFile(hit.file);
       gotoLine(hit.line);
       setStatus(`↖ ${hit.file}:${hit.line}`, 'ok');
     });
+    const goBack = () => {
+      const moved = preview.back();
+      $('pdfback').disabled = !preview.canGoBack();
+      return moved;
+    };
+    $('pdfback').addEventListener('click', goBack);
+    // Alt+Left is the browser's "back" and reads the same way here. Scoped away
+    // from the editor because on macOS Alt+ArrowLeft is CodeMirror's
+    // move-by-word, and a global handler would quietly break it.
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'ArrowLeft' || !ev.altKey || ev.ctrlKey || ev.metaKey) return;
+      if (ev.target?.closest?.('.cm-editor, input, textarea, [contenteditable]')) return;
+      if (goBack()) ev.preventDefault();
+    });
   }
+  $('pdfback').disabled = true;   // a new document is a new history
   // Stay where the reader was looking, rather than snapping to page 1 on every
   // recompile.
   const where = preview.scrollFraction();
@@ -1465,6 +1508,27 @@ window.__reveryTexTest = {
     if (!spec) return 'no insertion';
     return spec.changes.insert.replace(/\n/g, '\\n');
   },
+  /**
+   * Run the completion source over a synthetic document, with the real project
+   * behind it. Returns what the dropdown would show — the only way to check the
+   * ref/cite/verbatim rules without a keystroke driver and a timing race.
+   *
+   * `doc` is the text; the cursor is at its end unless `at` says otherwise.
+   */
+  completeAt: (doc, at = doc.length) => {
+    const st = CM.EditorState.create({ doc });
+    const r = latexCompletionSource(() => project)({ state: st, pos: at, explicit: false });
+    if (!r) return null;
+    return {
+      from: r.from,
+      replacing: doc.slice(r.from, at),
+      options: r.options.slice(0, 400).map(o => ({
+        label: o.label, type: o.type, detail: o.detail, snippet: typeof o.apply === 'function'
+      }))
+    };
+  },
+  suppressedAt: (doc, at = doc.length) =>
+    suppressCompletion(CM.EditorState.create({ doc }), at),
   tryBeginAutoCloseBalanced: () => {
     // Already has a matching \end — must NOT insert a second one.
     const st = CM.EditorState.create({ doc: '\\begin{itemize\n\n\\end{itemize}' });
@@ -1484,6 +1548,29 @@ window.__reveryTexApp = {
     if (path === currentPath) openFile(path); else refreshOutline();
     refreshDirty();
     return true;
+  },
+  /**
+   * The PDF's link index, once it has settled.
+   *
+   * `load()` starts the annotation scan without awaiting it, so a driver that
+   * looked straight after `compile()` would race it. Returning the promise is
+   * the only honest way to ask "are there links, and where".
+   */
+  async pdfLinks() {
+    if (!preview) return [];
+    await preview.linksReady;
+    const out = [];
+    for (let p = 1; p <= preview.pageCount; p++) {
+      for (const r of preview.linksOnPage(p)) out.push({ page: p, ...r });
+    }
+    return out;
+  },
+  /** Follow the first link that resolves to a destination. Returns where it went. */
+  async followFirstLink() {
+    const links = (await this.pdfLinks()).filter(l => l.target);
+    if (!links.length) return null;
+    preview.goToLink(links[0]);
+    return { from: links[0].page, to: links[0].target.page };
   },
   async compile(key) {
     if (key && key !== project?.key) { projectSel.value = key; await loadProject(key); }

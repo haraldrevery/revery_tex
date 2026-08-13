@@ -31,9 +31,20 @@ export {
   undo, redo, indentMore, indentLess, toggleComment
 } from '@codemirror/commands';
 
+// snippet* is what makes a completion insert a template with tab stops rather
+// than bare text. `snippetKeymap` is not re-exported to be *used* — the snippet
+// state installs its own binding at Prec.highest — but so the app can see what
+// owns Tab while a snippet is active.
+//
+// `selectedCompletion` is needed because `selectOnOpen` is a global config with
+// no per-result override: Enter can only be made safe (accept a label, insert a
+// newline in prose) by looking at what is actually selected.
 export {
   autocompletion, startCompletion, closeCompletion, completionStatus,
-  moveCompletionSelection, acceptCompletion, completionKeymap
+  moveCompletionSelection, acceptCompletion, completionKeymap,
+  snippet, snippetCompletion, snippetKeymap,
+  nextSnippetField, prevSnippetField, hasNextSnippetField, clearSnippet,
+  selectedCompletion
 } from '@codemirror/autocomplete';
 
 export {

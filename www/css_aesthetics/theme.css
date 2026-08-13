@@ -502,6 +502,12 @@ button.primary { color:var(--text); border-color:var(--accent) }
 #pdf::-webkit-scrollbar { width:8px; height:8px }
 #pdf::-webkit-scrollbar-thumb { background:var(--scrollbar); border-radius:2px }
 #pdf { position:relative }
+/* The only affordance a hyperref link gets. The link layer is a hit test over
+   annotation rectangles rather than DOM — see pdf_links.js — so there is no
+   element to hover, and this class is toggled from a throttled mousemove. That
+   is the whole cost of not rendering an overlay, and it buys immunity to the
+   canvas being CSS-scaled between a pane drag and the debounced re-render. */
+#pdf.pdf-overlink { cursor:pointer }
 .pdf-syncmark {
   position:absolute; width:10px; height:10px; margin:-5px 0 0 -5px;
   border:2px solid var(--warn); border-radius:50%; pointer-events:none;

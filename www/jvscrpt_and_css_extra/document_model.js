@@ -33,7 +33,7 @@ const SECTION_LEVELS = {
 const IMAGE_EXT = /\.(png|jpe?g|pdf|gif|bmp|webp|svg)$/i;
 
 const EMPTY = {
-  labels: [], citations: [], files: [], bib: [],
+  labels: [], labelInfo: [], citations: [], files: [], bib: [],
   environments: [], sections: [], images: [], macros: {},
   packages: [], inputs: {}, order: []
 };
@@ -139,7 +139,14 @@ function scanFile(path, raw, acc) {
   const text = stripTexComments(raw);
   const offsets = lineOffsets(text);
 
-  for (const m of text.matchAll(/\\label\{([^}]+)\}/g)) acc.labels.add(m[1]);
+  for (const m of text.matchAll(/\\label\{([^}]+)\}/g)) {
+    acc.labels.add(m[1]);
+    // Where it is, so a \ref dropdown can say what the key actually refers to.
+    // What it *labels* cannot be decided here — the environment it sits inside
+    // may not have been scanned yet — so that is resolved in scanProject once
+    // every file's environments and sections are known.
+    acc.labelSites.push({ label: m[1], file: path, line: lineOf(offsets, m.index) });
+  }
   for (const m of text.matchAll(/\\bibitem(?:\[[^\]]*\])?\{([^}]+)\}/g)) acc.citations.add(m[1]);
   scanBib(text, acc.bib);
   for (const b of acc.bib) acc.citations.add(b.key);
@@ -251,11 +258,56 @@ function documentOrder(main, inputs, files) {
 
 /* ── the index ───────────────────────────────────────────────────────── */
 
+/**
+ * What each `\label` in the project actually labels.
+ *
+ * A bare key is close to useless in a dropdown — `eq:3` and `fig:3` say nothing
+ * about which equation or which figure, which is the whole reason people keep a
+ * second window open on the PDF while writing `\ref`. Every label therefore
+ * carries the caption or heading it sits under.
+ *
+ * Resolved by containment rather than by proximity: the innermost environment
+ * whose span covers the label wins, because a `\label` inside a subfigure
+ * belongs to the subfigure and not to the figure around it. Only if no
+ * environment contains it does the nearest preceding heading apply — that is
+ * the `\section{…}\label{sec:…}` case.
+ *
+ * @returns {Array<{label, file, line, kind, title}>} sorted by label
+ */
+function describeLabels(acc) {
+  const out = [];
+  for (const site of acc.labelSites) {
+    let kind = null, title = '';
+
+    let best = null;
+    for (const e of acc.environments) {
+      if (e.file !== site.file) continue;
+      if (site.line < e.startLine || site.line > e.endLine) continue;
+      // Innermost: the one that starts latest still contains the label.
+      if (!best || e.startLine > best.startLine) best = e;
+    }
+    if (best) {
+      kind = best.kind;
+      title = best.caption || '';
+    } else {
+      let head = null;
+      for (const s of acc.sections) {
+        if (s.file !== site.file || s.line > site.line) continue;
+        if (!head || s.line > head.line) head = s;
+      }
+      if (head) { kind = 'section'; title = head.title || ''; }
+    }
+
+    out.push({ ...site, kind, title });
+  }
+  return out.sort((a, b) => a.label.localeCompare(b.label));
+}
+
 export function scanProject(project) {
   if (!project) return EMPTY;
 
   const acc = {
-    labels: new Set(), citations: new Set(), bib: [],
+    labels: new Set(), labelSites: [], citations: new Set(), bib: [],
     environments: [], sections: [], images: [], macros: {}, inputs: {},
     packages: new Set()
   };
@@ -274,6 +326,7 @@ export function scanProject(project) {
 
   return {
     labels: [...acc.labels].sort(),
+    labelInfo: describeLabels(acc),
     citations: [...acc.citations].sort(),
     files: files.sort(),
     bib: acc.bib,
@@ -293,16 +346,40 @@ export function scanProject(project) {
 let cache = { sig: null, data: null };
 
 /**
+ * A cheap content fingerprint.
+ *
+ * Length alone used to be the whole signature, and it is wrong in exactly the
+ * case this index exists for: renaming `\label{fig:aa}` to `\label{fig:ab}`
+ * does not change the length, so the cache was never invalidated and the \ref
+ * dropdown went on offering a key the document no longer defines. A rolling
+ * hash costs one pass over the buffer and catches it.
+ *
+ * Not a cryptographic digest — a collision serves a stale index for one edit,
+ * which is what the old code did on *every* same-length edit.
+ */
+function fingerprint(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
+/**
  * The index for a project, cached.
  *
- * The signature changes whenever any buffer changes length — good enough to
- * keep the index fresh without rescanning on every character, and it includes
+ * The signature changes whenever any buffer's contents change, and it includes
  * the project key so switching projects cannot serve the previous one's index.
  */
 export function projectIndex(project) {
   if (!project) return EMPTY;
   let sig = project.key + '|';
-  for (const [p, f] of project.files) sig += p + (typeof f.content === 'string' ? f.content.length : 0) + ';';
+  for (const [p, f] of project.files) {
+    sig += typeof f.content === 'string'
+      ? `${p}${f.content.length}:${fingerprint(f.content)};`
+      : `${p}b;`;
+  }
   if (cache.sig !== sig) cache = { sig, data: scanProject(project) };
   return cache.data;
 }

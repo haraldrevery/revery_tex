@@ -9,6 +9,7 @@
 // pdf.js is Apache-2.0, vendored under ./pdfjs/.
 
 import * as pdfjsLib from './pdfjs/pdf.mjs';
+import { destinationRefs, indexLinks, hitTest } from './pdf_links.js';
 
 // Same-origin worker path, so the strict CSP is satisfied without blob: workers.
 pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -26,6 +27,32 @@ export class PdfPreview {
     this._renderToken = 0;
     this._resizeTimer = null;
     this._renderedWidth = 0;
+
+    // Link annotations, in PDF points from each page's top-left. Empty until
+    // indexLinks() settles, and empty forever for a document that does not load
+    // hyperref — which is not a failure, just a document with no links in it.
+    this._links = new Map();
+    // Separate from _renderToken on purpose: that one changes on every resize,
+    // and links are in page coordinates, so a re-render does not invalidate
+    // them. Only a new document does.
+    this._docToken = 0;
+    this.linksReady = Promise.resolve(this._links);
+
+    // Where the reader was before following a link, so there is a way back. A
+    // 49-page document with no back is a trap: the link moved you somewhere you
+    // cannot name and scrolling home by hand is the only way out.
+    this._back = [];
+
+    this._hoverPending = false;
+    this._onMove = (ev) => {
+      if (this._hoverPending) return;
+      this._hoverPending = true;
+      requestAnimationFrame(() => {
+        this._hoverPending = false;
+        this.container.classList.toggle('pdf-overlink', !!this._linkAtEvent(ev));
+      });
+    };
+    this.container.addEventListener('mousemove', this._onMove);
 
     // Re-render on width change, debounced: canvas is raster, so a resize
     // without a re-render leaves the page soft.
@@ -89,7 +116,90 @@ export class PdfPreview {
     this.pageCount = this.doc.numPages;
     await this.render();
     this.restoreScroll(keepScroll);
+    // Deliberately not awaited: annotations are several worker round-trips and
+    // the page is already painted. Nothing needs them until the reader clicks,
+    // and `linksReady` is there for anything (a test) that does.
+    this.linksReady = this._indexLinks(this._docToken);
     return this.pageCount;
+  }
+
+  /**
+   * Read every page's link annotations and resolve their destinations.
+   *
+   * Named destinations are fetched with one `getDestinations()` call rather than
+   * a `getDestination(name)` per link: hyperref emits a link per `\ref`, and a
+   * long document has hundreds, each of which would otherwise be its own round
+   * trip to the worker.
+   */
+  async _indexLinks(token) {
+    const doc = this.doc;
+    if (!doc) return this._links;
+    try {
+      const pages = [];
+      const viewports = new Map();
+      for (let n = 1; n <= this.pageCount; n++) {
+        const page = await doc.getPage(n);
+        if (token !== this._docToken) return this._links;
+        viewports.set(n, page.getViewport({ scale: 1 }));
+        pages.push({ page: n, annotations: await page.getAnnotations({ intent: 'display' }) });
+        if (token !== this._docToken) return this._links;
+      }
+
+      const destinations = (await doc.getDestinations()) || {};
+      if (token !== this._docToken) return this._links;
+
+      // One getPageIndex per *distinct* target, not per link.
+      const pageByRef = new Map();
+      for (const { key, ref } of destinationRefs(pages, destinations)) {
+        try {
+          pageByRef.set(key, (await doc.getPageIndex(ref)) + 1);
+        } catch {
+          // A destination pointing at nothing — a \ref that never resolved.
+          // Skipped, so indexLinks drops the link rather than jumping to page 1.
+        }
+      }
+      if (token !== this._docToken) return this._links;
+
+      this._links = indexLinks({
+        pages, destinations, pageByRef,
+        convert: (n, x, y) => {
+          const vp = viewports.get(n);
+          if (!vp) return { x, y };
+          const [vx, vy] = vp.convertToViewportPoint(x, y);
+          return { x: vx, y: vy };
+        }
+      });
+    } catch {
+      // Links are an enhancement. A malformed annotation tree must leave the
+      // preview working exactly as it did before, the same way a SyncTeX parse
+      // failure never fails a compile.
+      this._links = new Map();
+    }
+    return this._links;
+  }
+
+  /** The link rectangles on a page, in PDF points from its top-left. */
+  linksOnPage(page) {
+    return this._links.get(page) || [];
+  }
+
+  /** The link at a point on a page, or null. */
+  linkAt(page, x, y) {
+    return hitTest(this._links.get(page), x, y);
+  }
+
+  /** The link under a mouse event, or null. Shared by the click and hover paths. */
+  _linkAtEvent(ev) {
+    if (!this._links.size) return null;
+    const canvas = ev.target?.closest?.('canvas.pdfpage');
+    if (!canvas) return null;
+    const r = canvas.getBoundingClientRect();
+    const scale = this.effectiveScale(canvas);
+    return this.linkAt(
+      Number(canvas.dataset.page),
+      (ev.clientX - r.left) / scale,
+      (ev.clientY - r.top) / scale
+    );
   }
 
   async render() {
@@ -155,6 +265,11 @@ export class PdfPreview {
    * SyncTeX speaks. The scale comes from the page's own rendered box, so a click
    * lands on the right line even while the pane is mid-resize and the canvas is
    * still displayed at the previous render's raster size.
+   *
+   * `link` is the annotation under the pointer, or null. It is reported rather
+   * than acted on: whether a link beats SyncTeX inverse search is a policy
+   * question, and policy lives in the app, next to the SyncTeX wiring it has to
+   * agree with.
    */
   onPageClick(cb) {
     this.container.addEventListener('click', (ev) => {
@@ -166,9 +281,33 @@ export class PdfPreview {
         page: Number(canvas.dataset.page),
         x: (ev.clientX - r.left) / scale,
         y: (ev.clientY - r.top) / scale,
+        link: this._linkAtEvent(ev),
         native: ev
       });
     });
+  }
+
+  /**
+   * Follow a resolved link, remembering where the reader was.
+   *
+   * @param {{target:{page:number,x:number,y:number}}} link from `linkAt`
+   */
+  goToLink(link) {
+    if (!link?.target) return false;
+    this._back.push(this.container.scrollTop);
+    // Cap the stack: this is "undo the jump", not a browser history, and an
+    // unbounded array of scroll offsets is a leak nobody would ever notice.
+    if (this._back.length > 50) this._back.shift();
+    return this.scrollToPosition(link.target.page, link.target.x, link.target.y);
+  }
+
+  canGoBack() { return this._back.length > 0; }
+
+  /** Return to where the last `goToLink` was made from. */
+  back() {
+    if (!this._back.length) return false;
+    this.container.scrollTo({ top: this._back.pop(), behavior: 'smooth' });
+    return true;
   }
 
   /** Scroll so a PDF-point position on a page is visible, and flash a marker. */
@@ -190,12 +329,19 @@ export class PdfPreview {
 
   async destroyDoc() {
     this._renderToken++;
+    this._docToken++;              // abandons any link indexing still in flight
+    this._links = new Map();
+    // The offsets are into the document being replaced; keeping them would send
+    // Back to an arbitrary place in the new one.
+    this._back.length = 0;
+    this.container.classList.remove('pdf-overlink');
     if (this.doc) { await this.doc.destroy().catch(() => {}); this.doc = null; }
     this.container.textContent = '';
   }
 
   async destroy() {
     this._observer?.disconnect();
+    this.container.removeEventListener('mousemove', this._onMove);
     clearTimeout(this._resizeTimer);
     await this.destroyDoc();
   }
