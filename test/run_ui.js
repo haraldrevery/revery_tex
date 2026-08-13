@@ -1750,6 +1750,132 @@ async function main() {
       cvLinks.every(l => !l.target),
       `${cvLinks.length} link(s), all external`);
 
+    /* ── dark mode for the PDF preview ──────────────────────────────── */
+    // The feature is one CSS selector, so most of it is checkable by reading
+    // computed style. The check that matters is the last one: the whole design
+    // rests on `filter` being compositing-only, and a filter that quietly moved
+    // a layout box would put every SyncTeX click and every hyperlink on the
+    // wrong part of the page — visibly wrong only in ways nobody would connect
+    // back to a colour setting.
+    await cdp.evaluate('window.__reveryTexApp.compile("book")', true);
+
+    const setSetting = (key, value) => cdp.evaluate(`(async () => {
+      const s = await import('./jvscrpt_and_css_extra/settings.js');
+      return s.set(${JSON.stringify(key)}, ${JSON.stringify(value)});
+    })()`, true);
+    const pageFilter = () => cdp.evaluate(
+      'getComputedStyle(document.querySelector("canvas.pdfpage")).filter', true);
+
+    await setSetting('pdfTheme', 'off');
+    check('the preview is untouched by default', (await pageFilter()) === 'none',
+      await pageFilter());
+
+    await setSetting('pdfTheme', 'dark');
+    check('Dark inverts the rendered page', /invert/.test(await pageFilter()),
+      await pageFilter());
+
+    // "Follow theme" is expressed purely in the selector — both attributes sit
+    // on <html> — so this also proves no JS listener is needed to keep them in
+    // step, and that nothing has to be recompiled to change it.
+    await setSetting('pdfTheme', 'auto');
+    await setSetting('theme', 'light');
+    check('Follow theme leaves the page alone on a light theme',
+      (await pageFilter()) === 'none', await pageFilter());
+    await setSetting('theme', 'forest');
+    check('…and inverts it on a dark one, with no recompile',
+      /invert/.test(await pageFilter()), await pageFilter());
+    await setSetting('theme', 'dark');
+
+    // The marker is a sibling of the canvas, not a child, which is why the
+    // filter is scoped to .pdfpage and not to #pdf: inverting the marker would
+    // turn var(--warn) into its complement.
+    const markFilter = await cdp.evaluate(`(() => {
+      const box = document.getElementById('pdf');
+      const d = document.createElement('div');
+      d.className = 'pdf-syncmark';
+      box.appendChild(d);
+      const f = getComputedStyle(d).filter;
+      d.remove();
+      return f;
+    })()`, true);
+    check('the SyncTeX marker is not inverted along with the page',
+      markFilter === 'none', markFilter);
+
+    // The claim the whole design rests on.
+    const geometry = await cdp.evaluate(`(async () => {
+      const s = await import('./jvscrpt_and_css_extra/settings.js');
+      const c = document.querySelector('canvas.pdfpage');
+      const read = () => {
+        const r = c.getBoundingClientRect();
+        return { w: r.width, h: r.height, top: c.offsetTop, left: c.offsetLeft,
+                 natural: c.dataset.natural };
+      };
+      s.set('pdfTheme', 'off');
+      const before = read();
+      s.set('pdfTheme', 'dark');
+      const after = read();
+      return { before, after };
+    })()`, true);
+    check('inverting moves no layout box — SyncTeX and links read the same numbers',
+      JSON.stringify(geometry.before) === JSON.stringify(geometry.after),
+      `${JSON.stringify(geometry.before)} vs ${JSON.stringify(geometry.after)}`);
+
+    // …and the same, end to end, through the real hyperlink path.
+    const linkStillWorks = await cdp.evaluate(`(async () => {
+      const ls = (await window.__reveryTexApp.pdfLinks()).filter(l => l.target);
+      if (!ls.length) return null;
+      return window.__reveryTexApp.followFirstLink();
+    })()`, true);
+    await cdp.evaluate(SETTLE, true);
+    check('a hyperlink still lands on its destination with the filter on',
+      !linkStillWorks || (await cdp.evaluate(PAGE_AT_TOP, true)) === linkStillWorks.to,
+      linkStillWorks ? `went to ${await cdp.evaluate(PAGE_AT_TOP, true)}, wanted ${linkStillWorks.to}` : 'no links');
+
+    // Display-only, and this is how you can tell: a CSS filter is applied when
+    // the layer is composited, so the canvas backing store still holds the
+    // original pixels. If these ever differ, something is rewriting the render
+    // rather than recolouring the display — and Download would be next.
+    const raster = await cdp.evaluate(`(async () => {
+      const s = await import('./jvscrpt_and_css_extra/settings.js');
+      const c = document.querySelector('canvas.pdfpage');
+      const sample = () => {
+        const d = c.getContext('2d').getImageData(0, 0, Math.min(80, c.width), 8).data;
+        let h = 0;
+        for (let i = 0; i < d.length; i++) h = (Math.imul(h, 31) + d[i]) | 0;
+        return h;
+      };
+      s.set('pdfTheme', 'off');  const off = sample();
+      s.set('pdfTheme', 'dark'); const on  = sample();
+      return { off, on };
+    })()`, true);
+    check('the rendered pixels are untouched — the filter is display-only',
+      raster.off === raster.on, `${raster.off} vs ${raster.on}`);
+
+    // A CSS filter should cost essentially nothing. A large regression here is
+    // the signal to filter #pdf once instead of all 49 canvases.
+    const sweep = await cdp.evaluate(`(async () => {
+      const s = await import('./jvscrpt_and_css_extra/settings.js');
+      const box = document.getElementById('pdf');
+      const run = async () => {
+        box.scrollTop = 0;
+        await new Promise(r => requestAnimationFrame(r));
+        const t0 = performance.now();
+        for (let i = 0; i < 40; i++) {
+          box.scrollTop += box.clientHeight;
+          await new Promise(r => requestAnimationFrame(r));
+        }
+        return performance.now() - t0;
+      };
+      s.set('pdfTheme', 'off');  await run();          // warm up
+      const off = await run();
+      s.set('pdfTheme', 'dark'); const on = await run();
+      s.set('pdfTheme', 'off');
+      return { off, on, pages: box.querySelectorAll('canvas.pdfpage').length };
+    })()`, true);
+    check('scrolling the whole document is not meaningfully slower inverted',
+      sweep.on < Math.max(sweep.off * 2.5, sweep.off + 400),
+      `${sweep.pages} pages: ${sweep.off.toFixed(0)}ms → ${sweep.on.toFixed(0)}ms`);
+
     /* ── background texture ─────────────────────────────────────────── */
     const texture = await cdp.evaluate(`(async () => {
       const s = await import('./jvscrpt_and_css_extra/settings.js');

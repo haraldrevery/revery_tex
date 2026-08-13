@@ -129,6 +129,26 @@ export const SCHEMA = [
     css: '--editor-line-height', format: (v) => String(v / 100)
   },
   {
+    // Reading a white page beside a dark editor at night is the one thing on
+    // screen that never followed the theme.
+    //
+    // Implemented by inverting the *rendered canvas* in CSS, not by rendering
+    // the page differently — see the [data-pdf-theme] rule in theme.css for why
+    // that is both cheaper and less destructive than pdf.js's own pageColors.
+    // The value is an identifier and the filter lives in the stylesheet, the
+    // same rule the font stacks and the backgrounds follow.
+    //
+    // Off by default: inverting a photograph turns it into a negative, and that
+    // is not something to do to someone's figures uninvited.
+    key: 'pdfTheme', label: 'PDF preview', def: 'off',
+    options: [
+      { label: 'Off', value: 'off' },
+      { label: 'Dark', value: 'dark' },
+      { label: 'Follow theme', value: 'auto' }
+    ],
+    effect: (v) => root.setAttribute('data-pdf-theme', v)
+  },
+  {
     key: 'panelOrder', label: 'Panel order', def: 'editor-first',
     options: [
       { label: 'Editor · PDF', value: 'editor-first' },

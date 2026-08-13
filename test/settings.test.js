@@ -45,6 +45,22 @@ test('defaults apply when nothing is stored', async () => {
   assert.equal(mod.settings.autoCompile, true);
   assert.equal(dom.attrs.get('data-theme'), 'dark');
   assert.equal(dom.props.get('--ui-scale'), '1.2');
+  // Off, not 'auto': inverting the preview turns photographs into negatives,
+  // which is not something to do to someone's figures uninvited.
+  assert.equal(mod.settings.pdfTheme, 'off');
+  assert.equal(dom.attrs.get('data-pdf-theme'), 'off');
+});
+
+test('the PDF preview mode reaches the attribute the stylesheet keys off', async () => {
+  // The whole feature is one CSS selector on [data-pdf-theme]; if the attribute
+  // does not arrive, nothing else about it is observable.
+  const { mod, dom } = await load({ pdfTheme: 'auto' });
+  mod.applyAll();
+  assert.equal(dom.attrs.get('data-pdf-theme'), 'auto');
+  assert.equal(mod.set('pdfTheme', 'dark'), true);
+  assert.equal(dom.attrs.get('data-pdf-theme'), 'dark');
+  assert.equal(mod.set('pdfTheme', 'inverted'), false, 'undeclared values must be refused');
+  assert.equal(dom.attrs.get('data-pdf-theme'), 'dark');
 });
 
 test('stored values are restored', async () => {

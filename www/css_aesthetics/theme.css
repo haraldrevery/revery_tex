@@ -531,6 +531,39 @@ button.primary { color:var(--text); border-color:var(--accent) }
               every screen-pixel-to-PDF-point conversion has to know the border
               width. A shadow paints the same hairline and occupies no space. */
            box-shadow:0 0 0 1px var(--border) }
+/* Dark mode for the preview — the pdfTheme setting.
+
+   The canvas is inverted at composite time rather than rendered differently.
+   pdf.js does offer a real option for this (page.render({pageColors})), and it
+   is what Firefox's viewer uses, but its addHCMFilter converts the page to
+   luminance and maps it across a two-colour gradient: every plot and coloured
+   figure comes out duotone. It also runs inside render(), so toggling it would
+   cost a full re-render — about 9.6s on the 49-page book fixture.
+
+   filter is compositing only and changes no layout box, which is what makes
+   this safe: effectiveScale(), scrollToPosition(), SyncTeX in both directions
+   and the link hit test all read getBoundingClientRect()/offsetTop and get
+   identical numbers with it on. The bytes behind Download never see it.
+
+   hue-rotate(180deg) undoes the hue complement invert() applies, so a red curve
+   in a plot stays red and only its lightness flips. Photographs still look like
+   negatives — avoiding that would mean reading each page's operator list to
+   find the image regions, which costs more than the whole feature.
+
+   Scoped to .pdfpage, never to #pdf: .pdf-syncmark and the pdf-overlink cursor
+   live on the container, and inverting the marker would turn var(--warn) into
+   its complement.
+
+   The hairline is respecified because it sits inside the filtered element. At
+   var(--border) it inverts to something invisible against a black page under
+   the light and paper themes; #404040 inverts to a light grey that reads on
+   every theme. */
+[data-pdf-theme="dark"] .pdfpage,
+[data-pdf-theme="auto"][data-theme="dark"] .pdfpage,
+[data-pdf-theme="auto"][data-theme="forest"] .pdfpage {
+  filter: invert(1) hue-rotate(180deg);
+  box-shadow: 0 0 0 1px #404040;
+}
 #pdfempty { flex:1; display:flex; align-items:center; justify-content:center;
             color:var(--text-dim); font-size:.66rem; letter-spacing:var(--tracking-wider);
             text-transform:uppercase }
