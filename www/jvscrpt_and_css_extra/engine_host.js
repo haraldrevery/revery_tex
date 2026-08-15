@@ -89,6 +89,20 @@ export function createEngineHost({ api, settings, onLog, onStatus, projectIsOnDi
   return {
     acquire,
     dispose,
+
+    /**
+     * Whether offering to switch to a system LaTeX would actually help.
+     *
+     * Both halves of `wanted()`'s narrowing, and for the same reasons. Method
+     * presence — never an environment name — so the offer cannot appear in the
+     * browser backends, which have no `detectTex`. And `projectIsOnDisk()`,
+     * because `wanted()` already refuses a system TeX for an in-memory project:
+     * offering a switch that would silently fall back to the bundled engine is
+     * worse than not offering one, since the user would read the unchanged
+     * failure as "switching didn't help" rather than "switching didn't happen".
+     */
+    canOfferSystem: () => NativeTexEngine.available(api) && projectIsOnDisk(),
+
     /** What the last acquire actually produced — 'bundled' | 'system' | null. */
     get source() { return source; }
   };

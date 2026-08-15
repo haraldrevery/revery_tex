@@ -149,6 +149,10 @@ function settingsMenuSpec() {
     // Offering a system TeX where no process can be started would be a control
     // that silently does nothing. Hide it instead of letting it lie.
     if (s.key === 'engineSource' && !NativeTexEngine.available(NativeAPI)) continue;
+    // Rows that record an answer rather than express a preference. They are in
+    // the schema so they are loaded, validated and reset like everything else;
+    // they just have nothing to show.
+    if (s.hidden) continue;
     if (group !== null && s.group !== group) rows.push({ type: 'divider' });
     group = s.group;
     const row = {
@@ -1174,13 +1178,77 @@ async function openFolder() {
  * backend honest rather than a trap, so it is a standing bar rather than a
  * message that scrolls away.
  */
+/**
+ * The standing bar: a sentence, and optionally things to do about it.
+ *
+ * Two callers with nothing else in common, and they cannot collide — the
+ * storage notice exists only where `importZip` does (the browser zip backend)
+ * and the system-LaTeX offer only where `detectTex` does (desktop).
+ */
+function showNotice(text, actions = []) {
+  const el = $('notice');
+  el.textContent = '';
+  el.append(text);
+  for (const a of actions) {
+    const b = document.createElement('button');
+    b.textContent = a.label;
+    b.addEventListener('click', a.onClick);
+    el.append(' ', b);
+  }
+  el.hidden = false;
+}
+
+const hideNotice = () => { $('notice').hidden = true; $('notice').textContent = ''; };
+
 async function showStorageNotice() {
   if (!NativeAPI.importZip) return;
   const persistent = await NativeAPI.isPersistent?.().catch(() => false);
-  $('notice').hidden = false;
-  $('notice').textContent = persistent
+  showNotice(persistent
     ? 'This browser cannot write to your files — the project is kept in browser storage. Export a zip to get it out.'
-    : 'This browser cannot write to your files — the project is kept in browser storage, which the browser may clear. Export a zip to keep your work.';
+    : 'This browser cannot write to your files — the project is kept in browser storage, which the browser may clear. Export a zip to keep your work.');
+}
+
+/**
+ * Tell a desktop user, once, that the compiler they already have is available.
+ *
+ * The bundled engine cannot do biber, cannot do the collections busytex never
+ * built (revtex, IEEEtran, the physics packages, babel's languages), and omits
+ * cm-super — 60 MB of incompressible outlines — which breaks pdfLaTeX with
+ * T1 fontenc. A user with TeX Live or MiKTeX installed has all of it already
+ * and no way to discover that the setting exists.
+ *
+ * Asked once. `systemTexAsked` records that it was answered, either way, so
+ * declining is not re-litigated on every launch.
+ */
+async function offerSystemTex() {
+  if (!NativeTexEngine.available(NativeAPI)) return;      // no shell, no offer
+  if (settings.settings.systemTexAsked) return;
+  if (settings.settings.engineSource === 'system') return;
+
+  // Detection runs a process per tool, so it happens once and only behind the
+  // two guards above.
+  const tools = await NativeAPI.detectTex().catch(() => []);
+  const engines = tools.filter(t => ['pdflatex', 'xelatex', 'lualatex'].includes(t.name));
+  if (!engines.length) {
+    // Nothing installed is also an answer — do not ask again on every launch.
+    settings.set('systemTexAsked', true);
+    return;
+  }
+
+  const answer = (useIt) => {
+    settings.set('systemTexAsked', true);
+    if (useIt) settings.set('engineSource', 'system');
+    hideNotice();
+  };
+
+  showNotice(
+    `Found a LaTeX installation (${engines.map(t => t.name).join(', ')}). ` +
+    `Using it removes the bundled engine's limits — biber, journal classes, all fonts.`,
+    [
+      { label: 'Use it', onClick: () => answer(true) },
+      { label: 'Not now', onClick: () => answer(false) }
+    ]
+  );
 }
 
 async function importZip(file) {
@@ -1357,6 +1425,12 @@ async function compile() {
       const warns = getIssues().filter(d => d.severity === 'warning').length;
       setStatus(`✓ ${r.pages} pages · ${errs} errors, ${warns} warnings · ${secs}s`, errs ? 'warn' : 'ok');
       rawLog('hdr', `✓ ${r.pages} pages in ${secs}s`);
+      // A PDF is not proof the document is right. A .bbl from another biblatex
+      // typesets its raw database as body text and still exits 0, so a compile
+      // that produced pages *and* hit a limit lands on Issues rather than
+      // letting "✓ 49 pages" stand as the whole story.
+      if (r.limits?.length) showTab('issues');
+      offerSystemFor(r.limits);
     } else {
       setStatus(`✗ ${r.error}`, 'err');
       rawLog('err', `✗ ${r.error}`);
@@ -1367,6 +1441,7 @@ async function compile() {
       for (const m of r.missingPackages) rawLog('wrn', `  not in this texmf bundle: ${m}`);
       setIssues([...named, ...getIssues()]);
       showTab('issues');   // a failed compile should land on what went wrong
+      offerSystemFor(r.limits, r.missingPackages);
     }
   } catch (err) {
     setStatus(`✗ ${err.message}`, 'err');
@@ -1375,6 +1450,38 @@ async function compile() {
   } finally {
     btn.disabled = false;
   }
+}
+
+/**
+ * Connect a wall the bundled engine cannot pass to the setting that clears it.
+ *
+ * The setting has always existed; nothing ever pointed at it from the failure
+ * that it fixes, so a user hit `cannot open encoding file` and reached for a
+ * system TeX by hand or gave up.
+ *
+ * Only when switching would genuinely help. `canOfferSystem()` is the engine
+ * host's own narrowing — desktop, and a project on disk — and `systemWouldFix`
+ * excludes the limits a different engine compiles exactly as wrongly: a stale
+ * .bbl is the same stale .bbl under TeX Live unless biber rewrites it.
+ */
+function offerSystemFor(limits = [], missing = []) {
+  if (settings.settings.engineSource === 'system') return;
+  if (!engineHost.canOfferSystem()) return;
+
+  const reason = limits.find(l => l.systemWouldFix)
+    ? 'This needs fonts the bundled engine omits.'
+    : missing.length
+      ? `${missing.join(', ')} is not in the bundled distribution.`
+      : null;
+  if (!reason) return;
+
+  showNotice(`${reason} Your own LaTeX installation has it.`, [
+    {
+      label: 'Use system LaTeX',
+      onClick: () => { settings.set('engineSource', 'system'); hideNotice(); compile(); }
+    },
+    { label: 'Dismiss', onClick: hideNotice }
+  ]);
 }
 
 async function showPdf(bytes, pages) {
@@ -1550,6 +1657,11 @@ await loadProjects();
 // Only claim ready if something actually opened — otherwise loadProjects has
 // already said what the user needs to do, and overwriting it says nothing.
 if (project) setStatus('ready');
+
+// After loading, not before: the offer competes with the storage notice for the
+// same bar, and loadProjects is what decides whether that notice is showing.
+// Not awaited — detection spawns a process per tool and nothing below needs it.
+offerSystemTex();
 
 // Test hook for the editor extensions: completion and auto-close are hard to
 // exercise through the UI without a keystroke driver.

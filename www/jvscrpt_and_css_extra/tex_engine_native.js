@@ -18,7 +18,7 @@
 // pass an argument even if it wanted to, which is the property that matters:
 // the sandbox does not depend on this file being careful.
 
-import { parseLatexLog } from './latex_log.js';
+import { parseLatexLog, engineLimits } from './latex_log.js';
 
 const ENGINE_TOOL = { pdftex: 'pdflatex', xetex: 'xelatex', luatex: 'lualatex' };
 
@@ -137,7 +137,12 @@ export class NativeTexEngine {
     if (this._cancelled) return this._fail('cancelled');
 
     const log = runs.map(r => r.stdout || '').join('\n');
-    const diagnostics = parseLatexLog(log);
+    // Limits go first here for the same reason as in the WASM engine: the Issues
+    // tab must not disagree with itself depending on which engine ran. Most of
+    // them cannot arise on a system TeX, but a stale .bbl can — biber only
+    // rewrites it if biber is actually installed.
+    const limits = engineLimits(log);
+    const diagnostics = [...limits, ...parseLatexLog(log)];
     const missingPackages = [...new Set(
       [...log.matchAll(/(?:File|LaTeX Error: File)\s+`([^']+\.sty)'\s+not found/g)].map(m => m[1])
     )];
@@ -160,7 +165,7 @@ export class NativeTexEngine {
     if (!pdf || !pdf.length) {
       const first = diagnostics.find(d => d.severity === 'error');
       return {
-        success: false, pdf: null, log, diagnostics, missingPackages,
+        success: false, pdf: null, log, diagnostics, missingPackages, limits,
         error: missingPackages.length
           ? `missing package: ${missingPackages.join(', ')}`
           : (first ? first.message : 'the compiler produced no PDF — see the raw log'),
@@ -180,7 +185,7 @@ export class NativeTexEngine {
 
     return {
       success: true,
-      pdf, synctex, log, diagnostics, missingPackages,
+      pdf, synctex, log, diagnostics, missingPackages, limits,
       pages: countPages(pdf),
       error: null
     };
@@ -188,7 +193,7 @@ export class NativeTexEngine {
 
   _fail(message) {
     this.onLog(message, 'err');
-    return { success: false, pdf: null, log: '', diagnostics: [], missingPackages: [], pages: 0, error: message };
+    return { success: false, pdf: null, log: '', diagnostics: [], missingPackages: [], limits: [], pages: 0, error: message };
   }
 }
 

@@ -149,6 +149,7 @@ async function main() {
       canOpen: !!window.NativeAPI.openFolder,
       importVisible: getComputedStyle(document.getElementById('importzip')).display !== 'none',
       noticeShown: !document.getElementById('notice').hidden,
+      notice: document.getElementById('notice').textContent,
       files: [...document.querySelectorAll('.node[data-path]')].map(n => n.dataset.path).sort()
     }))()`);
 
@@ -156,7 +157,11 @@ async function main() {
     check('reports itself as desktop', shell.desktop === true);
     check('can open folders', shell.canOpen);
     check('no zip import offered', !shell.importVisible);
-    check('no browser-storage notice', !shell.noticeShown);
+    // By text, not by whether the bar is showing at all. The bar has two
+    // callers and on desktop the other one — the system-LaTeX offer — is
+    // legitimately in it, so asserting the bar is empty made this flaky the
+    // moment the offer existed: it raced a detection that spawns six processes.
+    check('no browser-storage notice', !/browser storage/i.test(shell.notice), shell.notice.slice(0, 60));
     check('opened the scratch project', shell.files.join(',') === 'chapters/one.tex,main.tex',
       shell.files.join(', '));
 
@@ -220,6 +225,41 @@ async function main() {
     check('system TeX detection is exposed', tex.available);
     if (tex.available && tex.tools.length) {
       check('found an engine on PATH', tex.tools.some(t => /latex$/.test(t)), tex.tools.join(', '));
+
+      /* ── the offer that makes any of this discoverable ─────────────── */
+      // The setting has always existed; nothing pointed at it. This is the
+      // whole feature, so it is asserted rather than assumed — and waited for,
+      // because detection spawns a process per tool and the offer appears when
+      // that resolves, not when the app opens.
+      const offered = await cdp.waitFor(
+        `/Found a LaTeX installation/.test(document.getElementById('notice').textContent)`,
+        { what: 'the system-LaTeX offer', timeoutMs: 20000 }
+      ).then(() => true, () => false);
+      check('offers the LaTeX installation it found', offered);
+
+      if (offered) {
+        const offer = await cdp.evaluate(`(() => ({
+          text: document.getElementById('notice').textContent,
+          buttons: [...document.querySelectorAll('#notice button')].map(b => b.textContent)
+        }))()`);
+        check('the offer names the engines it found',
+          /pdflatex|xelatex|lualatex/.test(offer.text), offer.text.slice(0, 70));
+        check('the offer can be taken or declined',
+          offer.buttons.length === 2, offer.buttons.join(' | '));
+
+        // Declining must stick. Otherwise it is asked again on every launch,
+        // which is how a helpful offer becomes a nag.
+        const declined = await cdp.evaluate(`(async () => {
+          [...document.querySelectorAll('#notice button')].find(b => /not now/i.test(b.textContent)).click();
+          const s = await import('./jvscrpt_and_css_extra/settings.js');
+          return { hidden: document.getElementById('notice').hidden,
+                   asked: s.settings.systemTexAsked,
+                   source: s.settings.engineSource };
+        })()`, true);
+        check('declining hides the offer', declined.hidden);
+        check('declining is remembered', declined.asked === true);
+        check('declining does not switch the engine', declined.source === 'bundled');
+      }
 
       // The sandbox, through the real IPC rather than the unit tests.
       const refused = await cdp.evaluate(`(async () => {

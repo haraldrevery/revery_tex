@@ -82,6 +82,11 @@ async function main() {
     check('Export disabled with no project', shell.exportDisabled);
     check('storage notice is visible', shell.noticeShown, shell.notice.slice(0, 60) + '…');
     check('notice names browser storage', /browser storage/i.test(shell.notice));
+    // The one bar serves two callers. Here it must be the storage notice and
+    // never the system-LaTeX offer: no browser can start a process, so a
+    // "use your own LaTeX" button would be a control that cannot work.
+    check('no system-LaTeX offer in a browser',
+      !/system LaTeX|Found a LaTeX/i.test(shell.notice), shell.notice.slice(0, 60));
     check('status invites an import', /import a zip/i.test(shell.status), shell.status);
 
     /* ── import a zip built in the page itself ──────────────────────── */
@@ -218,13 +223,15 @@ async function main() {
       status: document.getElementById('status').textContent,
       openVisible: getComputedStyle(document.getElementById('open')).display !== 'none',
       importVisible: getComputedStyle(document.getElementById('importzip')).display !== 'none',
-      noticeShown: !document.getElementById('notice').hidden
+      noticeShown: !document.getElementById('notice').hidden,
+      notice: document.getElementById('notice').textContent
     }))()`);
 
     check('web-fs chosen by default in Chromium', chromium.backend === 'web-fs', chromium.backend);
     check('Open folder offered', chromium.canOpen && chromium.openVisible);
     check('Import hidden when real files are available', !chromium.importVisible);
     check('no storage notice — files are real here', !chromium.noticeShown);
+    check('no system-LaTeX offer in a browser', !/system LaTeX|Found a LaTeX/i.test(chromium.notice || ''));
     check('status invites opening a folder', /open a folder/i.test(chromium.status), chromium.status);
     check('reopen is available for a remembered folder', chromium.hasReopen);
 

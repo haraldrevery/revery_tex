@@ -39,9 +39,15 @@ function measure(dir) {
   return { bytes, files };
 }
 
-// The app is ~101 MB, almost all of it the engine. 150 MB leaves room for real
-// growth while still catching a whole directory arriving by accident.
-const CEILING_MB = 150;
+// The app is ~186 MB, almost all of it the engine: 32 MB of wasm and ~140 MB of
+// texmf. It was ~101 MB until the texmf selection stopped being trace-driven —
+// the old bundle was fitted to the five gate fixtures and shipped 87 of 2270
+// LaTeX package directories, so most real documents could not compile.
+//
+// 200 MB leaves room for real growth while still catching a whole directory
+// arriving by accident, which is the only thing this number is for. The upstream
+// release that caused this test to exist was 649 MB, so the margin is ample.
+const CEILING_MB = 200;
 
 test('www/ carries only what ships', () => {
   const { bytes, files } = measure(WWW);

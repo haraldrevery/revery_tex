@@ -113,7 +113,10 @@ async function main() {
     // gets bumped without anyone checking what it now means.
     const schema = await cdp.evaluate(`(async () => {
       const s = await import('./jvscrpt_and_css_extra/settings.js');
-      const shown = s.SCHEMA.filter(e => e.key !== 'engineSource');
+      // Both exclusions mirror settingsMenuSpec: engineSource is hidden where no
+      // process can be started, and \`hidden\` rows record an answer rather than
+      // express a preference, so they are in the schema but have no control.
+      const shown = s.SCHEMA.filter(e => e.key !== 'engineSource' && !e.hidden);
       return {
         // Only radios and steppers carry a .menu-head; submenus and toggles are
         // a single row that names itself.

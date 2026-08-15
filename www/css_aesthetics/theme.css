@@ -193,6 +193,10 @@ button.primary { color:var(--text); border-color:var(--accent) }
   color:var(--warn); border-bottom:1px solid var(--border); background:var(--bg);
 }
 #notice[hidden] { display:none }
+/* The bar carries actions when it is offering something rather than only
+   stating it — "use your system LaTeX", "not now". Sized down to sit inside a
+   .62rem uppercase line without setting the bar's own height. */
+#notice button { padding:.15rem .4rem .05rem; font-size:.58rem; margin-left:.15rem }
 
 /* ── dropdown menus ─────────────────────────────────────────────────── */
 /* Same idiom as Revery Notebook: mono, uppercase, ■ marks the active choice.

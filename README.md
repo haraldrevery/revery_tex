@@ -29,17 +29,17 @@ REVERY_TEX_OPEN=/path/to/project npm run start:tauri   # open straight into a fo
 npm run installers                # .deb + .rpm on Linux, .msi + .exe on Windows
 ```
 
-**The engine binaries are committed** (`www/engine/dist/`, 97 MB), so a fresh
+**The engine binaries are committed** (`www/engine/dist/`, ~172 MB), so a fresh
 clone runs immediately. You only need the 649 MB upstream release if you want to
 rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-the-tex-distribution).
 
 > **`www/` contains only what ships.** Every shell loads that folder, and Tauri
 > embeds *all* of it into the binary with no whitelist — so anything placed
 > there reaches every user. Build inputs live beside it (`engine_upstream/`),
-> never inside. This is enforced by a size ceiling in
-> `test/frontend_payload.test.js`, because it has already gone wrong once: the
-> upstream tree sat in `www/engine/busytex/` and the Tauri `.deb` came out at
-> 471 MB instead of ~120 MB.
+> never inside. This is enforced by a 200 MB size ceiling in
+> `test/frontend_payload.test.js` (`www/` is ~186 MB), because it has already
+> gone wrong once: the upstream tree sat in `www/engine/busytex/` and the Tauri
+> `.deb` came out at 471 MB instead of ~105 MB.
 
 ### Prerequisites
 
@@ -84,7 +84,7 @@ rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-t
 │    settings_boot.js             pre-paint theme, so there is no flash        │
 │    pdf_preview.js               pdf.js canvas renderer                       │
 │    codemirror-bundle.js         generated — edit build_tools/cm_entry_tex.js  │
-│  engine/dist/                   TeX Live WASM + slim texmf (97 MB, committed) │
+│  engine/dist/                   TeX Live WASM + texmf (~172 MB, committed)   │
 └──────────────────────────────────────────────────────────────────────────────┘
         │                                    │
         │ TexEngine.compile()                │ NativeAPI.readTextFile() …
@@ -209,34 +209,82 @@ structure deliberately is not.
 
 ## The TeX distribution
 
-Full TeX Live is 908 MB uncompressed. Shipping it is not an option, so
-`build_tools/build_slim_texmf.js` repacks it down to **62 MB** by keeping only
-what documents actually need.
+`build_tools/build_slim_texmf.js` repacks the upstream busytex release into the
+**~140 MB** of texmf the app ships. The source is `texlive-extra` — TeX Live
+2026's scheme-basic plus the latex, latexrecommended, latexextra, xetex, luatex,
+fontsrecommended and fontutils collections, 23,881 files and 516 MB of virtual
+stream.
 
-The selection is **trace-driven, not guesswork**: `build_tools/texmf_trace.json`
-lists the 309 files real compiles actually opened, extracted from kpathsea debug
-output. From there:
+The selection is **policy-driven**: keep the tree, minus a blocklist that has to
+be argued for.
 
-1. Every traced file, always.
-2. Drop `.afm` (32 MB of Type1 metrics that only `fontinst` reads), `/source/`, `/doc/`.
-3. Macro directories get **whole-directory closure** — packages have
-   interdependent files and a partial directory fails in strange ways.
-4. Font directories **also** get whole-directory closure. This is not symmetry:
-   fontconfig resolves a family by *scanning* the directory, and never opens the
-   files it rejects, so `\setsansfont{Latin Modern Sans}` needs a font present
-   that no trace will ever mention.
-5. A curated list of common packages absent from the test documents.
-6. `ALWAYS_DIRS`, for directories a trace **cannot** reach. Currently the
-   BibTeX styles: `bibtex/bst/base/` and `bibtex/bst/biblatex/`. This is the
-   blind spot of a trace-driven build, and it shipped for real — bibtex8 is in
-   the wasm and wired into all three drivers, but no test document used classic
-   `\bibliography`, so no trace ever opened a `.bst`, so the bundle contained
-   none of them and `\bibliographystyle{plain}` failed for every real document
-   while the gate stayed green. The `bibtex` gate fixture now covers it.
+1. **Macros**: everything under `/tex/{latex,generic,xelatex,plain}/`, minus
+   ~29 blocked directories. The macro tree is 227 MB and violently top-heavy —
+   `utfsym` 14 MB, `openmoji` 13 MB, `worldflags` 11 MB, and so on down through
+   emoji, flag and icon sets. Blocking those, plus a few obsolete or
+   external-tool-driven packages, removes 109 MB and leaves essentially every
+   real LaTeX package.
+2. **Fonts**: the whole `/fonts/` tree, minus `cm-super` (57 MB of Type 1 EC
+   Computer Modern that Latin Modern supersedes) and `libertine` (17 MB for one
+   family). Whole-tree rather than per-directory because fontconfig resolves a
+   family by *scanning*, and never opens the files it rejects.
+3. **BibTeX and makeindex**: kept whole. 2 MB.
+4. Drop `.afm` (Type 1 metrics only `fontinst` reads), `/source/`, `/doc/`.
+5. `/tex/context/`, `/tex/luatex/`, `/tex/lualatex/` and `/tex/latex-dev/` are
+   excluded: no LuaTeX format ships, so they are unreachable code.
 
-Output is four data packages, each under the 50 MB git limit, plus the ~21 MB
-ICU data XeTeX cannot start without. The build is **deterministic** — rebuilding
-produces byte-identical output, so committed binaries do not bloat history.
+`build_tools/texmf_trace.json` — the 309 files the gate fixtures actually
+opened — is still read, but it no longer selects anything. It is now an
+assertion: the build fails if the policy would exclude a file the gate opens, or
+if a blocked directory contains one. `COMMON_PACKAGES` works the same way, as a
+regression check that the blocklist has not eaten something real.
+
+**This replaced a trace-driven selection, and the reason is the point.** The
+bundle used to be built from a trace of the five gate fixtures, and the gate
+then compiled those same five fixtures — so 5/5 only ever proved the bundle
+covered itself. It kept **87 of 2,270** LaTeX package directories whole and
+shipped 10 more half-present: `amsmath` 9/18 files, `pgf` 200/481, `tools`
+51/104, the LaTeX kernel's own `base/` 170/479. `beamer`, `koma-script`,
+`memoir`, `polyglossia`, `glossaries-extra` and `tabularray` were absent
+outright. A half-present package does not fail cleanly; it fails later, in
+someone else's document.
+
+Output is **seven data packages**, each under the 50 MB git limit — a logical
+part over 45 MB of virtual bytes is split into `-1`, `-2`, … by
+`splitPart()`. **All seven are preloaded**, and that is load-bearing rather than
+lazy: see [Why everything is preloaded](#why-everything-is-preloaded).
+
+The build is **deterministic** — rebuilding produces byte-identical output, so
+committed binaries do not bloat history. It also deletes parts a previous build
+wrote that this one did not, because part names come from the policy and Tauri
+embeds all of `www/` with no whitelist.
+
+### Why everything is preloaded
+
+busytex supports a *catalog*: data packages fetched and mounted on demand
+instead of at startup. The manifest still has the field. It is empty, and must
+stay empty.
+
+`busytex_pipeline.js` mounts a catalog package only when a document has at least
+one **unresolved** `\usepackage`, and it finds those by matching lines that
+*start with* `\usepackage` in the **main file only** — never `\documentclass`,
+never `\RequirePackage`, never an `\include`d file. So a beamer deck whose
+preamble has no `\usepackage` resolves cleanly to nothing, mounts nothing, and
+fails on `beamer.cls` while `beamer.cls` sits in the bundle.
+
+That is measured, not theorised: putting the macro tree in the catalog broke
+`beamer`, `scrartcl` and `memoir` while every gate fixture stayed green, because
+every gate fixture happens to have a `\usepackage`.
+
+The same reasoning is why the `// \ProvidesPackage{…}` index at the head of each
+data package is stripped. That index is what the resolver matches against; with
+it absent nothing resolves and the pipeline's own "enable all" fallback does the
+right thing. Restoring it — which looks like an obvious optimisation — switches
+selectivity back on. `test/engine_catalog.test.js` fails if either mechanism
+comes back.
+
+Preloading costs nothing real, because the fallback already mounted everything
+for any document that triggered a mount at all.
 
 ### Rebuilding the TeX distribution
 
@@ -321,11 +369,18 @@ Protocol and compiles four real LaTeX projects, asserting exact page counts:
 | `book` | XeLaTeX + makeindex | 49 |
 | `homework` | XeLaTeX | 27 |
 | `bibtex` | pdfLaTeX + bibtex8 | 1, and the citations must resolve |
-| `missing-pkg` | — | must **fail**, naming `pgfornament.sty` |
+| `missing-pkg` | — | must **fail**, naming `biblatex-apa.sty` |
 
-The last two rows matter as much as the others. With a slim texmf, "package not
-in the bundle" is the most likely failure, so the app naming it is a tested
-feature rather than an error path.
+The last two rows matter as much as the others. "Package not in the bundle" is a
+failure users will hit, so the app naming it is a tested feature rather than an
+error path.
+
+`missing-pkg` uses `biblatex-apa` because that package is not in the busytex
+source bundle *at all* (it is `collection-bibtexextra`), so no repacker policy
+can make it appear. It used to name `pgfornament`, which the slim bundle merely
+excluded — and when the selection widened, `pgfornament` started shipping and
+the fixture would have quietly begun passing where it was supposed to fail.
+A must-fail fixture has to name something structurally unreachable.
 
 And `bibtex` is there because a page count is not always enough: a document with
 no `.bst` still typesets, at the right length, with `[?]` where every citation
@@ -337,6 +392,27 @@ green page counts said nothing about it.
 Fixtures live in `../latex_project_tests/`. `test/serve.js` applies a small
 in-flight patch overlay to `homework` (EPS logo → PNG, system fonts → Latin
 Modern) so those source files stay pristine; the patches are printed in the log.
+
+### The coverage probe — the question the gate cannot ask
+
+```bash
+npm run serve &
+node test/run_coverage.js
+```
+
+**Deliberately not part of `npm run check`.** The gate is a contract about five
+specific documents; this asks the opposite question — does the bundle cover
+LaTeX that nobody here wrote? It compiles beamer, koma-script, memoir,
+polyglossia, TikZ libraries, siunitx, tabularray, glossaries-extra and
+unicode-math, and asserts both that a PDF came out *and* that the log carries no
+`Missing character`, no undefined font shape and no missing file.
+
+It exists because that question had no answer for a long time, and the answer
+turned out to be bad. The texmf bundle was selected from a kpathsea trace of the
+gate's own fixtures, so a green gate only ever proved the bundle covered itself;
+`beamer`, `scrartcl` and `memoir` could not compile at all while every suite was
+green. Both halves of each assertion are load-bearing — a missing glyph produces
+a PDF of exactly the right length.
 
 No test framework. `node:test` and a hand-rolled CDP client (`test/cdp.js`), to
 match Revery Notebook's zero-test-dependency convention.
@@ -360,14 +436,14 @@ it on:
 | Windows | Electron | `dist-electron/*.msi`, `dist-electron/*Setup*.exe` |
 
 The `.exe` is an NSIS installer — there is no bundler target named `exe`. It is
-not one-click: 120 MB deserves a progress bar and a directory choice. It
+not one-click: 200 MB deserves a progress bar and a directory choice. It
 installs per-user, so it needs no elevation.
 
 Narrow it to one shell when you only want the one:
 
 ```bash
-npm run installers -- tauri       # ~53 MB deb; www/ embedded in the binary
-npm run installers -- electron    # ~120 MB deb; www/ as files beside the exe
+npm run installers -- tauri       # ~105 MB deb; www/ embedded in the binary
+npm run installers -- electron    # ~200 MB deb; www/ as files beside the exe
 npm run verify:installers         # re-check what is already built
 ```
 
@@ -402,11 +478,24 @@ pins both halves, because on any given machine only one of them ever runs.
 
 ---
 
-## Using your own TeX Live
+## Using your own LaTeX installation
 
-Settings → **LaTeX engine → System TeX Live**, on the desktop only. It closes
-the two things the bundled engine cannot do: **biber**, which no WASM build has,
-and packages outside the 62 MB slim bundle.
+Settings → **LaTeX engine → System LaTeX (TeX Live or MiKTeX)**, on the desktop
+only. It closes the two things the bundled engine cannot do: **biber**, which no
+WASM build has, and packages outside the bundle — see Known limits for what is
+genuinely unreachable.
+
+**The app offers this rather than waiting to be found.** On desktop it runs
+detection once, and if a LaTeX installation is on PATH it says so in the standing
+bar with a button to switch; declining is remembered (`systemTexAsked`) so it is
+not asked again. And when a compile hits a wall the bundled engine cannot pass —
+a class that is not in the distribution, or fonts it omits — the failure names
+the setting that clears it and offers the switch inline.
+
+That offer is feature-detected like everything else: `canOfferSystem()` in
+`engine_host.js` requires both the shell methods (`detectTex`, `runTex`) and a
+project on disk, because a system TeX cannot compile a project that exists only
+in memory. In a browser it can never appear, which `npm run test:web` asserts.
 
 Both packagers build `deb` and `rpm` on Linux and `msi` and `exe` on Windows —
 see [Building installers](#building-installers). The lookup is the same
@@ -440,13 +529,54 @@ a document that compiles in one shell and not the other is undiagnosable.
   Perl. Three ways round it, and the app names all three in the log: ship a
   prebuilt `.bbl`, set `\usepackage[backend=bibtex]{biblatex}` so bundled
   bibtex8 builds it (weaker sorting, name handling and UTF-8 — it is biblatex's
-  legacy backend), or switch to a system TeX Live on the desktop. Classic
+  legacy backend), or switch to a system LaTeX on the desktop. Classic
   BibTeX and `makeindex` both work as they are.
 - **Fonts must be referenced by file, not by system name** — WASM has no host
   font database. `\setmainfont{Times New Roman}` cannot work.
+- **`\usepackage[T1]{fontenc}` with default Computer Modern needs `lmodern`.**
+  T1 routes to the EC fonts, and `pdftex.map` maps all 396 `ec*` entries to
+  cm-super outlines, which the bundle omits — 409 Type 1 files, 57 MiB, and
+  measured to compress at **ratio 0.996**, so they would cost the full 60 MB,
+  more than the entire 2,000-package macro tree. Nothing redirects `ec*` to Latin
+  Modern: the `ec-lm*` map entries are Latin Modern's own EC-encoded fonts under
+  different TFM names, reachable only when a document loads `lmodern`.
+
+  The document typesets completely and dies while the PDF is being written, so
+  the raw error (`cannot open encoding file`) points nowhere useful. The app
+  recognises it and says what to do: add `\usepackage{lmodern}` — same encoding,
+  ships here — or switch to a system LaTeX.
+- **A prebuilt `.bbl` from a different biblatex corrupts the document silently.**
+  With no biber, projects ship a `.bbl`; if its format version does not match the
+  bundled biblatex, biblatex typesets the raw database as body text
+  (`family=Einstein, giveni=A. M., author1hash=…`) and **still exits 0**. The
+  `book` fixture does exactly this and the gate calls it PASS at 49 pages,
+  because corrupt text does not move a page boundary. `engineLimits()` in
+  `latex_log.js` reports it as an error despite the successful compile.
 - **No EPS.** That needs Ghostscript. Convert to PDF or PNG first.
-- **Slim bundle**: a package outside it fails, by name, with a pointer to the
-  fuller distribution. Widen `COMMON_PACKAGES` in the repacker and re-run the gate.
+- **Some packages are not in the upstream source bundle at all**, so no
+  repacker policy can ship them. busytex builds scheme-basic plus the latex,
+  latexrecommended, latexextra, xetex, luatex, fontsrecommended and fontutils
+  collections — nothing from `collection-mathscience`, `collection-bibtexextra`,
+  `collection-publishers` or any `collection-lang*`. In practice that means:
+  - `physics`, `mhchem`, `chemformula`, `algorithm2e`, `algorithms`,
+    `algorithmicx`. These sat in `COMMON_PACKAGES` for a long time, advertised
+    in the shipped manifest, matching zero files and saying nothing.
+  - **babel's language files.** `\usepackage[ngerman]{babel}` fails with
+    `Unknown option`, because `babel-german` and its siblings are
+    `collection-langgerman` and friends. Babel's core is present, so this looks
+    like a broken option rather than a missing package. **Use `polyglossia` with
+    XeLaTeX instead** — it ships complete, including `gloss-german.ldf`.
+  - Journal classes: `revtex`, `IEEEtran`, `acmart`, `elsarticle`.
+
+  These are listed in `NOT_IN_SOURCE_BUNDLE` in the repacker, which fails the
+  build if one of them ever does turn up. Adding them means teaching the
+  repacker a second source bundle.
+- **Missing characters are a font question, not a bundle question.** A glyph the
+  document's chosen font lacks is dropped with a `Missing character` line in the
+  log and no error — the `book` fixture loses `Ω № İ ƒ ¾ ⅔ ⅛ ⅓ ®` to Latin
+  Modern this way, and widening the font set does not change it, because the
+  document still asks for Latin Modern. The app does not currently surface these
+  on a successful compile.
 - **SyncTeX** is wired both ways (click the PDF, Ctrl+click the source) but has
   no highlighting of the matched region — it places the cursor and flashes a
   marker. Box nesting is parsed but discarded; restoring it is what a precise
@@ -496,7 +626,7 @@ Each of these cost real debugging time:
   Chromium refuses `fetch()` on `file://`, and the engine fetches its wasm and
   every data package, so a `file://` window cannot start the compiler at all.
 - **`tauri build` (release) is memory-hungry** — LTO over 425 crates while
-  embedding 97 MB. Use `tauri build --debug --no-bundle` and run nothing else.
+  embedding ~172 MB. Use `tauri build --debug --no-bundle` and run nothing else.
 
 ---
 

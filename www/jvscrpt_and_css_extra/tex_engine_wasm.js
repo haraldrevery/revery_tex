@@ -20,6 +20,10 @@
 //      what is actually on disk.
 //   5. Missing packages fail opaquely. With a slim texmf that is the single
 //      most likely failure, so it has to name the package.
+//   6. A compile that produced a PDF can still be wrong. A .bbl built by another
+//      biblatex typesets its raw database as body text and exits 0, so the
+//      limits below are computed on success as well as on failure — otherwise
+//      "it compiled" gets mistaken for "it is right".
 
 // Vendored INTO www/ deliberately: Tauri bundles only frontendDist, so anything
 // imported from outside www/ simply is not there at runtime. The copy under
@@ -27,7 +31,7 @@
 // Revery Notebook's third_party_sources/ convention.
 // Log reading is shared with the system-TeX engine: two parsers would mean
 // the Issues tab disagreeing with itself depending on which engine ran.
-import { parseLatexLog as parseDiagnostics, missingPackages, pagesFromLog, firstTexError } from './latex_log.js';
+import { parseLatexLog as parseDiagnostics, missingPackages, pagesFromLog, firstTexError, engineLimits } from './latex_log.js';
 
 import { BusyTexRunner, PdfLatex, XeLatex, LuaLatex, clearAllPackageCache }
   from './texlyre_busytex.js';
@@ -214,8 +218,16 @@ export class WasmTexEngine {
       const missing = success ? [] : missingPackages(log);
       if (missing.length) {
         this._log('warn', `not in this texmf bundle: ${missing.join(', ')}`);
-        this._log('warn', 'the desktop app carries the full TeX Live distribution');
+        this._log('warn', 'a system LaTeX installation carries the full distribution');
       }
+
+      // (6) Deliberately computed on *both* paths, unlike missingPackages.
+      // The failure these name worst is a stale .bbl: biblatex typesets its raw
+      // database as body text and still exits 0, so a success-only check would
+      // report "✓ 49 pages · 0 errors" over a document whose opening pages are
+      // filled with `family=Einstein, giveni=A. M., author1hash=…`.
+      const limits = engineLimits(log);
+      for (const l of limits) this._log('warn', l.message);
 
       return {
         success,
@@ -226,7 +238,8 @@ export class WasmTexEngine {
         seconds,
         error: success ? null : (firstTexError(log) || `compile failed (exit ${result.exitCode})`),
         missingPackages: missing,
-        diagnostics: parseDiagnostics(log)
+        limits,
+        diagnostics: [...limits, ...parseDiagnostics(log)]
       };
     } finally {
       this._busy = false;

@@ -72,3 +72,65 @@ export function pagesFromLog(log) {
   const m = /Output written on [^(]*\((\d+) pages?/.exec(log || '');
   return m ? Number(m[1]) : null;
 }
+
+/**
+ * Walls the bundled engine cannot get past, named and explained.
+ *
+ * These are the failures where the honest answer is "this engine will never do
+ * that" rather than "your document is wrong", and each one is a real report:
+ *
+ *   - `cannot open encoding file` — \usepackage[T1]{fontenc} with default
+ *     Computer Modern routes to the EC fonts, and pdftex.map maps every one of
+ *     them to cm-super outlines, which the bundle omits because they are 60 MB
+ *     and do not compress. The document typesets perfectly and dies while the
+ *     PDF is being written, which makes the raw pdfTeX line especially unhelpful.
+ *   - `wrong format version` — a prebuilt .bbl from a different biblatex. No
+ *     WASM build has biber, so projects ship a .bbl; when its format is stale
+ *     biblatex typesets the raw database as body text and still exits 0. That is
+ *     why this is an *error* despite a PDF being produced.
+ *   - a missing .cls/.sty that is not in the source bundle at all — journal
+ *     classes and the collections busytex never built.
+ *
+ * `systemWouldFix` is what lets the shell offer the switch only when switching
+ * would actually help; it is false for a stale .bbl, because a system TeX
+ * compiles the same wrong file unless biber regenerates it first.
+ *
+ * Returns [] for a clean log, so callers can spread it unconditionally.
+ */
+export function engineLimits(log) {
+  const text = log || '';
+  const out = [];
+
+  if (/cannot open encoding file/i.test(text) || /Font\b[^\n]*\bnot loadable/i.test(text)) {
+    out.push({
+      severity: 'error',
+      package: null,
+      kind: 'missing-font-outlines',
+      systemWouldFix: true,
+      message: 'T1 with Computer Modern needs the cm-super fonts, which this bundle omits. ' +
+               'Add \\usepackage{lmodern} — same encoding, ships here — or use a system LaTeX.'
+    });
+  }
+
+  // Two traps in one short line, both of them real:
+  //
+  //   `[\d.]+` would greedily absorb the sentence's own full stop and report
+  //   "expected 3.3.". And TeX hard-wraps its log at 79 columns, so the version
+  //   genuinely arrives split — `expected 3.` / `3.` — which is why `\s*` sits
+  //   inside the version rather than around it. The capture is then squeezed.
+  const stale = /File ['"`]?([\w.-]+)['"`]? is wrong format version - expected (\d+(?:\.\s*\d+)*)/i.exec(text);
+  if (stale) {
+    const version = stale[2].replace(/\s+/g, '');
+    out.push({
+      severity: 'error',
+      package: 'biblatex',
+      kind: 'stale-bbl',
+      systemWouldFix: false,
+      message: `${stale[1]} was built by a different biblatex (this one expects ${version}). ` +
+               'Its entries will not typeset — regenerate it with biber, or set ' +
+               '\\usepackage[backend=bibtex]{biblatex}, which the bundled bibtex8 can build.'
+    });
+  }
+
+  return out;
+}

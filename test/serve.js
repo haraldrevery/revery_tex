@@ -95,16 +95,28 @@ const PROJECTS = {
       path: 'main.tex',
       content: [
         '\\documentclass{article}',
-        '% pgfornament is not in the slim bundle by design.',
-        '\\usepackage{pgfornament}',
+        '% See the note below on why this package and not another.',
+        '\\usepackage{biblatex-apa}',
         '\\begin{document}Hello\\end{document}'
       ].join('\n')
     }],
     main: 'main.tex',
     engine: 'pdftex',
     expectPages: null,
-    expectFailure: 'pgfornament',
-    note: 'Expected to FAIL, naming the missing package.'
+    expectFailure: 'biblatex-apa',
+    // This used to be pgfornament, chosen because the slim bundle excluded it.
+    // Widening the bundle to whole-tree-minus-blocklist made pgfornament ship,
+    // and the fixture silently stopped testing anything — it would have started
+    // passing when it was supposed to fail.
+    //
+    // biblatex-apa is a durable choice instead: it is not in the busytex source
+    // bundle *at all*. busytex builds scheme-basic plus collections latex,
+    // latexrecommended, latexextra, xetex, luatex, fontsrecommended and
+    // fontutils; biblatex-apa is in collection-bibtexextra. So no selection
+    // policy this repacker could adopt can make it appear, which is exactly the
+    // property a must-fail fixture needs — the assertion is about the app naming
+    // what it cannot find, not about any particular package being excluded.
+    note: 'Expected to FAIL, naming the missing package. Not in the source bundle at all.'
   },
   cv: {
     dir: 'cv_template',

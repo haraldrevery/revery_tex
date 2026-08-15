@@ -229,12 +229,30 @@ export const SCHEMA = [
     // The one two-option setting left as a flat list: picking wrong is the only
     // setting here that stops compiles working, so both choices stay spelled out
     // rather than hiding behind a ■ you have to already understand.
+    // The label says both distributions on purpose. The subprocess layer
+    // allowlists six program *names* resolved against PATH, and MiKTeX installs
+    // all six — so this has always found a MiKTeX, while the old label
+    // ("System TeX Live") told those users it did not apply to them.
+    //
+    // The stored value stays `system`. Renaming it would be silent data loss:
+    // a value that is not among the declared options is discarded on load, so
+    // every existing user of this setting would be reset to bundled.
     key: 'engineSource', label: 'LaTeX engine', def: 'bundled', appliedBy: 'app',
     group: 'engine',
     options: [
       { label: 'Bundled (offline)', value: 'bundled' },
-      { label: 'System TeX Live', value: 'system' }
+      { label: 'System LaTeX (TeX Live or MiKTeX)', value: 'system' }
     ]
+  },
+  {
+    // Whether the one-time "you have a LaTeX installation, want to use it?"
+    // offer has been answered. Not shown in the menu — it records an answer
+    // rather than expressing a preference — but declared here anyway so it is
+    // loaded, validated and cleared by Reset like everything else, instead of
+    // becoming a second, private persistence mechanism.
+    key: 'systemTexAsked', label: 'System LaTeX offer answered', def: false,
+    appliedBy: 'app', group: 'engine', hidden: true,
+    options: [{ label: 'Yes', value: true }, { label: 'No', value: false }]
   }
 ];
 

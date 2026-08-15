@@ -1,14 +1,13 @@
 {
-  "generated": "2026-08-13T00:53:09.001Z",
   "parts": [
     {
       "part": "core",
       "name": "texlive-slim-core",
-      "files": 1240,
-      "virtualBytes": 36027848,
-      "dataBytes": 21860571,
-      "jsBytes": 686152,
-      "package_uuid": "sha256-922319185c682e339de884c2aed9790ae35da68fd0cfeed63dffee7ca9c2f93a"
+      "files": 214,
+      "virtualBytes": 13873589,
+      "dataBytes": 10170206,
+      "jsBytes": 414398,
+      "package_uuid": "sha256-6a8509a40a6325a8d1a3450b8d3384983c3eb22dc8e1d509abad36bfb5c03b00"
     },
     {
       "part": "icu",
@@ -20,22 +19,49 @@
       "package_uuid": "sha256-4536ea0c91b825200b40af480b68727fef3c9cc2cc344af5b8b5f02c17d05406"
     },
     {
-      "part": "extras",
-      "name": "texlive-slim-extras",
-      "files": 359,
-      "virtualBytes": 25961649,
-      "dataBytes": 10702789,
-      "jsBytes": 516790,
-      "package_uuid": "sha256-7daaa624f5f1df74d7a6972c29ceaba82da97985b6333ee6d62e876ae16738ac"
+      "part": "fonts",
+      "name": "texlive-slim-fonts-1",
+      "files": 3950,
+      "virtualBytes": 44996978,
+      "dataBytes": 32803115,
+      "jsBytes": 1050754,
+      "package_uuid": "sha256-e97100c87bd1ac957f071679ffb0a6c11fe7eb5fcaa063e03ac2d962e43e245d"
     },
     {
       "part": "fonts",
-      "name": "texlive-slim-fonts",
-      "files": 1638,
-      "virtualBytes": 24227750,
-      "dataBytes": 18686908,
-      "jsBytes": 640791,
-      "package_uuid": "sha256-65eafa3d9595121ef985883e0f8e06955b18a89ed1512ade7c41e658fb56a244"
+      "name": "texlive-slim-fonts-2",
+      "files": 1198,
+      "virtualBytes": 23852109,
+      "dataBytes": 22513678,
+      "jsBytes": 597577,
+      "package_uuid": "sha256-3ed86c5789f7a700dc5db430614322ed6c7fd8c55ce6b35424350b57b721962c"
+    },
+    {
+      "part": "macros",
+      "name": "texlive-slim-macros-1",
+      "files": 3369,
+      "virtualBytes": 44453821,
+      "dataBytes": 21356486,
+      "jsBytes": 992303,
+      "package_uuid": "sha256-6ec3205f79c5cd7e9c7863500f3203a6d713e3f3a87040258e5eeecf58e2d94a"
+    },
+    {
+      "part": "macros",
+      "name": "texlive-slim-macros-2",
+      "files": 3066,
+      "virtualBytes": 44998570,
+      "dataBytes": 22098592,
+      "jsBytes": 941528,
+      "package_uuid": "sha256-9bd3a4ba0cfe400e66df4601895548d009f7d9e5f00a5153350a0857ee08cd68"
+    },
+    {
+      "part": "macros",
+      "name": "texlive-slim-macros-3",
+      "files": 2747,
+      "virtualBytes": 34197663,
+      "dataBytes": 16320352,
+      "jsBytes": 826782,
+      "package_uuid": "sha256-9be123019ce81054c94fb8b7f2516536dfc0034d841d269b6b6a2be2e65a1f0f"
     }
   ],
   "runtime": [
@@ -59,11 +85,13 @@
   "preload": [
     "texlive-slim-core.js",
     "texlive-slim-icu.js",
-    "texlive-slim-fonts.js"
+    "texlive-slim-fonts-1.js",
+    "texlive-slim-fonts-2.js",
+    "texlive-slim-macros-1.js",
+    "texlive-slim-macros-2.js",
+    "texlive-slim-macros-3.js"
   ],
-  "catalog": [
-    "texlive-slim-extras.js"
-  ],
+  "catalog": [],
   "source": {
     "bundle": "texlive-extra",
     "files": 23881,
@@ -73,21 +101,59 @@
   "policy": {
     "drop": "/\\.afm$|\\/source\\/|\\/doc\\//",
     "closureRoots": [
-      "/tex/",
       "/texmf-var/",
-      "/bibtex/",
-      "/makeindex/",
       "/web2c/"
     ],
-    "fonts": "whole directory for any directory containing a traced file",
+    "wholeTrees": [
+      "/texmf-dist/bibtex/",
+      "/texmf-dist/makeindex/"
+    ],
+    "macros": "whole tree under /\\/texmf-dist\\/tex\\/(latex|generic|xelatex|plain)\\//, minus macroBlocklist",
+    "macroBlocklist": [
+      "utfsym",
+      "openmoji",
+      "worldflags",
+      "hwemoji",
+      "twemojis",
+      "tablericons",
+      "vscodeicons",
+      "bootstrapicons",
+      "lucide-icons",
+      "realhats",
+      "isosigns",
+      "euromoney",
+      "tetragonos",
+      "pronunciation",
+      "hyph-utf8",
+      "customenvs",
+      "fithesis",
+      "media9",
+      "ucs",
+      "pgf-periodictable",
+      "pgf-spectra",
+      "mwe",
+      "figchild",
+      "beamertheme-npbt",
+      "doclicense",
+      "lwarp",
+      "prosper",
+      "ifmslide",
+      "texfindpkg"
+    ],
+    "fonts": "whole tree under /texmf-dist/fonts/, minus fontBlocklist",
+    "fontBlocklist": [
+      "cm-super",
+      "libertine"
+    ],
+    "fontBlocklistWhy": {
+      "cm-super": "57 MB of Type 1 EC/T1 Computer Modern; Latin Modern (shipped) supersedes it",
+      "libertine": "17 MB for one family; the macro package still ships, so it fails by name"
+    },
     "icu": "included (XeTeX fails without it)",
     "commonPackages": [
       "amsfonts",
       "amscls",
       "siunitx",
-      "algorithm2e",
-      "algorithms",
-      "algorithmicx",
       "todonotes",
       "natbib",
       "cite",
@@ -98,9 +164,6 @@
       "subfiles",
       "glossaries",
       "nomencl",
-      "physics",
-      "mhchem",
-      "chemformula",
       "tcolorbox",
       "mdframed",
       "framed",
@@ -120,16 +183,17 @@
       "rotating",
       "pdflscape",
       "afterpage"
-    ]
+    ],
+    "commonPackagesRole": "assertion, not selection — every name must survive the macro policy"
   },
   "trace": {
     "generated": "2026-08-11T11:01:23.201Z",
     "count": 309
   },
   "totals": {
-    "files": 3238,
-    "virtualBytes": 108170511,
-    "dataBytes": 65686996
+    "files": 14545,
+    "virtualBytes": 228325994,
+    "dataBytes": 139699157
   },
   "byReason": {
     "infra": {
@@ -140,25 +204,25 @@
       "n": 1,
       "b": 21953264
     },
-    "common": {
-      "n": 359,
-      "b": 25961649
-    },
-    "always": {
-      "n": 9,
-      "b": 231852
+    "whole": {
+      "n": 133,
+      "b": 2232636
     },
     "traced": {
-      "n": 306,
-      "b": 12345751
+      "n": 4,
+      "b": 459076
     },
-    "font-dir": {
-      "n": 1638,
-      "b": 24227750
+    "font": {
+      "n": 5148,
+      "b": 68849087
+    },
+    "macro": {
+      "n": 9182,
+      "b": 123650054
     },
     "closure": {
-      "n": 861,
-      "b": 13442185
+      "n": 13,
+      "b": 1173817
     },
     "fmt": {
       "n": 2,

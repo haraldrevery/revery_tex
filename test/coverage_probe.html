@@ -1,0 +1,115 @@
+<!doctype html>
+<!--
+  Coverage probe — compiles documents the bundle was NOT built from.
+
+      node test/serve.js &
+      node test/run_coverage.js
+
+  Deliberately NOT part of `npm run check` or the gate. The gate is a contract
+  about five specific documents and their page counts; this is the opposite
+  question — does the bundle cover LaTeX that nobody here wrote?
+
+  It exists because that question had no answer for a long time. The texmf
+  bundle used to be selected from a kpathsea trace of the gate's own fixtures,
+  and the gate then compiled those same fixtures, so a green run only ever
+  proved the bundle covered itself. It shipped 87 of 2270 LaTeX package
+  directories and every document using beamer, koma-script, memoir, polyglossia,
+  glossaries-extra or tabularray failed, with the suite entirely green.
+
+  Each case asserts two things, because they fail differently: that a PDF came
+  out at all, and that the log is free of the warnings that mean "compiled, but
+  wrong" — a missing glyph or a substituted font shape does not move a page
+  count and does not fail a compile.
+-->
+<meta charset="utf-8">
+<title>coverage probe</title>
+<body><pre id="out">running…</pre>
+<script type="module">
+import { WasmTexEngine } from '../www/jvscrpt_and_css_extra/tex_engine_wasm.js';
+
+const SLIM_BASE = '/www/engine/dist';
+
+const DOCS = {
+  beamer: ['pdflatex', String.raw`\documentclass{beamer}\usetheme{Madrid}
+\title{Probe}\author{A}\begin{document}\frame{\titlepage}
+\begin{frame}{One}\begin{itemize}\item alpha\item beta\end{itemize}\end{frame}\end{document}`],
+  koma: ['pdflatex', String.raw`\documentclass{scrartcl}\usepackage{lipsum}
+\begin{document}\section{Hi}\lipsum[1]\end{document}`],
+  memoir: ['pdflatex', String.raw`\documentclass{memoir}\usepackage{lipsum}
+\begin{document}\chapter{Hi}\lipsum[1]\end{document}`],
+  // German via polyglossia, not babel. babel's core ships but its LANGUAGE
+  // files do not — babel-german is collection-langgerman, which busytex does not
+  // build — so \usepackage[ngerman]{babel} fails with "Unknown option 'ngerman'"
+  // and no repacker policy can fix it. polyglossia carries gloss-german.ldf and
+  // is the supported route. See Known limits in the README.
+  german: ['xelatex', String.raw`\documentclass{article}\usepackage{polyglossia}
+\setmainlanguage{german}
+\begin{document}\section{Einf\"uhrung}Gr\"o\ss{}enordnung, Stra\ss e, \"Uberpr\"ufung.\end{document}`],
+  tikzlibs: ['pdflatex', String.raw`\documentclass{article}\usepackage{tikz}
+\usetikzlibrary{calc,positioning,arrows.meta,decorations.pathmorphing}
+\begin{document}\begin{tikzpicture}
+\node(a){A};\node[right=2cm of a](b){B};
+\draw[-{Stealth},decorate,decoration=snake]($(a)$)--($(b)$);
+\end{tikzpicture}\end{document}`],
+  siunitx: ['pdflatex', String.raw`\documentclass{article}\usepackage{siunitx}
+\begin{document}\SI{9.81}{\metre\per\second\squared} and \num{1.6e-19}.\end{document}`],
+  tabularray: ['pdflatex', String.raw`\documentclass{article}\usepackage{tabularray}
+\begin{document}\begin{tblr}{hlines,vlines}a&b\\c&d\end{tblr}\end{document}`],
+  glossaries: ['pdflatex', String.raw`\documentclass{article}\usepackage[abbreviations]{glossaries-extra}
+\newabbreviation{fbi}{FBI}{Federal Bureau of Investigation}
+\begin{document}\gls{fbi} then \gls{fbi}.\end{document}`],
+  polyglossia: ['xelatex', String.raw`\documentclass{article}\usepackage{polyglossia}
+\setmainlanguage{english}\setotherlanguage{french}
+\begin{document}English here. \textfrench{Bonjour, ça va tr\`es bien?}\end{document}`],
+  unicode_math: ['xelatex', String.raw`\documentclass{article}\usepackage{unicode-math}
+\setmathfont{Latin Modern Math}
+\begin{document}\[ \nabla\times\vec{B} = \mu_0\left(\vec{J}+\epsilon_0\frac{\partial\vec{E}}{\partial t}\right) \]
+Ω № İ ƒ ¾ „quoted“\end{document}`]
+};
+
+const results = [];
+const out = document.getElementById('out');
+const say = (s) => { out.textContent += s + '\n'; };
+out.textContent = '';
+
+const manifest = await fetch(`${SLIM_BASE}/texlive-slim.manifest.json`).then(r => r.json());
+let capture = [];
+const engine = new WasmTexEngine({
+  basePath: SLIM_BASE, texmfPath: SLIM_BASE,
+  onLog: (line) => {
+    if (/data packages|unresolved|enabling all/i.test(line)) capture.push(line.trim().slice(0, 150));
+  }
+});
+await engine.init();
+
+for (const [key, [eng, tex]] of Object.entries(DOCS)) {
+  let r;
+  capture = [];
+  try {
+    r = await engine.compile({
+      files: [{ path: 'main.tex', content: tex }],
+      mainFile: 'main.tex', engine: eng, passes: true
+    });
+  } catch (e) {
+    say(`FAIL  ${key.padEnd(13)} threw: ${e.message}`);
+    results.push([key, false, true]);
+    continue;
+  }
+  const log = r.log || '';
+  const bad = [...new Set((log.match(
+    /Missing character[^\n]*|Font shape [^\n]*undefined|! LaTeX Error[^\n]*|! Package [^\n]*Error[^\n]*|[^\n]*\.(?:sty|cls|fd|def) not found[^\n]*/g) || []))];
+  say(`${r.success ? 'PASS' : 'FAIL'}  ${key.padEnd(13)} engine=${eng.padEnd(8)} pages=${r.pages ?? '-'}` +
+      (r.success ? '' : `  ${r.error}`));
+  for (const l of bad.slice(0, 3)) say(`      ! ${l.trim().slice(0, 110)}`);
+  // Only on failure, and only these lines: when a document cannot find a file
+  // that is in the bundle, the answer is always which data packages got mounted.
+  if (!r.success) for (const l of capture) say(`      · ${l}`);
+  results.push([key, r.success, bad.length > 0]);
+}
+
+const ok = results.filter(([, s]) => s).length;
+const dirty = results.filter(([, , d]) => d).length;
+say(`\n${ok}/${results.length} compiled · ${dirty} with warnings in the log`);
+window.__probe = { done: true, ok, total: results.length, dirty, results };
+</script>
+</body>
