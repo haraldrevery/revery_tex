@@ -131,7 +131,13 @@ export const SCHEMA = [
     options: [
       { label: 'Harald Mono', value: 'mono' },
       { label: 'Harald Text', value: 'brand' },
-      { label: 'System mono', value: 'system' }
+      { label: 'System mono', value: 'system' },
+      // Only offered once a font has been imported — see custom_font.js, and
+      // the identical arrangement for backgrounds above. Declared here
+      // regardless, because a stored value that is not among the declared
+      // options is discarded on load, and forgetting the option would silently
+      // reset anyone using their own typeface.
+      { label: 'Your font', value: 'custom' }
     ],
     effect: (v) => root().setAttribute('data-editor-font', v)
   },

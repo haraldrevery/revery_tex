@@ -2163,6 +2163,99 @@ async function main() {
       && /bg_6_web\.jpg/.test(rebooted.image),
       `${rebooted.attr} at ${rebooted.opacity}`);
 
+    /* ── an imported editor font ────────────────────────────────────── */
+    const font = await cdp.evaluate(`(async () => {
+      const cf = await import('./jvscrpt_and_css_extra/custom_font.js');
+      const s = await import('./jvscrpt_and_css_extra/settings.js');
+
+      const menuFor = () => {
+        document.getElementById('settings').click();
+        const trigger = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+          .find(b => /Editor font/.test(b.textContent) && b.classList.contains('has-submenu'));
+        trigger.click();
+        const panel = [...document.querySelectorAll('.submenu')].find(p => !p.hidden);
+        const rows = [...panel.querySelectorAll('.menu-item')].map(b => b.textContent.trim());
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        return rows;
+      };
+      const before = menuFor();
+
+      // Stand in for the file picker, with a font that is genuinely a font: the
+      // app's own bundled face, re-read as bytes. What is being checked is that
+      // an imported typeface reaches the editor, not that Chrome can open a file
+      // dialog — and a fabricated payload would prove nothing about either.
+      const bytes = new Uint8Array(
+        await (await fetch('./fonts/HaraldReveryTextFont.woff2')).arrayBuffer());
+      let bin = '';
+      for (const b of bytes) bin += String.fromCharCode(b);
+      localStorage.setItem('revery_tex_custom_font', 'data:font/woff2;base64,' + btoa(bin));
+      cf.applyCustomFont();
+      s.set('editorFont', 'custom');
+      await document.fonts.ready;
+
+      const scroller = document.querySelector('.cm-scroller');
+      const after = menuFor();
+      return {
+        before, after,
+        family: getComputedStyle(scroller).fontFamily,
+        rule: (document.getElementById('custom-font-face')?.textContent || '').slice(0, 40),
+        // The face has to be one the browser actually parsed, not merely a rule
+        // it accepted: a refused font leaves the stack on the fallback.
+        loaded: document.fonts.check("12px " + cf.FAMILY)
+      };
+    })()`, true);
+
+    // Offering "Your font" before there is one selects a family that resolves to
+    // the fallback — the setting appearing to do nothing.
+    check('your font is offered only once there is one',
+      !font.before.some(r => /your font/i.test(r))
+      && font.after.some(r => /your font/i.test(r)),
+      `${font.before.filter(r => /font/i.test(r)).join(' | ')} → ${font.after.filter(r => /your font/i.test(r)).join(' | ')}`);
+    check('the font menu offers importing and forgetting',
+      font.before.some(r => /choose font/i.test(r))
+      && font.after.some(r => /replace font/i.test(r))
+      && font.after.some(r => /forget font/i.test(r)),
+      font.after.join(' | '));
+    check('the imported face is registered and parsed',
+      /^@font-face/.test(font.rule) && font.loaded, `${font.rule}… loaded=${font.loaded}`);
+    check('the editor uses the imported family',
+      /ReveryUserFont/.test(font.family || ''), font.family);
+
+    // Applying it before first paint is the whole reason it lives in
+    // settings_boot.js — a font that arrives a frame late is the flash this app
+    // already avoids for themes.
+    await cdp.send('Page.reload');
+    await sleep(2500);
+    await cdp.waitFor('!!document.querySelector(".cm-scroller")',
+      { what: 'reload with an imported font', timeoutMs: 30000 });
+    const fontBooted = await cdp.evaluate(`(() => ({
+      attr: document.documentElement.getAttribute('data-editor-font'),
+      // Injected by the pre-paint script, which runs in <head> — so this is
+      // already present before the app module has executed at all.
+      rule: !!document.getElementById('custom-font-face'),
+      family: getComputedStyle(document.querySelector('.cm-scroller')).fontFamily
+    }))()`, true);
+    check('an imported font is applied before the app module runs',
+      fontBooted.attr === 'custom' && fontBooted.rule
+      && /ReveryUserFont/.test(fontBooted.family || ''),
+      `${fontBooted.attr}, rule=${fontBooted.rule}, ${fontBooted.family}`);
+
+    const forgotten = await cdp.evaluate(`(async () => {
+      const cf = await import('./jvscrpt_and_css_extra/custom_font.js');
+      const s = await import('./jvscrpt_and_css_extra/settings.js');
+      cf.forgetCustomFont();
+      s.set('editorFont', 'mono');
+      return {
+        rule: !!document.getElementById('custom-font-face'),
+        stored: localStorage.getItem('revery_tex_custom_font'),
+        family: getComputedStyle(document.querySelector('.cm-scroller')).fontFamily
+      };
+    })()`, true);
+    check('forgetting it removes the face, the storage and the family',
+      !forgotten.rule && forgotten.stored === null
+      && !/ReveryUserFont/.test(forgotten.family || ''),
+      `rule=${forgotten.rule} stored=${forgotten.stored} · ${forgotten.family}`);
+
     const expected = /favicon|\/api\/projects/i;
     const real = pageErrors.filter(e => !expected.test(e));
     check('no unexpected page errors', real.length === 0, real.slice(0, 2).join(' | '));

@@ -30,6 +30,9 @@ import {
   CUSTOM, applyCustomBackground, hasCustomBackground,
   chooseCustomBackground, forgetCustomBackground
 } from './background_image.js';
+import {
+  applyCustomFont, hasCustomFont, chooseCustomFont, forgetCustomFont
+} from './custom_font.js';
 import { initOutline, refreshOutline, scheduleOutline, applyOutlineVisibility } from './outline.js';
 import { buildTree, flattenTree, normalizePath } from './file_tree.js';
 import { referencesTo } from './document_model.js';
@@ -67,6 +70,15 @@ settings.applyAll();
 // The stored image, if there is one. settings.applyAll() has just set
 // data-background; this supplies the picture that attribute refers to.
 applyCustomBackground();
+// Likewise the imported font: data-editor-font names the family, this registers
+// it. settings_boot.js has already done both before first paint — this is the
+// module-time re-apply that keeps the two paths from drifting, exactly as the
+// background does.
+applyCustomFont();
+// Fonts load after the first layout, and CodeMirror caches character width from
+// whatever was on screen when it measured. Without this the caret sits on the
+// fallback's metrics until something else happens to trigger a re-measure.
+document.fonts?.ready.then(() => refreshEditorMetrics());
 
 function refreshAutoCompile() {
   const on = settings.settings.autoCompile;
@@ -104,6 +116,26 @@ async function pickBackgroundImage() {
   applyCustomBackground();
   settings.set('background', CUSTOM);
   setStatus(`background set — ${r.width}×${r.height}`, 'ok');
+}
+
+/**
+ * Importing your own editor font.
+ *
+ * The substance is in custom_font.js; this is the menu half and the reporting,
+ * as above. The extra await is CodeMirror's: settings.onChange re-measures
+ * immediately, but the @font-face has not finished loading at that point, so
+ * that measurement is of the fallback. Measuring again once the real face is in
+ * is what stops the caret drifting from the text.
+ */
+async function pickCustomFont() {
+  const r = await chooseCustomFont();
+  if (!r) return;                                   // cancelled
+  if (!r.ok) { setStatus(`✗ ${r.message}`, 'err'); return; }
+  applyCustomFont();
+  settings.set('editorFont', CUSTOM);
+  await document.fonts?.ready;
+  refreshEditorMetrics();
+  setStatus(`editor font set — ${r.format}, ${Math.round(r.bytes / 1000)} kB`, 'ok');
 }
 
 /** Build the settings menu from the schema, so a new setting needs no wiring. */
@@ -150,6 +182,24 @@ function settingsMenuSpec() {
             forgetCustomBackground();
             if (settings.settings.background === CUSTOM) settings.set('background', 'none');
             setStatus('background image removed');
+          }
+        }] : [])
+      ];
+    }
+    if (s.key === 'editorFont') {
+      // Same arrangement as the background: "Your font" is a choice only once
+      // one has been imported, or it would select a family that resolves to the
+      // fallback and look like the setting doing nothing.
+      const stored = hasCustomFont();
+      row.options = s.options.filter(o => o.value !== CUSTOM || stored);
+      row.actions = [
+        { label: stored ? 'Replace font…' : 'Choose font…', run: pickCustomFont },
+        ...(stored ? [{
+          label: 'Forget font',
+          run: () => {
+            forgetCustomFont();
+            if (settings.settings.editorFont === CUSTOM) settings.set('editorFont', 'mono');
+            setStatus('editor font removed');
           }
         }] : [])
       ];

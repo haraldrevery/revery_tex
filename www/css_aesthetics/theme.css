@@ -21,6 +21,12 @@
 [data-editor-font="mono"]   { --editor-font: var(--font-mono) }
 [data-editor-font="brand"]  { --editor-font: var(--font-brand) }
 [data-editor-font="system"] { --editor-font: ui-monospace, 'SF Mono', 'Cascadia Mono', 'Liberation Mono', monospace }
+/* An imported font. The @font-face carrying the actual bytes is injected by
+   custom_font.js (and, before first paint, by settings_boot.js) — only the
+   family name is here, and it is a constant, so this rule is valid even when
+   nothing has been imported. Falling through to the mono stack is what makes a
+   forgotten font degrade quietly instead of dropping the editor to serif. */
+[data-editor-font="custom"]  { --editor-font: 'ReveryUserFont', var(--font-mono) }
 
 [data-theme="dark"] {
   --bg:#0a0a0a; --bg-panel:#1e1e1e; --bg-hover:#2c2c2c;

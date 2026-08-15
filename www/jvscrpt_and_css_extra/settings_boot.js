@@ -53,6 +53,25 @@
       root.style.setProperty('--texture-image', 'url("' + img + '")');
     }
   }
+  // An imported font, for the same reason and with the same shape: its own key,
+  // because it is up to two megabytes of base64 and the settings blob is
+  // rewritten on every change. The regex is duplicated from custom_font.js
+  // rather than imported — this file is a classic script that deliberately
+  // imports nothing, so that it cannot be deferred. The character class is the
+  // load-bearing part: it admits no quote, paren, semicolon or brace, so the
+  // string cannot close the url() and open a declaration of its own.
+  if (stored.editorFont === 'custom') {
+    var font;
+    try { font = localStorage.getItem('revery_tex_custom_font'); } catch (e) { font = null; }
+    if (font && /^data:font\/(woff2|woff|ttf|otf);base64,[A-Za-z0-9+/]+={0,2}$/.test(font)) {
+      var style = document.createElement('style');
+      style.id = 'custom-font-face';
+      style.textContent =
+        "@font-face { font-family:'ReveryUserFont'; src:url(\"" + font + "\"); font-display:swap }";
+      document.head.appendChild(style);
+    }
+  }
+
   if (stored.theme === 'light' || stored.theme === 'paper') root.style.colorScheme = 'light';
   else if (stored.theme === 'dark' || stored.theme === 'forest') root.style.colorScheme = 'dark';
 })();
