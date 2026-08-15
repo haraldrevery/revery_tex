@@ -103,6 +103,42 @@ test('a missing synctex file is reported, not swallowed', async () => {
   assert.match(text(), /synctex\.gz was not written/i);
 });
 
+/* ── how many pages it says it made ───────────────────────────────────── */
+
+test('the page count comes from the log, not from scanning the PDF', async () => {
+  // Every successful compile through this engine reported 0 pages. countPages()
+  // reads the page tree out of the raw bytes, and pdfTeX and XeTeX write that
+  // tree into a compressed object stream — so neither of its patterns is in a
+  // real PDF at all, and all three committed fixture PDFs return 0 for it. The
+  // status line, the log header and the driver hook were all wrong; only the
+  // preview pane, which asks pdf.js, was right.
+  //
+  // The stub's stdout carries the line pdfTeX actually prints, which is the
+  // same source the WASM engine has always used.
+  const api = fakeApi({ tools: ['pdflatex'], disk: { 'main.pdf': PDF } });
+  const { eng } = await makeEngine(api);
+  const r = await eng.compile({ mainFile: 'main.tex', engine: 'pdftex', passes: false });
+  assert.equal(r.success, true, r.error || '');
+  assert.equal(r.pages, 1, 'a four-byte "%PDF" has no page tree to count');
+});
+
+test('a log that never says falls back to counting the PDF', async () => {
+  // The fallback still earns its place: a truncated capture, or a tool that
+  // does not print the line. This PDF is uncompressed, which is the only shape
+  // countPages() can read.
+  const uncompressed = new TextEncoder().encode(
+    '%PDF-1.4\n1 0 obj << /Type /Pages /Kids [2 0 R 3 0 R] /Count 2 >> endobj\n');
+  const api = fakeApi({
+    tools: ['pdflatex'],
+    disk: { 'main.pdf': uncompressed },
+    onRun: () => ({ stdout: 'no page count in this log' })
+  });
+  const { eng } = await makeEngine(api);
+  const r = await eng.compile({ mainFile: 'main.tex', engine: 'pdftex', passes: false });
+  assert.equal(r.success, true, r.error || '');
+  assert.equal(r.pages, 2);
+});
+
 test('no PDF anywhere is still a failure', async () => {
   // The opposite mistake: a fix so eager it calls every compile a success.
   const api = fakeApi({ tools: ['pdflatex'], disk: {} });

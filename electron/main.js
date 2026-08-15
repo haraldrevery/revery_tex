@@ -60,9 +60,13 @@ function registerProtocol() {
 
     // Contain the static server to www/ — the renderer must not be able to read
     // the rest of the disk by asking for it.
-    const target = path.join(WWW, rel);
-    const resolved = path.resolve(target);
-    if (!resolved.startsWith(path.resolve(WWW))) {
+    //
+    // Through the same segment-wise check every filesystem command uses. This
+    // was a string prefix, which would also have served a sibling directory
+    // whose name merely starts with "www" — nothing ships beside www/ today,
+    // and one check that is right everywhere beats two that agree by luck.
+    const resolved = path.resolve(path.join(WWW, rel));
+    if (!core.isInside(path.resolve(WWW), resolved)) {
       return new Response('Forbidden', { status: 403 });
     }
     if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {

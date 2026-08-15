@@ -25,7 +25,7 @@ import { writeZip } from './zip_core.js';
 import * as settings from './settings.js';
 import { attachMenu, openMenuAt, SelectMenu } from './menus.js';
 import { toolboxRows, contextRows } from './toolbox.js';
-import { openDialog } from './dialog.js';
+import { openDialog, dialogIsOpen } from './dialog.js';
 import {
   CUSTOM, applyCustomBackground, hasCustomBackground,
   chooseCustomBackground, forgetCustomBackground
@@ -286,6 +286,24 @@ function makeEditor() {
       ...latexEditingExtensions(() => project),
       CM.highlightSelectionMatches(),
       CM.EditorView.lineWrapping,
+      // The app's own two chords, at their own precedence.
+      //
+      // These used to sit at the end of the array below, and Ctrl+Enter never
+      // compiled once: `defaultKeymap` already binds Mod-Enter to
+      // `insertBlankLine`, so both handlers registered for the same chord and
+      // the first one — the spread, because it comes earlier in the array —
+      // returned true and ended the chain. Ctrl+Enter inserted a blank line,
+      // marked the file modified, and armed the unsaved-changes guard on a file
+      // nobody had typed in.
+      //
+      // Precedence is what decides this, not array position. Prec.high sits
+      // above the defaults and below latexCompletionKeymap()'s Prec.highest, so
+      // Enter over an open completion is still the completion's.
+      CM.Prec.high(CM.keymap.of([
+        // Ctrl+S must mean save. Compile is Ctrl+Enter.
+        { key: 'Mod-s', preventDefault: true, run: () => { saveAll(); return true; } },
+        { key: 'Mod-Enter', preventDefault: true, run: () => { compile(); return true; } }
+      ])),
       CM.keymap.of([
         // `...CM.completionKeymap` used to be spread here and never had any
         // effect: autocompletion() installs it itself at Prec.highest. Dropped
@@ -296,10 +314,7 @@ function makeEditor() {
         // latexCompletionKeymap(), part of latexEditingExtensions above. Both
         // report false when nothing is selected, so this stays the binding that
         // runs the rest of the time.
-        CM.indentWithTab,
-        // Ctrl+S must mean save. Compile moves to Ctrl+Enter.
-        { key: 'Mod-s', preventDefault: true, run: () => { saveAll(); return true; } },
-        { key: 'Mod-Enter', preventDefault: true, run: () => { compile(); return true; } }
+        CM.indentWithTab
       ]),
       // Ctrl/Cmd+click in the source jumps the PDF to the matching place.
       CM.EditorView.domEventHandlers({
@@ -402,6 +417,11 @@ async function saveAll() {
   if (!pending.length) return;
 
   setStatus(`saving ${pending.length} file(s)…`, 'warn');
+  // Written, not attempted. Conflict resolution can end with a file *reloaded*
+  // from disk — the opposite of saved — and counting the attempt reported
+  // "saved 3 file(s)" over a run that discarded one of them.
+  let written = 0;
+  let reloaded = 0;
   try {
     for (const [path, f] of pending) {
       let stamp;
@@ -419,6 +439,7 @@ async function saveAll() {
           f.content = r.content; f.stamp = r.stamp; f.dirty = false;
           if (path === currentPath) openFile(path);
           rawLog('wrn', `reloaded ${path} from disk, discarding local edits`);
+          reloaded++;
           continue;
         }
         stamp = await NativeAPI.writeFile(path, f.content, null);  // forced
@@ -426,13 +447,16 @@ async function saveAll() {
       }
       f.stamp = stamp || f.stamp;
       f.dirty = false;
+      written++;
       // The backup exists to cover the window between edits and a save; once
       // the file is on disk it is noise, and would otherwise be offered for
       // recovery forever.
       await NativeAPI.discardBackup?.(path).catch(() => {});
     }
     refreshDirty();
-    setStatus(`saved ${pending.length} file(s)`, 'ok');
+    setStatus(
+      `saved ${written} file(s)${reloaded ? `, ${reloaded} reloaded from disk` : ''}`,
+      reloaded ? 'warn' : 'ok');
     if (settings.settings.autoCompile) await compile();
   } catch (err) {
     setStatus(`✗ save failed: ${err}`, 'err');
@@ -629,9 +653,29 @@ const isInternalDrag = (e) => [...(e.dataTransfer?.types || [])].includes(DRAG_M
  */
 function endDrag() {
   dragOrigin = null;
-  for (const n of document.querySelectorAll('.node.dropinto')) n.classList.remove('dropinto');
+  clearHighlights();
   for (const n of document.querySelectorAll('.node.dragging')) n.classList.remove('dragging');
+}
+
+/** Every drop target unlit, with the drag itself left alone. */
+function clearHighlights() {
+  for (const n of document.querySelectorAll('.node.dropinto')) n.classList.remove('dropinto');
   $('filetree').classList.remove('droproot');
+}
+
+/**
+ * This row will not take this drag, and neither will anything behind it.
+ *
+ * `stopPropagation` is the whole point: the panel's handler treats anything
+ * that reaches it as a drop onto the project root, so a row that merely
+ * declined used to hand the drag to the one target the user certainly did not
+ * aim at. Nothing is highlighted, and `dragover` deliberately does *not*
+ * preventDefault — leaving the default is what gives the pointer its "no drop"
+ * cursor, which is the honest signal that this gesture will do nothing.
+ */
+function refuseDrop(e) {
+  e.stopPropagation();
+  clearHighlights();
 }
 
 // The backstop, on the document rather than on any row: a drag cancelled with
@@ -666,15 +710,23 @@ function makeRowDraggable(el, node) {
 
   // Only folders take a drop; a file row targets the folder that holds it, so
   // dropping onto a sibling means "into this directory" rather than nothing.
+  //
+  // A refusal has to stop here. Returning early left the event bubbling to the
+  // panel's own handler — which means *the project root* — so the two moves
+  // canAcceptDrop() exists to refuse were not refused at all: they were quietly
+  // converted into a different move. A file dropped onto the folder it already
+  // lives in, and a folder dropped into its own descendant, both landed at the
+  // root. On a project on disk that renames the file on disk, and for a file
+  // nothing \includes there was no confirmation and no status line either.
   el.addEventListener('dragover', (e) => {
-    if (!canAcceptDrop(node)) return;
+    if (!canAcceptDrop(node)) { refuseDrop(e); return; }
     e.preventDefault();
     e.stopPropagation();
     e.dataTransfer.dropEffect = isInternalDrag(e) ? 'move' : 'copy';
     highlightDrop(el);
   });
   el.addEventListener('drop', (e) => {
-    if (!canAcceptDrop(node)) return;
+    if (!canAcceptDrop(node)) { e.preventDefault(); refuseDrop(e); endDrag(); return; }
     e.preventDefault();
     e.stopPropagation();
     handleDrop(e, dropTargetOf(node));
@@ -945,6 +997,14 @@ function createFolder(parent = '') {
 async function moveOne(from, to) {
   if (canWriteDisk() && NativeAPI.renameFile) await NativeAPI.renameFile(from, to);
   const f = project.files.get(from);
+  // The stamp identified the file at the path it was *read* from, and that path
+  // no longer holds it. Carrying it over made the next save look like someone
+  // else had edited the file: the two browser backends implement rename as
+  // copy-then-delete, so the destination has a new mtime and the conflict check
+  // fired on a file only this session had ever touched — with a message that
+  // argued against itself, reporting the same size before and after. Same rule
+  // as `writeBinaryFile`: a file with no read-time identity does not get one.
+  f.stamp = null;
   project.files.delete(from);
   project.files.set(to, f);
   if (project.main === from) project.main = to;
@@ -1014,6 +1074,11 @@ async function moveEntry(from, to, isDir) {
   renderTree();
   refreshDirty();
   scheduleOutline();
+  // Every refusal above says so; a move that worked said nothing at all, which
+  // left reading the tree as the only way to find out what a drag had done.
+  if (moved) {
+    setStatus(isDir ? `moved ${from}/ → ${to}/` : `moved ${from} → ${to}`, 'ok');
+  }
   return moved > 0;
 }
 
@@ -1108,10 +1173,25 @@ $('newfile').onclick = () => {
 const ENGINE_FOR = { pdftex: 'pdflatex', xetex: 'xelatex', luahbtex: 'lualatex' };
 const preferredEngine = () => (project && ENGINE_FOR[project.engine]) || 'xelatex';
 
+// What the user picked from the dropdown, for this project only.
+//
+// The inference is right almost always, and it has to win at load — the engine
+// a document needs is a property of the document, not of what happened to be
+// selected when the last project was open. But it is a heuristic, and the
+// dropdown existed to overrule it. It could not: compile() re-applied the
+// inference on every run, so a pick survived exactly until the compile it was
+// made for, and the control was decoration.
+//
+// Cleared whenever a project is loaded, so overruling the heuristic for one
+// document does not silently follow you into the next.
+let chosenEngine = null;
+
 function syncEngineSelect() {
-  const want = preferredEngine();
-  engineSel.value = want;   // ignored if the engine is not among the options
+  // `value` ignores anything not among the options, so a pick the current
+  // engine cannot honour falls back to the inference on its own.
+  engineSel.value = chosenEngine || preferredEngine();
 }
+engineSel.onchange = (v) => { chosenEngine = v; };
 
 async function loadProjects() {
   // Order matters. Chromium always has openFolder, so checking that first would
@@ -1329,6 +1409,7 @@ async function loadFromDisk(root) {
 
   $('docname').textContent = project.main;
   projectSel.setOptions([{ label: project.key, value: project.key }]);
+  chosenEngine = null;              // a new document gets its own inference
   syncEngineSelect();
   renderTree();
   openFile(project.main);
@@ -1347,6 +1428,7 @@ async function loadProject(key) {
 
   $('docname').textContent = project.main;
   refreshDirty();
+  chosenEngine = null;              // as in loadFromDisk, and for the same reason
   syncEngineSelect();
   renderTree();
   openFile(project.main);
@@ -1548,6 +1630,28 @@ async function showPdf(bytes, pages) {
 $('compile').onclick = compile;
 $('save').onclick = saveAll;
 $('open').onclick = openFolder;
+
+/**
+ * The same two chords, from anywhere on the page.
+ *
+ * They were bound in the CodeMirror keymap and nowhere else, so they worked
+ * only while the editor had focus — and clicking a file in the tree leaves
+ * focus on the tree, which is exactly where someone reaches for Ctrl+S. In the
+ * browser build the keystroke then went to the browser, which offers to save
+ * the *page*. Both buttons advertise the shortcut in their title, so it has to
+ * hold wherever you are.
+ *
+ * Skipped inside any text-entry context: there the editor's own binding (at
+ * Prec.high) has already run, and an input or a dialog owns its own keys.
+ */
+document.addEventListener('keydown', (ev) => {
+  if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return;
+  if (ev.key !== 's' && ev.key !== 'S' && ev.key !== 'Enter') return;
+  if (dialogIsOpen()) return;
+  if (ev.target?.closest?.('.cm-editor, input, textarea, [contenteditable]')) return;
+  ev.preventDefault();
+  if (ev.key === 'Enter') compile(); else saveAll();
+});
 // Presence of the method is the signal, never a check on the environment name.
 // A shell that cannot open a folder does not get a button that implies it can.
 if (!NativeAPI.openFolder) $('open').style.display = 'none';

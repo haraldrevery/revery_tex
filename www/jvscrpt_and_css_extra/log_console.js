@@ -14,13 +14,27 @@ import { $, download } from './dom.js';
 import * as settings from './settings.js';
 
 let rawLines = [];
+let trimmed = 0;
 let issues = [];
 let gotoLine = () => {};
 
 /* ── raw log ─────────────────────────────────────────────────────────── */
 
+/**
+ * The most lines kept. A `book` compile writes about 6,800 of them, so this is
+ * several compiles' worth of head-room and still a bound — the panel used to
+ * grow a <div> per line for as long as the tab stayed open.
+ */
+const MAX_LINES = 20000;
+/** Within this many pixels of the bottom counts as "following the stream". */
+const PINNED_PX = 40;
+
 export function rawLog(kind, msg) {
   const body = $('raw');
+  // Sampled before anything is appended, or every line answers its own
+  // question: the moment a line is added the reader is no longer at the bottom.
+  const wasPinned = body.scrollHeight - body.scrollTop - body.clientHeight <= PINNED_PX;
+
   for (const line of String(msg).split('\n')) {
     rawLines.push(line);
     const d = document.createElement('div');
@@ -28,14 +42,40 @@ export function rawLog(kind, msg) {
     d.textContent = line;
     body.appendChild(d);
   }
+  if (rawLines.length > MAX_LINES) trimLog(body);
+
   $('logmeta').textContent = `${rawLines.length} lines`;
   // Stream, do not dump: keep pinned to the bottom while a compile runs so a
-  // stall is visible at the point it happens.
-  body.scrollTop = body.scrollHeight;
+  // stall is visible at the point it happens — but only for a reader who was
+  // already at the bottom. Re-pinning unconditionally meant scrolling back to
+  // read the error you just saw was undone by the next line, and during a
+  // compile there is always a next line.
+  if (wasPinned) body.scrollTop = body.scrollHeight;
+}
+
+/**
+ * Drop the oldest lines, leaving one row that says how many.
+ *
+ * The note is taken out and put back rather than counted around: while it sits
+ * in the panel it is a child like any other, and removing `drop` children from
+ * the front would eat the note and one line short.
+ */
+function trimLog(body) {
+  const drop = rawLines.length - MAX_LINES;
+  rawLines.splice(0, drop);
+  body.querySelector('.l-trim')?.remove();
+  for (let i = 0; i < drop && body.firstChild; i++) body.removeChild(body.firstChild);
+
+  trimmed += drop;
+  const note = document.createElement('div');
+  note.className = 'l-trim l-wrn';
+  note.textContent = `… ${trimmed} earlier line(s) trimmed`;
+  body.insertBefore(note, body.firstChild);
 }
 
 export function clearLog() {
   rawLines = [];
+  trimmed = 0;
   $('raw').textContent = '';
   $('logmeta').textContent = '';
 }

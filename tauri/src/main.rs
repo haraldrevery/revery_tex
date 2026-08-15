@@ -343,8 +343,13 @@ fn write_file_impl(
         if abs.exists() {
             let now = stamp_of(&abs)?;
             if now.mtime_ms != want.mtime_ms || now.size != want.size {
+                // One line, deliberately: this is read aloud in a dialog, and a
+                // wrapped literal put twenty spaces mid-sentence here — so the
+                // desktop prompt read differently from the Electron and browser
+                // ones the tests hold to the same wording.
                 return Err(format!(
-                    "CONFLICT:{path} changed on disk since it was opened                      (was {} bytes, now {} bytes)",
+                    "CONFLICT:{path} changed on disk since it was opened \
+                     (was {} bytes, now {} bytes)",
                     want.size, now.size
                 ));
             }

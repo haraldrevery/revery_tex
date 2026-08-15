@@ -21,6 +21,23 @@ test('safePath rejects empty and null bytes', () => {
   assert.doesNotThrow(() => core.safePath('ok.tex'));
 });
 
+test('containment is by path segment, never by string prefix', () => {
+  // Electron's static server contained itself with
+  // `resolved.startsWith(path.resolve(WWW))`, which also accepts a *sibling*
+  // whose name merely begins with the root's. Nothing ships beside www/ today;
+  // the point is that one check is right everywhere rather than two that agree
+  // by luck. Pure string comparison — nothing here needs to exist on disk.
+  const root = path.resolve('/srv/app/www');
+  assert.ok(core.isInside(root, root), 'the root is inside itself');
+  assert.ok(core.isInside(root, path.join(root, 'index.html')));
+  assert.ok(core.isInside(root, path.join(root, 'engine', 'dist', 'busytex.wasm')));
+  assert.ok(!core.isInside(root, path.resolve('/srv/app/www-backup/secret.env')),
+    'a sibling starting with the root name must not pass');
+  assert.ok(!core.isInside(root, path.resolve('/srv/app/wwwx')));
+  assert.ok(!core.isInside(root, path.resolve('/srv/app')));
+  assert.ok(!core.isInside(root, path.resolve('/etc/passwd')));
+});
+
 test('rejects parent traversal', () => {
   const root = tmpdir('traverse');
   fs.writeFileSync(path.join(root, 'in.tex'), 'x');

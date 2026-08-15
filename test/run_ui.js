@@ -51,6 +51,26 @@ async function realClick(cdp, expr) {
   return true;
 }
 
+/**
+ * A real chord, dispatched at the browser rather than at an element.
+ *
+ * `new KeyboardEvent(...)` does not reach CodeMirror's keymap the way a real
+ * key does — and a keymap defect is exactly the kind that a synthetic event
+ * hides, because the synthetic one never has to survive the precedence contest
+ * the real one loses. `modifiers: 2` is Ctrl, which is what Mod- means here;
+ * the harness runs Chrome on Linux.
+ */
+async function pressChord(cdp, key, code) {
+  for (const type of ['keyDown', 'keyUp']) {
+    await cdp.send('Input.dispatchKeyEvent', {
+      type, key, code,
+      windowsVirtualKeyCode: key === 'Enter' ? 13 : key.toUpperCase().charCodeAt(0),
+      modifiers: 2
+    });
+  }
+  await sleep(150);
+}
+
 /** A missing dev server otherwise reads as "the app failed to boot". */
 async function requireServer() {
   const ok = await fetch(BASE, { signal: AbortSignal.timeout(2000) })
@@ -2258,6 +2278,178 @@ async function main() {
       !forgotten.rule && forgotten.stored === null
       && !/ReveryUserFont/.test(forgotten.family || ''),
       `rule=${forgotten.rule} stored=${forgotten.stored} · ${forgotten.family}`);
+
+    /* ── the raw log follows you, rather than dragging you along ────── */
+    // It re-pinned to the bottom on every line, so scrolling back to read the
+    // error you just saw was undone by the next one — and during a compile
+    // there is always a next one. It also grew a <div> per line forever: one
+    // `book` compile leaves about 6,800 of them.
+    const logging = await cdp.evaluate(`(async () => {
+      const log = await import('./jvscrpt_and_css_extra/log_console.js');
+      const body = document.getElementById('raw');
+      log.showTab('raw');
+      log.clearLog();
+      for (let i = 0; i < 200; i++) log.rawLog('inf', 'line ' + i);
+      const pinned = body.scrollHeight - body.scrollTop - body.clientHeight <= 40;
+
+      // Now read something further up, the way anyone chasing an error does.
+      body.scrollTop = 0;
+      log.rawLog('inf', 'a line that arrived while you were reading');
+      const stayed = body.scrollTop;
+
+      // Back at the bottom, it should follow again.
+      body.scrollTop = body.scrollHeight;
+      log.rawLog('inf', 'and another');
+      const refollowed = body.scrollHeight - body.scrollTop - body.clientHeight <= 40;
+
+      // Past the cap.
+      log.clearLog();
+      for (let i = 0; i < 20100; i++) log.rawLog('dbg', 'x' + i);
+      const rows = body.querySelectorAll('div').length;
+      const note = body.firstChild.textContent;
+      const lastKept = body.lastChild.textContent;
+      log.clearLog();
+      return { pinned, stayed, refollowed, rows, note, lastKept };
+    })()`, true);
+    check('the log follows the stream while you are at the bottom', logging.pinned);
+    check('and stays put when you have scrolled up to read',
+      logging.stayed === 0, `scrollTop ${logging.stayed}`);
+    check('and follows again once you return to the bottom', logging.refollowed);
+    check('the log is bounded', logging.rows <= 20001, `${logging.rows} rows`);
+    check('and says how many lines it dropped',
+      /earlier line\(s\) trimmed/.test(logging.note) && logging.lastKept === 'x20099',
+      `${logging.note} · last kept ${logging.lastKept}`);
+
+    /* ── the two chords the buttons advertise ───────────────────────── */
+    // Ctrl+Enter compiled nothing for as long as it existed. `defaultKeymap`
+    // binds Mod-Enter to insertBlankLine and was spread into the same
+    // keymap.of([…]) ahead of the app's binding, so the first handler in array
+    // order won and the compile binding was unreachable: the chord inserted a
+    // blank line, marked the file modified and armed the unsaved-changes guard.
+    // Only a real key event can catch this — a synthetic KeyboardEvent never
+    // enters the precedence contest that the real one was losing.
+    await cdp.evaluate(`window.__reveryTexTest.view().focus(); true`, true);
+    const beforeChord = await cdp.evaluate(`(() => ({
+      len: window.__reveryTexTest.view().state.doc.length,
+      compiling: document.getElementById('compile').disabled
+    }))()`, true);
+    await pressChord(cdp, 'Enter', 'Enter');
+    const afterChord = await cdp.evaluate(`(() => ({
+      len: window.__reveryTexTest.view().state.doc.length,
+      // compile() disables the button synchronously, so this is true while the
+      // run is still in flight — which is the only proof it started at all.
+      compiling: document.getElementById('compile').disabled,
+      dirty: document.getElementById('dirty').textContent
+    }))()`, true);
+    check('Ctrl+Enter starts a compile',
+      afterChord.compiling && !beforeChord.compiling, `disabled=${afterChord.compiling}`);
+    check('Ctrl+Enter does not touch the document',
+      afterChord.len === beforeChord.len && !afterChord.dirty,
+      `${beforeChord.len} → ${afterChord.len}${afterChord.dirty ? ` (${afterChord.dirty})` : ''}`);
+    await cdp.waitFor('!document.getElementById("compile").disabled',
+      { what: 'the Ctrl+Enter compile to finish', timeoutMs: 180000 });
+
+    // And from outside the editor, where they were not bound at all: clicking a
+    // file leaves focus on the tree, which is precisely where someone reaches
+    // for Ctrl+S — and in a browser that keystroke then offers to save the page.
+    const outside = await cdp.evaluate(`(() => {
+      const row = document.querySelector('#filetree .node[data-path]');
+      row.focus();
+      window.__uiSaw = null;
+      window.addEventListener('keydown', function once(e) {
+        if (e.key === 'Enter') { window.__uiSaw = e.defaultPrevented; window.removeEventListener('keydown', once); }
+      });
+      return document.activeElement === row;
+    })()`, true);
+    await pressChord(cdp, 'Enter', 'Enter');
+    const claimed = await cdp.evaluate(`window.__uiSaw`, true);
+    check('the chords work outside the editor too', outside && claimed === true,
+      `focus moved=${outside}, claimed=${claimed}`);
+    await cdp.waitFor('!document.getElementById("compile").disabled',
+      { what: 'the second compile to finish', timeoutMs: 180000 });
+
+    /* ── a refused drop refuses, rather than moving to the root ─────── */
+    // The guard said no and the row then let the event bubble to the panel,
+    // whose handler means *the project root* — so the two moves canAcceptDrop()
+    // exists to refuse were silently converted into a different move. For a
+    // file nothing \includes there was no confirmation and no status line.
+    await realClick(cdp, `document.getElementById('project')`);
+    await sleep(200);
+    await realClick(cdp,
+      `[...document.querySelectorAll('.menu-container .menu-item')].find(b => /homework/.test(b.textContent))`);
+    await sleep(1500);
+
+    const drop = await cdp.evaluate(`(() => {
+      // One DataTransfer across the three events, as a real drag has: the
+      // handlers read \`types\` during dragover, which is all the browser
+      // exposes before the drop.
+      const drag = (fromSel, toSel) => {
+        const src = document.querySelector(fromSel), dst = document.querySelector(toSel);
+        if (!src || !dst) return 'missing row';
+        const dt = new DataTransfer();
+        const fire = (el, type) => el.dispatchEvent(new DragEvent(type, {
+          bubbles: true, cancelable: true, dataTransfer: dt, clientX: 10, clientY: 10 }));
+        fire(src, 'dragstart');
+        fire(dst, 'dragover');
+        const lit = document.getElementById('filetree').classList.contains('droproot');
+        fire(dst, 'drop');
+        return { rootLit: lit };
+      };
+      const paths = () => [...document.querySelectorAll('.node[data-path]')].map(n => n.dataset.path);
+      const before = paths();
+      const referenced = before.find(p => /^chapter\\/.*\\.tex$/.test(p));
+      const image = before.find(p => /^graphs\\/.*\\.(png|jpe?g)$/i.test(p));
+      const onOwnFolder = drag('.node[data-path="' + CSS.escape(referenced) + '"]', '.node.dir[data-dir="chapter"]');
+      const imageOnOwnFolder = drag('.node[data-path="' + CSS.escape(image) + '"]', '.node.dir[data-dir="graphs"]');
+      return {
+        referenced, image, onOwnFolder, imageOnOwnFolder,
+        after: paths(), status: document.getElementById('status').textContent
+      };
+    })()`, true);
+    await sleep(400);
+    check('a file dropped on the folder it is already in does not move',
+      drop.after.includes(drop.referenced) && !drop.after.includes(drop.referenced.split('/').pop()),
+      `${drop.referenced} → ${drop.after.includes(drop.referenced) ? 'unchanged' : 'MOVED'}`);
+    check('nor does one that no \\input names',
+      drop.after.includes(drop.image) && !drop.after.includes(drop.image.split('/').pop()),
+      `${drop.image} → ${drop.after.includes(drop.image) ? 'unchanged' : 'MOVED'}`);
+    check('the panel does not light up as the target during a refusal',
+      drop.onOwnFolder.rootLit === false && drop.imageOnOwnFolder.rootLit === false,
+      `rootLit=${drop.onOwnFolder.rootLit}/${drop.imageOnOwnFolder.rootLit}`);
+
+    /* ── the engine dropdown is honoured ────────────────────────────── */
+    // It was decoration: compile() repopulated the options and then re-applied
+    // the *inferred* engine over the user's pick, and there was no onchange
+    // either — so a choice survived exactly until the compile it was made for.
+    const header = `[...document.querySelectorAll('#raw .l-hdr')].map(d => d.textContent)[0] || ''`;
+    await cdp.evaluate(`window.__reveryTexApp.compile('missing-pkg')`, true);
+    const inferred = await cdp.evaluate(header, true);
+    await realClick(cdp, `document.getElementById('engine')`);
+    await sleep(200);
+    const picked = await realClick(cdp,
+      `[...document.querySelectorAll('.menu-container .menu-item')].find(b => /xelatex/.test(b.textContent))`);
+    await sleep(300);
+    await cdp.evaluate(`window.__reveryTexApp.compile()`, true);
+    const chose = await cdp.evaluate(`(() => ({
+      header: ${header},
+      button: document.getElementById('engine').textContent
+    }))()`, true);
+    check('the inferred engine is what runs by default',
+      / pdflatex /.test(inferred), inferred);
+    check('a picked engine is the one that runs', picked && / xelatex /.test(chose.header),
+      chose.header);
+    check('and the dropdown still shows it afterwards', /xelatex/.test(chose.button), chose.button);
+
+    // …and only for that project: the engine a document needs is a property of
+    // the document, so opening another one starts from the inference again.
+    await realClick(cdp, `document.getElementById('project')`);
+    await sleep(200);
+    await realClick(cdp,
+      `[...document.querySelectorAll('.menu-container .menu-item')]
+         .find(b => b.textContent.trim().replace(/^[■□]\\s*/, '') === 'cv')`);
+    await sleep(1500);
+    const reinferred = await cdp.evaluate(`document.getElementById('engine').textContent`, true);
+    check('a new project goes back to the inference', /pdflatex/.test(reinferred), reinferred);
 
     const expected = /favicon|\/api\/projects/i;
     const real = pageErrors.filter(e => !expected.test(e));

@@ -21,6 +21,20 @@ function safePath(raw) {
 }
 
 /**
+ * Is `p` inside `root`, or the root itself?
+ *
+ * By path segment, never by string prefix. `resolved.startsWith(root)` — which
+ * is what the app's own static server used to do — also accepts a sibling whose
+ * name merely begins with the root's: `…/www-backup` passes a prefix test
+ * against `…/www` and is a different directory. Both arguments must already be
+ * absolute and real; this compares, it does not resolve.
+ */
+function isInside(root, p) {
+  const rel = path.relative(root, p);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/**
  * Resolve `raw` and prove it is inside `root`.
  *
  * Existing paths are realpath'd, which resolves symlinks and `..`. Paths that do
@@ -50,8 +64,7 @@ function safePathInside(raw, root) {
     check = path.join(fs.realpathSync(existing), ...tail.reverse());
   }
 
-  const rel = path.relative(canonicalRoot, check);
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+  if (!isInside(canonicalRoot, check)) {
     throw new Error(`Path escapes project root: ${check}`);
   }
   return check;
@@ -285,7 +298,7 @@ function discardBackup(backupDir, root, rel) {
 }
 
 module.exports = {
-  safePath, safePathInside, atomicWriteFile, isCrossDeviceErr, tmpFor,
+  safePath, safePathInside, isInside, atomicWriteFile, isCrossDeviceErr, tmpFor,
   readDirectory, readTextFile, readBinaryFile, writeFile, writeBinaryFile,
   deleteFile, renameFile, stampOf,
   writeBackup, listStaleBackups, discardBackup, backupKey

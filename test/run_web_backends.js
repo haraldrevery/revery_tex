@@ -52,10 +52,13 @@ async function main() {
     // here navigates away with an unsaved edit — which fires beforeunload. In
     // headless Chrome an unanswered dialog blocks the page forever, so answer
     // them. Accepting is the destructive choice, which is what this test wants.
+    // The message as well as the type: a prompt that should never have opened
+    // is invisible to a test that only counts them, and accepting it silently
+    // is what let a false conflict look like a working save.
     const dialogs = [];
     cdp.on((msg) => {
       if (msg.method !== 'Page.javascriptDialogOpening') return;
-      dialogs.push(msg.params.type);
+      dialogs.push({ type: msg.params.type, message: msg.params.message || '' });
       cdp.send('Page.handleJavaScriptDialog', { accept: true }).catch(() => {});
     });
 
@@ -155,6 +158,75 @@ async function main() {
     check("the other tab's work survives", conflict.survived === 'another tab wrote this\n',
       JSON.stringify(conflict.survived));
 
+    /* ── rename, then save: the stamp must not outlive the path ─────── */
+    // Driven through the app's own controls rather than through NativeAPI,
+    // because the defect was in the app: moveOne() kept the stamp taken when
+    // the file was read at its *old* path, and both browser backends implement
+    // rename as copy-then-delete, so the destination has a new mtime. The first
+    // Ctrl+S after any rename therefore hit the conflict check and asked the
+    // user to choose between their own edits and a version nobody else had
+    // touched — with a message that argued against itself, reporting the same
+    // size before and after.
+    const fillDialog = (value, label) => `(() => {
+      const panel = document.querySelector('.dlg');
+      if (!panel) return false;
+      const input = panel.querySelector('input');
+      input.value = ${JSON.stringify(value)};
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      const submit = [...panel.querySelectorAll('.dlg-foot button')]
+        .find(b => new RegExp(${JSON.stringify(label)}, 'i').test(b.textContent));
+      submit.click();
+      return true;
+    })()`;
+
+    // A file of its own, so this does not inherit the stamp the conflict test
+    // above deliberately made stale.
+    await cdp.evaluate(`(() => {
+      document.getElementById('newfile').click();
+      [...document.querySelectorAll('.menu-container .menu-item')]
+        .find(b => /new file/i.test(b.textContent)).click();
+      return true;
+    })()`);
+    await sleep(200);
+    await cdp.evaluate(fillDialog('notes.tex', 'Create'));
+    await sleep(400);
+
+    await cdp.evaluate(`(() => {
+      const row = document.querySelector('.node[data-path="notes.tex"]');
+      row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 120 }));
+      [...document.querySelectorAll('.menu-container .menu-item')]
+        .find(b => /rename/i.test(b.textContent)).click();
+      return true;
+    })()`);
+    await sleep(200);
+    await cdp.evaluate(fillDialog('notes_renamed.tex', 'Rename'));
+    await sleep(400);
+
+    const dialogsBefore = dialogs.length;
+    const renamed = await cdp.evaluate(`(async () => {
+      // Save compiles afterwards by default, and a compile left running here
+      // would make the explicit one below a no-op — compile() returns early
+      // while its button is disabled. What is under test is the save.
+      const s = await import('./jvscrpt_and_css_extra/settings.js');
+      s.set('autoCompile', false);
+      window.__reveryTexApp.setBuffer('notes_renamed.tex', 'written after a rename\\n');
+      document.getElementById('save').click();
+      await new Promise(r => setTimeout(r, 800));
+      return {
+        moved: !!document.querySelector('.node[data-path="notes_renamed.tex"]')
+               && !document.querySelector('.node[data-path="notes.tex"]'),
+        status: document.getElementById('status').textContent,
+        stored: (await window.NativeAPI.readTextFile('notes_renamed.tex')).content
+      };
+    })()`, true);
+    const asked = dialogs.slice(dialogsBefore)
+      .filter(d => /changed (on disk|in another tab)/i.test(d.message));
+    check('a rename moves the file in the tree', renamed.moved, renamed.status);
+    check('the first save after a rename raises no conflict',
+      asked.length === 0, asked.map(d => d.message).join(' | '));
+    check('and the edit reaches storage',
+      renamed.stored === 'written after a rename\n', JSON.stringify(renamed.stored));
+
     /* ── it actually compiles ───────────────────────────────────────── */
     const result = await cdp.evaluate(`window.__reveryTexApp.compile()`, true);
     check('compiles to a PDF', result.ok && result.pages === 1, result.status);
@@ -243,7 +315,7 @@ async function main() {
     const real = pageErrors.filter(e => !expected.test(e));
     check('no unexpected page errors', real.length === 0, real.slice(0, 3).join(' | '));
     check('dialogs were answered, not left hanging', dialogs.length > 0,
-      `beforeunload etc: ${dialogs.join(', ') || 'none fired'}`);
+      `beforeunload etc: ${dialogs.map(d => d.type).join(', ') || 'none fired'}`);
   } finally {
     cleanup();
   }

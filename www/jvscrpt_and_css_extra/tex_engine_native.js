@@ -18,7 +18,7 @@
 // pass an argument even if it wanted to, which is the property that matters:
 // the sandbox does not depend on this file being careful.
 
-import { parseLatexLog, engineLimits } from './latex_log.js';
+import { parseLatexLog, engineLimits, pagesFromLog } from './latex_log.js';
 
 const ENGINE_TOOL = { pdftex: 'pdflatex', xetex: 'xelatex', luatex: 'lualatex' };
 
@@ -186,7 +186,15 @@ export class NativeTexEngine {
     return {
       success: true,
       pdf, synctex, log, diagnostics, missingPackages, limits,
-      pages: countPages(pdf),
+      // The engine's own count first, exactly as the WASM engine does it — the
+      // two must not disagree about the same document. Every real compile
+      // reported 0 pages while it did: countPages() reads the PDF's page tree
+      // out of the raw bytes, and pdfTeX and XeTeX write that tree into a
+      // compressed object stream, so neither of its patterns is in the file at
+      // all. The status line, the log header and the driver hook were all wrong
+      // on every successful system-TeX compile, and only the preview pane —
+      // which asks pdf.js — was right.
+      pages: pagesFromLog(log) ?? countPages(pdf),
       error: null
     };
   }
@@ -197,7 +205,16 @@ export class NativeTexEngine {
   }
 }
 
-/** Page count without parsing the whole PDF — /Type /Page occurrences. */
+/**
+ * Page count without parsing the whole PDF — /Type /Page occurrences.
+ *
+ * The fallback, not the answer: this only works on a PDF whose page tree is
+ * written in the clear. pdfTeX and XeTeX compress theirs into an object stream,
+ * where neither pattern below appears and this returns 0 — which is what it did
+ * for every real compile before `pagesFromLog` went in front of it. It still
+ * earns its place for a log that never said (a truncated capture, a tool that
+ * does not print the line), and for the uncompressed output of anything else.
+ */
 function countPages(bytes) {
   const text = new TextDecoder('latin1').decode(bytes);
   const m = /\/Type\s*\/Pages[\s\S]{0,200}?\/Count\s+(\d+)/.exec(text);
