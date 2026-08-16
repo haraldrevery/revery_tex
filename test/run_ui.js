@@ -3134,6 +3134,60 @@ async function main() {
       !/pages/.test(afterCancel.status),
       `canvases=${afterCancel.pages} · ${afterCancel.status}`);
 
+    /* ── gutter markers belong to a file, not to whatever is open ───── */
+    // A diagnostic's line number is meaningless without the file it counts in,
+    // and every diagnostic with a line was pushed into the current editor. So
+    // an error reported at line 40 drew a marker on line 40 of whichever file
+    // you happened to be looking at, and the marker *moved* as you switched
+    // files — a wrong answer wearing the costume of a right one.
+    //
+    // The bundled engine does not pass -file-line-error, so nothing it reports
+    // carries a file at all; those are attributed to the main file, which is
+    // exactly right for a single-file document and a fixed, stated guess
+    // otherwise. What must not happen either way is markers following the
+    // reader around.
+    await cdp.evaluate(`window.__reveryTexApp.compile('book')`, true).catch(() => {});
+    await cdp.waitFor(`!window.__reveryTexApp.compiling`,
+      { what: 'the book compile', timeoutMs: 180000 });
+    const gutter = await cdp.evaluate(`(async () => {
+      // The gutter's initialSpacer is itself a DiagMarker — it exists to
+      // reserve the column's width — so it carries .cm-diag and is always in
+      // the DOM whether or not anything is wrong. It is the one hidden element
+      // among them, which is what tells it apart from a real marker.
+      const count = () => [...document.querySelectorAll('#editor .cm-diag')]
+        .filter(e => e.closest('.cm-gutterElement')?.style.visibility !== 'hidden').length;
+      const openRow = async (p) => {
+        const row = document.querySelector('#filetree .node[data-path="' + CSS.escape(p) + '"]');
+        if (row) row.click();
+        await new Promise(r => setTimeout(r, 250));
+      };
+      const issues = window.__reveryTexApp.issues().filter(i => i.line);
+      const forFile = (p) => issues.filter(i => i.file === p).length;
+
+      await openRow(document.getElementById('docname').textContent.replace(/\\s*▾\\s*$/, ''));
+      const main = document.getElementById('editortitle').textContent;
+      const onMain = { file: main, markers: count(), owned: forFile(main) };
+      await openRow('chapters/introduction.tex');
+      const onChapter = {
+        file: document.getElementById('editortitle').textContent,
+        markers: count(), owned: forFile('chapters/introduction.tex')
+      };
+      return { total: issues.length, onMain, onChapter };
+    })()`, true);
+    check('a diagnostic marks the file it is about',
+      gutter.onMain.markers > 0 && gutter.onMain.markers <= gutter.onMain.owned,
+      `${gutter.onMain.file}: ${gutter.onMain.markers} marker(s), ${gutter.onMain.owned} owned`);
+    // The defect, stated exactly: every line-carrying diagnostic used to be
+    // pushed into every file. A marker may only appear where it is owned — and
+    // the split has to be a real one, or this would pass on a document whose
+    // diagnostics all happen to belong to the open file anyway.
+    check('and does not follow you into another file',
+      gutter.onChapter.file === 'chapters/introduction.tex' &&
+      gutter.onChapter.markers <= gutter.onChapter.owned &&
+      gutter.onChapter.owned < gutter.total,
+      `${gutter.onChapter.file}: ${gutter.onChapter.markers} marker(s), ` +
+      `${gutter.onChapter.owned} owned of ${gutter.total} total`);
+
     /* ── biblatex without biber: from dead end to one click ─────────── */
     // The whole point of this feature, driven end to end. biber is Perl, so no
     // in-browser engine will ever run it; a biblatex document therefore

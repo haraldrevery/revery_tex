@@ -212,6 +212,68 @@ async function main() {
     check('nothing was written outside the project',
       !fs.existsSync(path.join(path.dirname(project), 'escaped.tex')));
 
+    /* ── creating a file must never destroy one ─────────────────────── */
+    // The data-loss case that had no guard at all. Both create paths checked
+    // `project.files` — a snapshot taken when the folder was opened — and then
+    // wrote with `expect = null`, which every backend treats as *overwrite
+    // unconditionally*. A file present on disk but absent from that map was
+    // truncated to empty, silently, with no way back.
+    //
+    // The two diverge as a matter of course: a system-TeX compile writes .aux,
+    // .log and .pdf that were never loaded, a file whose read failed was
+    // skipped and never entered the map, and any external tool — git, another
+    // editor, a script — adds files during a session that can last days.
+    //
+    // This is the only suite that can prove it: the Chrome UI run drives the
+    // dev-server fixtures, which are in memory, so `canWriteDisk()` is false
+    // there and the disk is never consulted at all.
+    const PRECIOUS = 'Written by something else, and worth keeping.\n';
+    fs.writeFileSync(path.join(project, 'appeared.tex'), PRECIOUS);
+    // The tree is the project map made visible, so its absence there is exactly
+    // the divergence this guards against.
+    check('the app does not know about a file added behind its back',
+      !(await cdp.evaluate(
+        `!!document.querySelector('#filetree .node[data-path="appeared.tex"]')`, true)));
+
+    const created = await cdp.evaluate(`(async () => {
+      const open = (label) => {
+        document.getElementById('newfile').click();
+        [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+          .find(b => new RegExp(label, 'i').test(b.textContent)).click();
+      };
+      const type = (v) => {
+        const i = document.querySelector('.dlg input[type="text"]');
+        i.value = v; i.dispatchEvent(new Event('input', { bubbles: true }));
+        [...document.querySelectorAll('.dlg-foot button')]
+          .find(b => !/cancel/i.test(b.textContent)).click();
+      };
+      open('new file');
+      type('appeared.tex');
+      await new Promise(r => setTimeout(r, 300));
+      return document.getElementById('status').textContent;
+    })()`, true);
+    check('creating over a file that is on disk is refused',
+      /already exists/i.test(created), created);
+    check('and the file on disk is untouched',
+      fs.readFileSync(path.join(project, 'appeared.tex'), 'utf8') === PRECIOUS,
+      JSON.stringify(fs.readFileSync(path.join(project, 'appeared.tex'), 'utf8')));
+
+    // The same for the import path, which made the promise explicitly — "never
+    // silently replace" — and kept it only for files the app already knew.
+    const imported = await cdp.evaluate(`(async () => {
+      const f = new File(['imported over the top'], 'appeared.tex', { type: 'text/plain' });
+      const dt = new DataTransfer();
+      dt.items.add(f);
+      const panel = document.getElementById('filetree');
+      panel.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+      await new Promise(r => setTimeout(r, 400));
+      return document.getElementById('status').textContent;
+    })()`, true);
+    check('importing over a file that is on disk is refused',
+      /already exists/i.test(imported), imported);
+    check('and that file on disk is untouched too',
+      fs.readFileSync(path.join(project, 'appeared.tex'), 'utf8') === PRECIOUS);
+
     /* ── and it actually compiles, through the custom protocol ──────── */
     const result = await cdp.evaluate(`window.__reveryTexApp.compile()`, true);
     check('compiles to a PDF', result.ok && result.pages === 1, result.status);

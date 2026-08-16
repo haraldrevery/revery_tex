@@ -35,6 +35,47 @@ export function stripTexComments(src) {
   return String(src).replace(/(^|[^\\])((?:\\\\)*)%.*$/gm, '$1$2');
 }
 
+/* ── reading a \usepackage line ──────────────────────────────────────── */
+
+/**
+ * Every package name a source loads.
+ *
+ * The one place that knows what a `\usepackage` line looks like. Three things
+ * it gets right that a literal `\{fontspec\}` match does not, and all three are
+ * ordinary LaTeX rather than exotica:
+ *
+ *   - **`{amsmath,fontspec}`** — one line may load several packages, and that
+ *     is the common way to write a preamble. biblatex's own manual leads people
+ *     to `\usepackage{csquotes,biblatex}`.
+ *   - **`{ fontspec }`** — TeX ignores the spaces, so this must too.
+ *   - **`\usepackage\n{fontspec}`** — a long option list is often broken across
+ *     lines, which puts a newline before the group.
+ *
+ * Missing any of these is not a cosmetic failure. A biblatex document read as
+ * classic `\bibliography` gets run through BibTeX rather than biber, and that
+ * produces a bibliography that is *silently wrong* rather than an honest error
+ * — the outcome `inferBibTool` below exists to prevent.
+ *
+ * @returns {Set<string>}
+ */
+export function packagesIn(src) {
+  const out = new Set();
+  for (const m of String(src)
+    .matchAll(/\\(?:usepackage|RequirePackage)\s*(?:\[[^\]]*\])?\s*\{([^}]*)\}/g)) {
+    for (const raw of m[1].split(',')) {
+      const name = raw.trim();
+      if (name) out.add(name);
+    }
+  }
+  return out;
+}
+
+/** Whether a source loads any of `names`. */
+export function loadsPackage(src, names) {
+  const loaded = packagesIn(src);
+  return names.some(n => loaded.has(n));
+}
+
 /**
  * Which engine a document wants.
  *
@@ -50,15 +91,15 @@ export function stripTexComments(src) {
  */
 export function inferEngine(src) {
   src = stripTexComments(src);
-  const branches = /\\(?:ifPDFTeX|ifpdftex|ifxetex|ifXeTeX|ifluatex|ifLuaTeX|RequirePackage\{iftex\}|usepackage\{iftex\})/.test(src);
+  const branches = /\\(?:ifPDFTeX|ifpdftex|ifxetex|ifXeTeX|ifluatex|ifLuaTeX)/.test(src)
+    || loadsPackage(src, ['iftex']);
   if (branches) return 'pdftex';
-  return /\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{(?:fontspec|unicode-math)\}/.test(src)
-    ? 'xetex' : 'pdftex';
+  return loadsPackage(src, ['fontspec', 'unicode-math']) ? 'xetex' : 'pdftex';
 }
 
 /** Anything that means "this document is biblatex", whatever its backend. */
-const BIBLATEX_RE =
-  /\\(?:addbibresource|printbibliography)|\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{biblatex\}/;
+const isBiblatex = (src) =>
+  /\\(?:addbibresource|printbibliography)/.test(src) || loadsPackage(src, ['biblatex']);
 
 /**
  * The `backend=` biblatex was given, or null if it never says.
@@ -74,9 +115,15 @@ export function biblatexBackend(text) {
   // "% Vancouver-style [1] [2] [3] citations" — with those still in place the
   // option group never closes and the backend reads as unset.
   const src = stripTexComments(text);
-  const pkg = /\\(?:usepackage|RequirePackage)\[([^\]]*)\]\{biblatex\}/.exec(src);
+  // The options belong to whichever \usepackage loads biblatex, which is not
+  // necessarily one that loads *only* biblatex — so the group is read as the
+  // list it is, exactly as packagesIn does, rather than matched literally.
+  let pkgOpts = null;
+  for (const m of src.matchAll(/\\(?:usepackage|RequirePackage)\s*\[([^\]]*)\]\s*\{([^}]*)\}/g)) {
+    if (m[2].split(',').some(n => n.trim() === 'biblatex')) { pkgOpts = m[1]; break; }
+  }
   const exec = /\\ExecuteBibliographyOptions(?:\[[^\]]*\])?\{([^}]*)\}/.exec(src);
-  for (const opts of [pkg?.[1], exec?.[1]]) {
+  for (const opts of [pkgOpts, exec?.[1]]) {
     const m = opts && /\bbackend\s*=\s*(\w+)/.exec(opts);
     if (m) return m[1].toLowerCase();
   }
@@ -102,7 +149,7 @@ export function biblatexBackend(text) {
  */
 export function inferBibTool(src) {
   src = stripTexComments(src);
-  if (BIBLATEX_RE.test(src)) {
+  if (isBiblatex(src)) {
     // bibtex8 is what the bundled engine actually runs for 'bibtex'; biblatex
     // names it either way, and both spellings mean the same backend here.
     const backend = biblatexBackend(src);

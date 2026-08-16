@@ -299,11 +299,65 @@ document.addEventListener('contextmenu', (e) => {
     () => contextRows({ view: () => view, project: () => project, report: setStatus }));
 });
 
+/* ── which file a diagnostic is about ────────────────────────────────── */
+
+/**
+ * The project file a path in the log names, or null.
+ *
+ * TeX writes paths as it saw them — `./main.tex`, or relative to the working
+ * directory — so a suffix match is the fallback, exactly as `fileForTag` in
+ * synctex.js does for the same reason.
+ */
+function projectPathFor(raw) {
+  if (!raw || !project) return null;
+  const norm = String(raw).replace(/^\.\//, '').replace(/\/\.\//g, '/');
+  if (project.files.has(norm)) return norm;
+  for (const p of project.files.keys()) {
+    if (norm.endsWith(`/${p}`) || p.endsWith(`/${norm}`)) return p;
+  }
+  return null;
+}
+
+/**
+ * Which file a diagnostic belongs to.
+ *
+ * The line number is meaningless without it, and this used to be answered with
+ * "whichever file is open" — so an error at `chapters/two.tex:40` drew a marker
+ * on line 40 of `main.tex`, and the marker *moved* as you switched files. That
+ * is worse than no marker: it is a wrong answer that looks like a right one.
+ *
+ * `-file-line-error` puts the file in the log and both desktop shells pass it,
+ * so a system-TeX error is attributed exactly. Nothing else is: the bundled
+ * WASM engine does not pass that flag at all, and package warnings
+ * (`… on input line 40`) never carry a file under any engine.
+ *
+ * Those fall back to the **main file** rather than to no file at all. For a
+ * single-file document — the common case, and the only case the bundled engine
+ * can be precise about — that is exactly right. For a multi-file one it is a
+ * guess, but a fixed one: it stays put instead of following the reader around,
+ * and every other file stays clean. Attributing warnings properly means
+ * tracking the log's `(filename … )` file stack, which is a separate piece of
+ * work and a notoriously fiddly one.
+ */
+function fileForDiagnostic(d) {
+  return projectPathFor(d?.file) || project?.main || null;
+}
+
 // Diagnostics carry a line number only when the log gave one; the gutter shows
-// just those, and the Issues tab remains the complete list.
+// just those, and only for the file they are about. The Issues tab remains the
+// complete list.
 function pushDiagnosticsToGutter() {
   if (!view) return;
-  view.dispatch({ effects: setDiagnostics.of(getIssues().filter(d => d.line)) });
+  const here = getIssues().filter(d => d.line && fileForDiagnostic(d) === currentPath);
+  view.dispatch({ effects: setDiagnostics.of(here) });
+}
+
+/** An Issues row was clicked: open the file it is about, then go to the line. */
+function gotoIssue(d) {
+  if (!d?.line) return;
+  const target = fileForDiagnostic(d);
+  if (target && target !== currentPath && project?.files.has(target)) openFile(target);
+  gotoLine(d.line);
 }
 
 function gotoLine(n) {
@@ -909,6 +963,60 @@ async function handleDrop(e, parent) {
 /** Bigger than any figure, and small enough that the zip backend survives it. */
 const MAX_DROP_BYTES = 64 * 1024 * 1024;
 
+/* ── never write over a file that is already there ───────────────────── */
+//
+// Creating and importing both write with `expect = null`, which every backend
+// treats as *overwrite unconditionally* — the stamp check in fs_core.js and in
+// write_file_impl is skipped when there is no stamp to check. The only thing
+// standing between that and a destroyed file was `project.files.has(path)`, and
+// `project.files` is a snapshot taken when the folder was opened.
+//
+// The two diverge as a matter of course: a system-TeX compile writes .aux, .log
+// and .pdf that were never loaded, a file whose read failed was skipped by
+// `onWarn` and never entered the map, and any external tool — git, another
+// editor, a script — adds files during a session that can last days. Naming one
+// of those in New file… truncated it to empty, silently, with no way back.
+//
+// So the question is asked of the disk instead. `readDirectory` is on every
+// backend, and on web-fs it also refreshes the handle map, which is a second
+// small win. This is still TOCTOU in principle; the window goes from hours to
+// milliseconds, which is the whole of the practical risk.
+
+/**
+ * The files that actually exist, or null when the disk cannot be asked.
+ *
+ * Null rather than an empty set, deliberately: "nothing is there" and "I could
+ * not find out" must not look the same to the caller, or an unreadable folder
+ * would read as permission to overwrite everything in it.
+ */
+async function pathsOnDisk() {
+  if (!canWriteDisk() || !NativeAPI.readDirectory) return null;
+  try {
+    const entries = await NativeAPI.readDirectory();
+    return new Set(entries.filter(e => e.type === 'file').map(e => e.path));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Why `path` cannot be written, or null if it is free.
+ *
+ * @param {Set<string>|null} onDisk  from `pathsOnDisk`, read once per operation
+ *        rather than per file — an import of twenty files should not walk the
+ *        directory twenty times.
+ */
+function nameCollision(path, onDisk) {
+  if (project.files.has(path)) return `${path} already exists`;
+  // Said differently on purpose. "Already exists" about a file the tree does not
+  // show reads as the app contradicting itself; naming where it came from is
+  // what makes the refusal followable.
+  if (onDisk?.has(path)) {
+    return `${path} already exists on disk — something added it since this folder was opened`;
+  }
+  return null;
+}
+
 /**
  * Add files dragged in from the desktop.
  *
@@ -922,14 +1030,18 @@ async function importDroppedFiles(fileList, parent) {
   const dropped = [...fileList];
   const added = [];
   let refused = 0;
+  // Once for the whole drop, before the loop writes anything.
+  const onDisk = await pathsOnDisk();
 
   for (const file of dropped) {
     const path = normalizePath(file.name, parent);
     if (!path) { setStatus(`✗ "${file.name}" is not a usable file name`, 'err'); refused++; continue; }
-    if (project.files.has(path)) {
-      // Never silently replace: the file being dropped on is as likely to be
-      // the one someone wanted to keep.
-      setStatus(`✗ ${path} already exists — rename it first`, 'err');
+    // Never silently replace: the file being dropped on is as likely to be the
+    // one someone wanted to keep. Asked of the disk as well as of the project,
+    // because this promise was only ever kept for files the app knew about.
+    const clash = nameCollision(path, onDisk);
+    if (clash) {
+      setStatus(`✗ ${clash} — rename it first`, 'err');
       refused++;
       continue;
     }
@@ -1045,7 +1157,11 @@ async function createFile(parent = '') {
   askName({ title: 'New file', label: 'Name', def: '' }, async (raw) => {
     const path = normalizePath(raw, parent);
     if (!path) { setStatus('✗ that is not a usable file name', 'err'); return; }
-    if (project.files.has(path)) { setStatus(`✗ ${path} already exists`, 'err'); return; }
+    // The disk, not just the project map — see nameCollision. A new file is
+    // written immediately and with no stamp, so a collision here is a file
+    // truncated to nothing.
+    const clash = nameCollision(path, await pathsOnDisk());
+    if (clash) { setStatus(`✗ ${clash}`, 'err'); return; }
 
     project.files.set(path, { content: '', binary: false, dirty: true, stamp: null });
     // Written immediately where there is a disk, so the tree matches what is
@@ -2285,7 +2401,7 @@ window.addEventListener('unhandledrejection', (e) => {
 // ── boot ───────────────────────────────────────────────────────────────
 // The panel first: it owns the status line, and everything below reports
 // through it.
-initLogConsole({ onGotoLine: gotoLine });
+initLogConsole({ onGotoIssue: gotoIssue });
 view = makeEditor();
 // Before loading: openFile() refreshes the outline, and it should have somewhere
 // to put the first project's headings rather than rendering them twice.
@@ -2363,6 +2479,18 @@ window.__reveryTexApp = {
   get compiling() { return compiling; },
   /** Stop the running compile, as the button does. */
   cancel() { return cancelCompile(); },
+  /**
+   * The diagnostics, each with the file it was attributed to.
+   *
+   * `file` here is the answer `fileForDiagnostic` gave, not the raw string from
+   * the log — which is the thing worth checking, since the defect was that no
+   * such answer existed and every diagnostic went to whichever file was open.
+   */
+  issues() {
+    return getIssues().map(d => ({
+      severity: d.severity, line: d.line ?? null, file: fileForDiagnostic(d)
+    }));
+  },
   /** The bytes the Export button would download — a click gives the driver nothing. */
   async exportBytes() { return project ? (await buildExportZip()).bytes : null; },
   setBuffer(path, text) {

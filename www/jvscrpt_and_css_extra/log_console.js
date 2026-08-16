@@ -16,7 +16,7 @@ import * as settings from './settings.js';
 let rawLines = [];
 let trimmed = 0;
 let issues = [];
-let gotoLine = () => {};
+let gotoIssue = () => {};
 
 /* ── raw log ─────────────────────────────────────────────────────────── */
 
@@ -122,7 +122,12 @@ function renderIssues() {
       w.className = 'where';
       w.textContent = `  line ${d.line}`;
       row.appendChild(w);
-      row.onclick = () => gotoLine(d.line);
+      // The whole diagnostic, not just its line. A line number means nothing
+      // without the file it counts in, and this used to jump to that number
+      // inside whatever file happened to be open — so an error in a chapter
+      // sent you to that line of the main file instead. Which file it is is
+      // the app's question, not this panel's; it owns the project.
+      row.onclick = () => gotoIssue(d);
     }
     body.appendChild(row);
   }
@@ -224,12 +229,14 @@ export function setStatus(text, cls = '') {
 /**
  * Wire the panel up. Must run before anything logs.
  *
- * @param {{onGotoLine?: (line:number)=>void}} opts  jumping the editor to a line
- *        is the one thing this panel cannot do itself, so it arrives from
- *        outside rather than the panel importing the editor.
+ * @param {{onGotoIssue?: (d: object)=>void}} opts  jumping the editor to a
+ *        diagnostic is the one thing this panel cannot do itself, so it arrives
+ *        from outside rather than the panel importing the editor. The whole
+ *        diagnostic is handed over, not a bare line number: deciding which file
+ *        a line belongs to needs the project, which this panel does not have.
  */
-export function initLogConsole({ onGotoLine } = {}) {
-  if (onGotoLine) gotoLine = onGotoLine;
+export function initLogConsole({ onGotoIssue } = {}) {
+  if (onGotoIssue) gotoIssue = onGotoIssue;
 
   for (const t of document.querySelectorAll('.tab')) t.onclick = () => showTab(t.dataset.tab);
   $('togglepanel').onclick = () => togglePanel();
