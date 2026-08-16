@@ -147,3 +147,34 @@ export function formattingRows(view) {
     { type: 'action', label: 'Code', run: () => applyWrap(view(), 'code') }
   ];
 }
+
+/**
+ * Comment or uncomment the selected lines.
+ *
+ * The command itself was already here and already bound: CodeMirror's
+ * `defaultKeymap` binds Mod-/ to `toggleComment`, and the stex mode declares
+ * `commentTokens: {line: '%'}`, which is what tells it to use `%`. So this row
+ * adds no behaviour — it makes a working shortcut findable, which for the one
+ * editing action people expect on a right-click is most of the feature.
+ *
+ * It handles both directions itself: a selection whose lines are all commented
+ * is uncommented, anything else is commented. One row rather than two, because
+ * two would each be wrong half the time.
+ *
+ * `window.CM` is dereferenced inside `run`, never at module scope. This file is
+ * reached from toolbox.js, which test/toolbox.test.js imports in Node to check
+ * pure functions — a `window` at module scope would fail those four tests with
+ * a ReferenceError thrown from a file they are not testing. Same rule as the
+ * `root()` helper in settings.js.
+ */
+export function commentRows(view) {
+  return [{
+    type: 'action', label: 'Comment / uncomment lines', title: 'Ctrl+/',
+    run: () => {
+      const v = view();
+      if (!v) return;
+      window.CM.toggleComment(v);
+      v.focus();
+    }
+  }];
+}

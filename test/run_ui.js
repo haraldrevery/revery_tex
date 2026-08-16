@@ -179,6 +179,7 @@ async function main() {
         toggles: menu.querySelectorAll('.menu-item.menu-toggle').length,
         dividers: menu.querySelectorAll('.menu-divider').length,
         themeButton: !!document.getElementById('theme'),
+        autoButton: !!document.getElementById('autocompile'),
         selects: document.querySelectorAll('select').length
       };
     })()`);
@@ -238,6 +239,9 @@ async function main() {
       opened.dividers === schema.groups - 1 + 2,
       `${opened.dividers} dividers for ${schema.groups} groups`);
     check('the standalone Theme button is gone', !opened.themeButton);
+    // Same reason, and the same failure it prevents: autoCompile is a toggle in
+    // this menu, and a topbar button for it was a second control for one value.
+    check('the standalone Auto button is gone', !opened.autoButton);
     check('no native <select> in the topbar', opened.selects === 0, `${opened.selects} selects`);
     check('button reports expanded', opened.expanded === 'true');
     check('menu is announced as a menu', opened.role === 'menu');

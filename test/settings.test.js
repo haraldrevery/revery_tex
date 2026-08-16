@@ -59,8 +59,59 @@ test('the PDF preview mode reaches the attribute the stylesheet keys off', async
   assert.equal(dom.attrs.get('data-pdf-theme'), 'auto');
   assert.equal(mod.set('pdfTheme', 'dark'), true);
   assert.equal(dom.attrs.get('data-pdf-theme'), 'dark');
+  // Grayscale rides the same one selector, so it needs the same one assertion.
+  assert.equal(mod.set('pdfTheme', 'gray'), true);
+  assert.equal(dom.attrs.get('data-pdf-theme'), 'gray');
   assert.equal(mod.set('pdfTheme', 'inverted'), false, 'undeclared values must be refused');
-  assert.equal(dom.attrs.get('data-pdf-theme'), 'dark');
+  assert.equal(dom.attrs.get('data-pdf-theme'), 'gray');
+});
+
+test('step walks a scale by index and clamps at both ends', async () => {
+  // The − / + buttons on the pane heads. Clamping rather than wrapping is the
+  // whole difference from cycle(): a + at the top of the range that dropped
+  // back to the bottom reads as the control being broken.
+  const { mod } = await load(undefined);
+  assert.equal(mod.settings.editorSize, 100);
+  assert.equal(mod.step('editorSize', 1), true);
+  assert.equal(mod.settings.editorSize, 110);
+  assert.equal(mod.step('editorSize', -1), true);
+  assert.equal(mod.settings.editorSize, 100);
+
+  // Walk to the top and stay there.
+  while (mod.step('editorSize', 1));
+  assert.equal(mod.settings.editorSize, 200);
+  assert.equal(mod.atEnd('editorSize', 1), true, 'nowhere left to go up');
+  assert.equal(mod.step('editorSize', 1), false, 'must not wrap to the bottom');
+  assert.equal(mod.settings.editorSize, 200);
+  assert.equal(mod.atEnd('editorSize', -1), false);
+
+  // And the bottom.
+  while (mod.step('editorSize', -1));
+  assert.equal(mod.settings.editorSize, 70);
+  assert.equal(mod.atEnd('editorSize', -1), true);
+  assert.equal(mod.step('editorSize', -1), false);
+});
+
+test('the log panel sits under the editor by default', async () => {
+  // appliedBy: 'app' rather than an effect, deliberately — an effect would run
+  // inside applyAll() below and reach for getElementById, which the fake
+  // document here does not have. That this test passes *is* the check.
+  const { mod } = await load(undefined);
+  mod.applyAll();
+  assert.equal(mod.settings.panelPlacement, 'editor');
+  assert.equal(mod.set('panelPlacement', 'window'), true);
+  assert.equal(mod.set('panelPlacement', 'sidebar'), false, 'undeclared values must be refused');
+  assert.equal(mod.settings.panelPlacement, 'window');
+});
+
+test('the outline scale is applied as its own property', async () => {
+  // Scoped to #outline in the stylesheet: the file tree uses the same .node
+  // class, and scaling it too is the failure this setting is one selector away
+  // from.
+  const { mod, dom } = await load({ outlineSize: 130 });
+  mod.applyAll();
+  assert.equal(dom.props.get('--outline-scale'), '1.3');
+  assert.equal(dom.props.get('--editor-scale'), '1', 'the two scales are independent');
 });
 
 test('stored values are restored', async () => {

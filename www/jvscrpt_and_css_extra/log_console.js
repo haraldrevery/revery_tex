@@ -187,6 +187,34 @@ export function togglePanel(open) {
   settings.save();
 }
 
+/**
+ * Move the panel and its divider between the window and the editor column.
+ *
+ * A reparent rather than CSS, because there is no CSS that moves a node into
+ * another subtree — and faking it with a margin and a width would duplicate the
+ * flex maths the workspace row already does, then need re-running on every
+ * divider drag. As a child of #editorpane, which is already a flex column, the
+ * panel simply follows the editor's width.
+ *
+ * Nothing else has to change for this to work, which is why it is four lines:
+ * #panel is already `flex:none` with an explicit height and #editor is already
+ * `flex:1; min-height:0`, so the editor yields the space in a column exactly as
+ * <body> did; .hdiv sets its own `position:relative`, so #paneldiv does not
+ * depend on the `body > *` rule it used to inherit; the drag handler measures
+ * from `window.innerHeight`, and #workspace is `flex:1`, so the editor pane's
+ * bottom edge is the window's bottom edge either way; and moving a node keeps
+ * its listeners, so the divider stays draggable.
+ */
+export function applyPanelPlacement() {
+  const host = settings.settings.panelPlacement === 'editor'
+    ? $('editorpane')
+    : document.body;
+  // Idempotent: this is called on every settings change, and re-appending would
+  // move the nodes for no reason on each one.
+  if ($('paneldiv').parentElement === host) return;
+  host.append($('paneldiv'), $('panel'));
+}
+
 export function setStatus(text, cls = '') {
   const s = $('status');
   s.textContent = text;
@@ -210,6 +238,7 @@ export function initLogConsole({ onGotoLine } = {}) {
   // Clicking the status line goes where the news is.
   $('status').onclick = () => showTab(hasErrors() ? 'issues' : 'raw');
 
+  applyPanelPlacement();
   togglePanel(!settings.settings.panelCollapsed);
   renderIssues();
 }

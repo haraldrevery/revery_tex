@@ -648,6 +648,25 @@ body.dragging * { user-select:none !important }
   color:var(--text-dim); background:color-mix(in srgb, var(--bg-panel) 40%, transparent);
 }
 .panehead button, .panelhead button { padding:.2rem .45rem .1rem; font-size:var(--fs-xs) }
+/* The text-size steppers, borderless — Revery Notebook's idiom for the same
+   control. A − / + pair is pressed repeatedly against the thing it resizes, and
+   two boxes in a pane head read as two buttons rather than as one stepper.
+   Scoped to the four ids on purpose: Files +, Back and Download keep their
+   borders, because those open a menu or perform an action and a box is what
+   says so.
+
+   Nothing else has to be restated. `button:hover` fills the background and
+   lightens the text, which still reads with no border, and
+   `button:focus-visible` draws a box-shadow ring rather than a border colour —
+   so the keyboard ring survives, which a border-only focus style would not. */
+#editorsizedown, #editorsizeup, #outlinesizedown, #outlinesizeup {
+  border:0; padding:.1rem .35rem; color:var(--text-dim);
+}
+/* The one variable-length item in a pane head gives way first, the same way
+   .docname does in the topbar. Without it a long path pushes the editor pane's
+   − / + buttons out of the row — .panehead does not clip, so they would leave
+   the pane rather than being cut off. */
+#editortitle { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
 
 /* ── file tree ──────────────────────────────────────────────────────── */
 #filetree { flex:1; overflow:auto; padding:4px 0 }
@@ -716,6 +735,16 @@ body.dragging * { user-select:none !important }
 #outlinepane[hidden], .vdiv[hidden] { display:none }
 #outline { flex:1; overflow:auto; padding:4px 0 }
 .node.sec { font-size:var(--fs-sm) }
+/* The outline's own text size — the − / + on its pane head, and the stepper in
+   Settings. Scoped by #outline rather than written onto .node, because the file
+   tree's rows are .node too and are not what this scales. The id also puts
+   these above .node.sec / .node.dir / .node.dim-note without an !important.
+
+   The per-level indent is set inline in JS as a rem calc, so it stays put while
+   the text grows. That is deliberate: the indent marks depth, and depth has not
+   changed. */
+#outline .node { font-size:calc(var(--fs-sm) * var(--outline-scale, 1)) }
+#outline .node.dir { font-size:calc(var(--fs-xs) * var(--outline-scale, 1)) }
 /* An inset shadow rather than a border: the indent is set inline per level, so
    a border would shift the text 2px sideways as the cursor moves between
    headings. Same reason the PDF canvas uses one. */
@@ -900,6 +929,18 @@ body.dragging * { user-select:none !important }
   filter: invert(1) hue-rotate(180deg);
   box-shadow: 0 0 0 1px #404040;
 }
+/* What the document will look like printed in black and white.
+
+   Everything the block above says about invert() applies here unchanged: this
+   is a compositing filter, so it changes no layout box, and the bytes behind
+   Download never see it. grayscale(1) is a luminance conversion, which is
+   roughly what a monochrome printer does — near enough to catch the two things
+   people are actually looking for, a figure whose colours collapse into one
+   grey and text whose contrast disappears with the hue.
+
+   The hairline stays var(--border): unlike the dark rule, nothing here is
+   inverted, so the ordinary border colour still reads. */
+[data-pdf-theme="gray"] .pdfpage { filter: grayscale(1) }
 /* The preview compiled, but came back without click-to-source or without its
    links. Marked here rather than in the status line, which the compile result
    overwrites a moment later; the full reason is in the title. */

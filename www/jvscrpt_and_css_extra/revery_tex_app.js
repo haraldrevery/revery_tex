@@ -36,6 +36,7 @@ import {
   applyCustomFont, hasCustomFont, chooseCustomFont, forgetCustomFont
 } from './custom_font.js';
 import { initOutline, refreshOutline, scheduleOutline, applyOutlineVisibility } from './outline.js';
+import { initPaneSizeButtons } from './pane_size.js';
 import { buildTree, flattenTree, normalizePath } from './file_tree.js';
 import { referencesTo } from './document_model.js';
 import { $, download } from './dom.js';
@@ -46,7 +47,8 @@ import { switchBiblatexBackend } from './latex_snippets.js';
 import { applyEdit } from './editor_actions.js';
 import {
   initLogConsole, rawLog, clearLog, setStatus, showTab, togglePanel,
-  setPanelHeight, savePanelHeight, setIssues, getIssues, hasErrors, logText
+  setPanelHeight, savePanelHeight, setIssues, getIssues, hasErrors, logText,
+  applyPanelPlacement
 } from './log_console.js';
 
 const CM = window.CM;
@@ -71,7 +73,9 @@ const syncTex = new SyncTex();
 let loadingDoc = false;
 
 // Settings live in settings.js as one declarative table; this file only reads
-// values and wires the two shortcut buttons in the topbar.
+// values. Every control that writes one is elsewhere — the menu is built from
+// the schema, the outline toggle is in outline.js, the pane − / + buttons in
+// pane_size.js.
 settings.applyAll();
 // The stored image, if there is one. settings.applyAll() has just set
 // data-background; this supplies the picture that attribute refers to.
@@ -86,19 +90,15 @@ applyCustomFont();
 // fallback's metrics until something else happens to trigger a re-measure.
 document.fonts?.ready.then(() => refreshEditorMetrics());
 
-function refreshAutoCompile() {
-  const on = settings.settings.autoCompile;
-  $('autocompile').textContent = on ? 'Auto ✓' : 'Auto';
-  $('autocompile').title = on
-    ? 'Compiling after each save — click to turn off'
-    : 'Not compiling after save — click to turn on';
-}
-$('autocompile').onclick = () => settings.set('autoCompile', !settings.settings.autoCompile);
 // One listener rather than each control refreshing itself: a setting changed
 // from the menu and the same setting changed from its button must look the
 // same afterwards, and that is only guaranteed if there is one path.
-settings.onChange(() => { refreshAutoCompile(); refreshEditorMetrics(); applyOutlineVisibility(); });
-refreshAutoCompile();
+settings.onChange(() => {
+  refreshEditorMetrics(); applyOutlineVisibility(); applyPanelPlacement();
+});
+// The − / + on the editor and outline pane heads. Registers its own onChange,
+// so it reflects a size changed from the Settings menu too.
+initPaneSizeButtons();
 
 /**
  * CodeMirror measures character width once and caches it. Changing the font or
@@ -1157,11 +1157,41 @@ async function deleteEntry(path, isDir) {
 }
 
 /** Right-click anywhere in the tree, and the + button in its header. */
+/**
+ * Pick files from the desktop and add them to `parent`.
+ *
+ * The work is `importDroppedFiles`, unchanged — the same function a drag from
+ * the desktop has always run, with its text-vs-binary split, size ceiling,
+ * refusal to overwrite, and disk write where the backend can. This only supplies
+ * it a FileList from a picker instead of from a drop, because dropping was the
+ * one way in and nothing in the UI said so.
+ *
+ * A created input rather than markup, as background_image.js and custom_font.js
+ * both do. No `accept`: the extension is what decides text or bytes, and a .bib,
+ * a .cls and a .png are all things a project legitimately wants.
+ */
+function importFilesInto(parent) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.multiple = true;
+  input.onchange = () => {
+    if (input.files?.length) importDroppedFiles(input.files, parent);
+  };
+  input.click();
+}
+
 function treeMenuRows(node) {
   const parent = node ? (node.dir ? node.path : dirOf(node.path)) : '';
   const rows = [
     { type: 'action', label: 'New file…', run: () => createFile(parent) },
-    { type: 'action', label: 'New folder…', run: () => createFolder(parent) }
+    { type: 'action', label: 'New folder…', run: () => createFolder(parent) },
+    // Lands wherever the menu was opened — the right-clicked folder, or the
+    // project root from the + button — so it matches where a drop there would go.
+    {
+      type: 'action', label: 'Import files…',
+      title: 'Add files from your computer — or drag them onto this panel',
+      run: () => importFilesInto(parent)
+    }
   ];
   if (node) {
     rows.push({ type: 'divider' });

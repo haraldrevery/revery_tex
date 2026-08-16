@@ -53,7 +53,10 @@
   <button id="engine" data-label="Engine"></button>
   <button id="save" disabled title="Ctrl+S">Save</button>
   <button id="compile" class="primary" title="Ctrl+Enter">Compile</button>
-  <button id="autocompile" title="Compile after save">Auto</button>
+  <!-- Compile-after-save is a Settings toggle ("Compile after save"), not a
+       button here. It had both, and a setting with two controls is how the two
+       end up disagreeing — the standalone Theme button was removed for the same
+       reason. -->
   <span id="docname" class="docname"></span>
   <div class="spacer"></div>
   <button id="status" class="statusline">idle</button>
@@ -75,7 +78,11 @@
   <div class="vdiv" data-resize="sidebar"></div>
 
   <section id="editorpane">
-    <div class="panehead"><span id="editortitle">no file</span><div class="spacer"></div><span id="dirty" class="dim"></span></div>
+    <!-- − / + step the same `editorSize` setting the Settings menu shows, so the
+         two cannot disagree; see pane_size.js. -->
+    <div class="panehead"><span id="editortitle">no file</span><div class="spacer"></div><span id="dirty" class="dim"></span>
+      <button id="editorsizedown" title="Smaller editor text" aria-label="Smaller editor text">−</button>
+      <button id="editorsizeup" title="Larger editor text" aria-label="Larger editor text">+</button></div>
     <div id="editor"></div>
   </section>
   <div class="vdiv" data-resize="editor"></div>
@@ -93,7 +100,9 @@
        topbar; the pane and its divider are hidden together. -->
   <div class="vdiv" data-resize="outline"></div>
   <aside id="outlinepane">
-    <div class="panehead"><span>Outline</span><div class="spacer"></div><span id="outlinecount" class="dim"></span></div>
+    <div class="panehead"><span>Outline</span><div class="spacer"></div><span id="outlinecount" class="dim"></span>
+      <button id="outlinesizedown" title="Smaller outline text" aria-label="Smaller outline text">−</button>
+      <button id="outlinesizeup" title="Larger outline text" aria-label="Larger outline text">+</button></div>
     <div id="outline" role="group" aria-label="Document outline"></div>
   </aside>
 </div>

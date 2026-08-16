@@ -169,11 +169,17 @@ export const SCHEMA = [
     //
     // Off by default: inverting a photograph turns it into a negative, and that
     // is not something to do to someone's figures uninvited.
+    // Grayscale belongs on this list rather than beside it as a toggle of its
+    // own. It answers "how will this print", and the answer is a white page
+    // with black ink — so composing it with the dark inversion would show
+    // something no printer produces. One list means no combination to define,
+    // and no second attribute for the stylesheet to resolve against this one.
     key: 'pdfTheme', label: 'PDF preview', def: 'off', ui: 'submenu', group: 'preview',
     options: [
       { label: 'Off', value: 'off' },
       { label: 'Dark', value: 'dark' },
-      { label: 'Follow theme', value: 'auto' }
+      { label: 'Follow theme', value: 'auto' },
+      { label: 'Grayscale', value: 'gray' }
     ],
     effect: (v) => root().setAttribute('data-pdf-theme', v)
   },
@@ -199,6 +205,40 @@ export const SCHEMA = [
     key: 'showOutline', label: 'Outline panel', def: true, appliedBy: 'app',
     ui: 'toggle', on: true, toggleLabel: 'Show outline panel', group: 'preview',
     options: [{ label: 'On', value: true }, { label: 'Off', value: false }]
+  },
+  {
+    // The third font scale, after uiSize and editorSize, and deliberately not
+    // folded into either: the outline is a list of headings you skim beside
+    // prose you read, and wanting it smaller than the chrome — or larger than
+    // the editor — is the whole reason it has a control of its own. Stops at
+    // 160% because past that a heading wraps out of a 250px pane.
+    //
+    // Scoped to #outline in the stylesheet, never to .node: the file tree uses
+    // the same class and is not what this scales.
+    key: 'outlineSize', label: 'Outline text size', def: 100, ui: 'stepper',
+    group: 'preview',
+    options: PERCENT(70, 160, 10),
+    css: '--outline-scale', format: (v) => String(v / 100)
+  },
+  {
+    // Where the Issues / Raw log panel lives. Full width across the window, or
+    // in the editor's own column — which is where it belongs, because it is
+    // about the file being edited and not about the preview or the file tree.
+    // Under the editor by default: the PDF and the tree get their full height
+    // back, and neither of them ever had anything to say about a compile log.
+    //
+    // appliedBy: 'app', not an effect, and that is not a style choice. Effects
+    // run inside applyAll(), which test/settings.test.js calls against a fake
+    // document carrying only documentElement — an effect reaching for
+    // getElementById would throw there. Same reason showOutline is applied by
+    // the app. The move itself is in log_console.js, which owns this panel.
+    key: 'panelPlacement', label: 'Log panel', def: 'editor', appliedBy: 'app',
+    ui: 'toggle', on: 'editor', toggleLabel: 'Log panel under the editor',
+    group: 'preview',
+    options: [
+      { label: 'Editor column', value: 'editor' },
+      { label: 'Full width', value: 'window' }
+    ]
   },
   {
     // Off matters for large documents, where a 20-second recompile on every
@@ -318,6 +358,35 @@ export function cycle(key) {
   if (!s) return;
   const i = s.options.findIndex(o => o.value === settings[key]);
   set(key, s.options[(i + 1) % s.options.length].value);
+}
+
+/**
+ * Move a setting one option along its own list, clamped at both ends.
+ *
+ * Deliberately not `cycle` with a direction: these are the − / + buttons on the
+ * panes, and a + at 160% that dropped back to 70% would read as the control
+ * being broken rather than as the range ending. Clamping is also what lets the
+ * caller disable the button — `atEnd` says when there is nowhere left to go.
+ *
+ * Steps by *index*, so it walks whatever the schema declares and cannot land
+ * between two offered percentages the way ±10 would on an uneven list.
+ *
+ * @returns {boolean} whether anything moved
+ */
+export function step(key, delta) {
+  const s = byKey.get(key);
+  if (!s) return false;
+  const i = s.options.findIndex(o => o.value === settings[key]);
+  const next = s.options[(i < 0 ? 0 : i) + delta];
+  return next ? set(key, next.value) : false;
+}
+
+/** Whether `step(key, delta)` has anywhere to go. For disabling its button. */
+export function atEnd(key, delta) {
+  const s = byKey.get(key);
+  if (!s) return true;
+  const i = s.options.findIndex(o => o.value === settings[key]);
+  return !s.options[(i < 0 ? 0 : i) + delta];
 }
 
 export function reset() {

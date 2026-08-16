@@ -22,7 +22,10 @@
     // this stays free of anything that could be pointed somewhere else.
     background: 'data-background'
   };
-  var SCALE = { uiSize: '--ui-scale', editorSize: '--editor-scale', editorLineHeight: '--editor-line-height' };
+  var SCALE = {
+    uiSize: '--ui-scale', editorSize: '--editor-scale',
+    editorLineHeight: '--editor-line-height', outlineSize: '--outline-scale'
+  };
   // Ratios that are not sizes, so they get their own bounds: a background at
   // 300% would be a photograph with the interface behind it.
   var RATIO = { backgroundOpacity: '--texture-opacity' };

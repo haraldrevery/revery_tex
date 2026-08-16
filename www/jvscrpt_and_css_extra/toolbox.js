@@ -8,7 +8,9 @@
 // feature in this menu scans project text or touches CodeMirror directly.
 
 import { projectIndex, environmentsOfKind, resolveGraphic } from './document_model.js';
-import { clipboardRows, formattingRows, insertBlockAtCursor, insertReference } from './editor_actions.js';
+import {
+  clipboardRows, formattingRows, commentRows, insertBlockAtCursor, insertReference
+} from './editor_actions.js';
 import { tableBlock, availableRules } from './table_builder.js';
 import { slug, uniqueLabel, figureBlock, equationBlock } from './latex_snippets.js';
 import { openDialog } from './dialog.js';
@@ -420,13 +422,20 @@ export function insertRows({ view, project }) {
   ];
 }
 
-/** The Toolbox button's menu: inserting first, since that is why it is there. */
+/**
+ * The Toolbox button's menu: inserting first, since that is why it is there.
+ *
+ * Commenting is here as well as in the right-click menu, not instead of it. The
+ * right-click Toolbox is off by default — it costs spellcheck and Look Up — so a
+ * row offered only there would be as hard to find as the Ctrl+/ it advertises.
+ */
 export function toolboxRows(ctx) {
   return [
     ...insertRows(ctx),
     { type: 'divider' },
     { type: 'note', label: 'Formatting applies to the selection.' },
-    ...formattingRows(ctx.view)
+    ...formattingRows(ctx.view),
+    ...commentRows(ctx.view)
   ];
 }
 
@@ -448,6 +457,10 @@ export function contextRows(ctx) {
     ...clipboardRows(ctx.view, ctx.report),
     { type: 'divider' },
     ...formattingRows(ctx.view),
+    // With the selection right there, commenting it out is the other thing this
+    // menu is opened for. It sits with formatting because both act on what is
+    // selected, above the divider that fences off the inserts.
+    ...commentRows(ctx.view),
     { type: 'divider' },
     ...insertRows(ctx)
   ];
