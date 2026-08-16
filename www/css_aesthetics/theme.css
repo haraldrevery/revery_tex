@@ -1,9 +1,34 @@
 /* Revery TeX — design tokens and app chrome.
  *
- * The four themes and the 15-property contract are copied from Revery Notebook
- * (revery_notebook_style.css:136-224) so the two apps stay visually identical.
+ * The four themes and the 15-property contract started as a copy of Revery
+ * Notebook's (revery_notebook_style.css:136-224). Two of the fifteen have since
+ * diverged on purpose — see --text-muted and --text-dim below.
  * Chrome is mono/uppercase/wide-tracked; content is the serif brand face.
  * The Harald face has no real bold: weight stays 400 and emphasis is underline.
+ *
+ * ── the two muted text tokens ──
+ *
+ * Their alphas are not a taste setting. They were 0.46-0.63 for muted and
+ * 0.18-0.22 for dim, which measured like this against each theme's own panel:
+ *
+ *     theme    --text   --text-muted   --text-dim
+ *     dark      15.3        4.55           1.78
+ *     light     17.9        6.50           1.53
+ *     paper     11.6        3.14           1.52
+ *     forest    12.8        3.59           1.62
+ *
+ * WCAG AA is 4.5:1 for normal text. --text-dim was 1.5-1.8:1 in every theme —
+ * not dim, absent — and it is not decoration: it colours folder names in the
+ * tree, the gutter's line numbers, the log's tab labels, a submenu's current
+ * value, and every .menu-note, which is prose at the smallest size in the file.
+ * --text-muted failed outright in paper and forest.
+ *
+ * They are now solved to >= 7:1 (muted) and >= 4.5:1 (dim) against every resting
+ * background that theme uses — --bg, --bg-panel and --menu-bg — keeping each
+ * theme's own hue. The 7-vs-4.5 gap is what preserves the hierarchy: dim is
+ * quieter than muted, which is what it was always for.
+ *
+ * If you lower either alpha, measure it. The achieved ratio is on each line.
  */
 
 :root {
@@ -13,6 +38,24 @@
   --tracking-wide: .09em;
   --tracking-wider: .16em;
   --editor-font: var(--font-mono);
+
+  /* ── the type scale ──
+   *
+   * Four steps, and a floor. This replaced thirteen distinct sizes between
+   * .54rem and .75rem, picked one rule at a time — at the default UI size of
+   * 120% the root is 19.2px, so the smallest of them was 10.4px and a
+   * .menu-note sentence was 11.1px. Prose at 11px is not a style choice.
+   *
+   * The rule: nothing a reader takes in as a word goes below --fs-xs, and
+   * anything that is a *sentence* rather than a label gets --fs-sm. Which step
+   * a rule takes is decided by what the text is, not by how much room is left.
+   *
+   * The editor is deliberately not on this scale — it has its own
+   * --editor-scale so the chrome can grow around the text without moving it.
+   */
+  --fs-xs: .68rem;   /* uppercase micro-labels: pane heads, dialog heads, counts */
+  --fs-sm: .72rem;   /* menu items, prose notes, tree rows, log body             */
+  --fs-md: .75rem;   /* body, inputs, list rows, the citation reference          */
 }
 
 /* The editor font setting. Stacks live here rather than in JS so the pre-paint
@@ -32,7 +75,8 @@
   --bg:#0a0a0a; --bg-panel:#1e1e1e; --bg-hover:#2c2c2c;
   --border:rgba(255,255,255,.08); --border-md:rgba(255,255,255,.14);
   --theme-divider:rgb(30,30,30); --theme-divider-hover:rgb(42,42,42);
-  --text:#f5f5f5; --text-muted:rgba(255,255,255,.46); --text-dim:rgba(255,255,255,.18);
+  /* muted 7.0-7.7:1 · dim 4.5-4.6:1 */
+  --text:#f5f5f5; --text-muted:rgba(255,255,255,.62); --text-dim:rgba(255,255,255,.46);
   --accent:rgba(255,255,255,.58); --scrollbar:rgba(255,255,255,.1); --menu-bg:#1f1f1f;
   --ok:#7fc97f; --warn:#e2c46a; --err:#e08a7a;
   --sel:rgba(255,255,255,.22);
@@ -42,7 +86,8 @@
   --bg:#fafaf8; --bg-panel:#ffffff; --bg-hover:#f2f2ef;
   --border:rgba(0,0,0,.07); --border-md:rgba(0,0,0,.14);
   --theme-divider:rgb(232,232,232); --theme-divider-hover:rgb(211,211,211);
-  --text:#171717; --text-muted:rgba(0,0,0,.632); --text-dim:rgba(0,0,0,.18);
+  /* muted 7.0-7.1:1 · dim 4.5-4.6:1 */
+  --text:#171717; --text-muted:rgba(0,0,0,.66); --text-dim:rgba(0,0,0,.54);
   --accent:rgba(0,0,0,.58); --scrollbar:rgba(0,0,0,.1); --menu-bg:#ffffff;
   --ok:#2e7d32; --warn:#8a6d1f; --err:#b3261e;
   --sel:rgba(0,0,0,.22);
@@ -52,7 +97,8 @@
   --bg:#f4efe4; --bg-panel:#ece5d6; --bg-hover:#dabca2;
   --border:rgba(110,80,40,.11); --border-md:rgba(110,80,40,.21);
   --theme-divider:rgb(208,196,176); --theme-divider-hover:rgb(188,174,150);
-  --text:#2f2820; --text-muted:rgba(55,38,18,.536); --text-dim:rgba(55,38,18,.22);
+  /* muted 7.0-7.5:1 · dim 4.5-4.7:1 */
+  --text:#2f2820; --text-muted:rgba(55,38,18,.82); --text-dim:rgba(55,38,18,.67);
   --accent:rgba(176,95,51,.55); --scrollbar:rgba(110,80,40,.14); --menu-bg:#ece5d6;
   --ok:#4a7a3a; --warn:#8a6d1f; --err:#a33a2a;
   --sel:rgba(110,80,40,.22);
@@ -62,7 +108,8 @@
   --bg:#0e1a11; --bg-panel:#152019; --bg-hover:#1d2d22;
   --border:rgba(90,170,90,.09); --border-md:rgba(90,170,90,.17);
   --theme-divider:rgb(24,40,28); --theme-divider-hover:rgb(36,58,40);
-  --text:#cfe8c8; --text-muted:rgba(170,215,158,.50); --text-dim:rgba(170,215,158,.20);
+  /* muted 7.0-8.1:1 · dim 4.5-4.9:1 */
+  --text:#cfe8c8; --text-muted:rgba(170,215,158,.84); --text-dim:rgba(170,215,158,.62);
   --accent:rgba(130,195,118,.65); --scrollbar:rgba(90,170,90,.11); --menu-bg:#192a1d;
   --ok:#8fd07f; --warn:#d7c06a; --err:#e08a7a;
   --sel:rgba(130,195,118,.22);
@@ -84,7 +131,7 @@ html { font-size:calc(16px * var(--ui-scale, 1)) }
 html,body { height:100%; margin:0; overflow:hidden }
 body {
   background-color:var(--bg); color:var(--text); font-family:var(--font-mono);
-  font-size:.75rem; display:flex; flex-direction:column;
+  font-size:var(--fs-md); display:flex; flex-direction:column;
   background-size:cover; background-position:center; background-attachment:fixed;
 }
 
@@ -137,7 +184,7 @@ body > * { position:relative }
 
 /* ── chrome ─────────────────────────────────────────────────────────── */
 .lbl, .dim {
-  font-size:.62rem; letter-spacing:var(--tracking-wider); text-transform:uppercase;
+  font-size:var(--fs-xs); letter-spacing:var(--tracking-wider); text-transform:uppercase;
   color:var(--text-dim); white-space:nowrap;
 }
 .spacer { flex:1 }
@@ -146,7 +193,7 @@ body > * { position:relative }
    popup, in system fonts, ignoring the theme. Every drop-down is a button
    plus a .menu-container — see menus.js SelectMenu. */
 button {
-  font-family:var(--font-mono); font-size:.7rem; text-transform:uppercase;
+  font-family:var(--font-mono); font-size:var(--fs-sm); text-transform:uppercase;
   letter-spacing:var(--tracking-wide); color:var(--text-muted);
   background:none; border:1px solid var(--border-md); border-radius:2px;
   /* asymmetric padding: the brand face sits high in its em box */
@@ -175,7 +222,7 @@ button.primary { color:var(--text); border-color:var(--accent) }
 /* The two variable-length items give way first, so the controls keep their
    labels at any UI size rather than the row wrapping or clipping a button. */
 .docname {
-  font-size:.66rem; letter-spacing:var(--tracking-wide); color:var(--text-muted);
+  font-size:var(--fs-xs); letter-spacing:var(--tracking-wide); color:var(--text-muted);
   text-transform:uppercase;
   min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
@@ -188,7 +235,7 @@ button.primary { color:var(--text); border-color:var(--accent) }
 /* Where the work is stored, when that is not the obvious answer. Persistent
    rather than a toast: it is a standing property of the session, not an event. */
 #notice {
-  flex:none; padding:.4rem .9rem .3rem .9rem; font-size:.62rem;
+  flex:none; padding:.4rem .9rem .3rem .9rem; font-size:var(--fs-xs);
   letter-spacing:var(--tracking-wider); text-transform:uppercase;
   color:var(--warn); border-bottom:1px solid var(--border); background:var(--bg);
 }
@@ -196,7 +243,7 @@ button.primary { color:var(--text); border-color:var(--accent) }
 /* The bar carries actions when it is offering something rather than only
    stating it — "use your system LaTeX", "not now". Sized down to sit inside a
    .62rem uppercase line without setting the bar's own height. */
-#notice button { padding:.15rem .4rem .05rem; font-size:.58rem; margin-left:.15rem }
+#notice button { padding:.15rem .4rem .05rem; font-size:var(--fs-xs); margin-left:.15rem }
 
 /* ── dropdown menus ─────────────────────────────────────────────────── */
 /* Same idiom as Revery Notebook: mono, uppercase, ■ marks the active choice.
@@ -211,12 +258,12 @@ button.primary { color:var(--text); border-color:var(--accent) }
 .menu-container[hidden] { display:none }
 
 .menu-head {
-  padding:.5rem .9rem .25rem .9rem; font-size:.58rem;
+  padding:.5rem .9rem .25rem .9rem; font-size:var(--fs-xs);
   letter-spacing:var(--tracking-wider); text-transform:uppercase; color:var(--text-dim);
 }
 .menu-item {
   background:none; border:none; border-radius:0; width:100%; text-align:left;
-  color:var(--text-muted); font-family:var(--font-mono); font-size:.68rem;
+  color:var(--text-muted); font-family:var(--font-mono); font-size:var(--fs-sm);
   letter-spacing:var(--tracking-wide); text-transform:uppercase;
   /* asymmetric: the brand face sits high in its em box */
   padding:.4rem .9rem .25rem .9rem; cursor:pointer;
@@ -224,6 +271,11 @@ button.primary { color:var(--text); border-color:var(--accent) }
 .menu-item[aria-checked="true"] { color:var(--text) }
 .menu-item:hover, .menu-item:focus { background:var(--bg-hover); color:var(--text); outline:none }
 .menu-item:focus-visible { box-shadow:inset 2px 0 0 var(--accent) }
+/* An action with nothing to act on — Copy with no selection. Kept in place and
+   dimmed rather than dropped, so the rows below it do not move between one
+   opening of the menu and the next. */
+.menu-item[disabled] { opacity:.4; cursor:default }
+.menu-item[disabled]:hover { background:none; color:var(--text-muted) }
 .menu-divider { height:1px; background:var(--theme-divider); margin:.3rem 0 }
 
 /* A two-option setting as a single ■/□ row — Revery Notebook's idiom.
@@ -239,7 +291,7 @@ button.primary { color:var(--text); border-color:var(--accent) }
    and an overflow container clips any descendant positioned outside it. */
 .menu-item.has-submenu { display:flex; align-items:baseline; gap:.6rem }
 .menu-item.has-submenu > span:first-child { flex:1 }
-.menu-sub-value { color:var(--text-dim); font-size:.62rem; white-space:nowrap }
+.menu-sub-value { color:var(--text-dim); font-size:var(--fs-xs); white-space:nowrap }
 .submenu {
   position:fixed; z-index:101; display:flex; flex-direction:column;
   min-width:8rem; padding:.25rem 0;
@@ -256,14 +308,14 @@ button.primary { color:var(--text); border-color:var(--accent) }
 .menu-stepper { display:flex; align-items:center; gap:.2rem; padding:0 .55rem .15rem .55rem }
 .menu-item.menu-step {
   width:auto; flex:none; padding:.3rem .55rem .2rem .55rem;
-  border:1px solid var(--border-md); border-radius:2px; font-size:.72rem;
+  border:1px solid var(--border-md); border-radius:2px; font-size:var(--fs-sm);
 }
 .menu-value {
-  flex:1; text-align:center; font-size:.68rem; color:var(--text);
+  flex:1; text-align:center; font-size:var(--fs-sm); color:var(--text);
   letter-spacing:var(--tracking-wide); text-transform:uppercase;
 }
 .menu-note {
-  padding:.35rem .9rem .5rem .9rem; font-size:.58rem; line-height:1.5;
+  padding:.35rem .9rem .5rem .9rem; font-size:var(--fs-sm); line-height:1.5;
   color:var(--text-dim); text-transform:none; letter-spacing:var(--tracking-body);
   max-width:16rem; white-space:normal;
 }
@@ -282,30 +334,30 @@ button.primary { color:var(--text); border-color:var(--accent) }
 }
 .dlg-head {
   padding:.75rem .9rem .5rem .9rem; border-bottom:1px solid var(--border);
-  font-size:.62rem; letter-spacing:var(--tracking-wider); text-transform:uppercase;
+  font-size:var(--fs-xs); letter-spacing:var(--tracking-wider); text-transform:uppercase;
   color:var(--text-dim);
 }
 .dlg-body { padding:.5rem .9rem .3rem .9rem; display:flex; flex-direction:column; gap:.3rem }
 .dlg-row { display:flex; align-items:center; gap:.6rem; min-height:1.8rem }
 .dlg-label {
-  flex:none; width:6.5rem; font-size:.62rem; color:var(--text-dim);
+  flex:none; width:6.5rem; font-size:var(--fs-xs); color:var(--text-dim);
   letter-spacing:var(--tracking-wide); text-transform:uppercase;
 }
 .dlg-row input[type="text"], .dlg-row input[type="number"] {
-  flex:1; min-width:0; font-family:var(--font-mono); font-size:.72rem; color:var(--text);
+  flex:1; min-width:0; font-family:var(--font-mono); font-size:var(--fs-md); color:var(--text);
   background:var(--bg); border:1px solid var(--border-md); border-radius:2px;
   padding:.3rem .45rem .2rem .45rem;
 }
 .dlg-row input:focus { outline:none; border-color:var(--accent) }
 .dlg-row input[type="checkbox"] { accent-color:var(--accent); width:.9rem; height:.9rem }
 .dlg-choice { display:flex; gap:.25rem; flex-wrap:wrap }
-.dlg-choice button { padding:.3rem .55rem .2rem .55rem; font-size:.62rem }
+.dlg-choice button { padding:.3rem .55rem .2rem .55rem; font-size:var(--fs-xs) }
 .dlg-choice button[aria-pressed="true"] { color:var(--text); border-color:var(--accent) }
 /* The preview is the document's own language, so it is shown as source, not as
    a rendering: a table's appearance depends on packages this app cannot see. */
 .dlg-preview {
   margin:.4rem .9rem; padding:.5rem .6rem; max-height:14rem; overflow:auto;
-  font-family:var(--font-mono); font-size:.66rem; line-height:1.45; white-space:pre;
+  font-family:var(--font-mono); font-size:var(--fs-sm); line-height:1.45; white-space:pre;
   color:var(--text-muted); background:var(--bg); border:1px solid var(--border);
   border-radius:2px;
 }
@@ -324,7 +376,7 @@ button.primary { color:var(--text); border-color:var(--accent) }
 /* The fallback when KaTeX cannot load or cannot parse: the source, plainly,
    rather than an empty box that looks like the equation rendered to nothing. */
 .math-plain {
-  font-family:var(--font-mono); font-size:.7rem; color:var(--text-muted);
+  font-family:var(--font-mono); font-size:var(--fs-sm); color:var(--text-muted);
   white-space:pre-wrap; text-align:left;
 }
 .picker-thumb .katex-display { margin:0 }
@@ -340,7 +392,7 @@ button.primary { color:var(--text); border-color:var(--accent) }
    follow. */
 .dlg.picker { min-width:min(46rem, 94vw); max-width:min(56rem, 96vw); --picker-card:9.5rem }
 .picker-filter {
-  width:100%; font-family:var(--font-mono); font-size:.72rem; color:var(--text);
+  width:100%; font-family:var(--font-mono); font-size:var(--fs-md); color:var(--text);
   background:var(--bg); border:1px solid var(--border-md); border-radius:2px;
   padding:.3rem .45rem .2rem .45rem; margin-bottom:.2rem;
 }
@@ -368,23 +420,61 @@ button.primary { color:var(--text); border-color:var(--accent) }
 }
 .picker-thumb img { max-width:100%; max-height:100%; object-fit:contain; display:block }
 .picker-noimage {
-  color:var(--text-dim); font-size:.6rem; letter-spacing:var(--tracking-wider);
+  color:var(--text-dim); font-size:var(--fs-xs); letter-spacing:var(--tracking-wider);
 }
 .picker-caption {
-  font-size:.6rem; color:var(--text-muted); line-height:1.35;
+  font-size:var(--fs-xs); color:var(--text-muted); line-height:1.35;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
-.picker-count { margin-right:auto; font-size:.6rem; color:var(--text-dim);
+
+/* ── the list layout ──
+   One full-width row per item instead of a grid of cards — see the `layout`
+   option in picker.js. It exists for the citation picker, whose preview is
+   three lines of prose: a grid cell wide enough to hold a reference fits two on
+   screen, and one narrow enough to fit twelve truncates every one of them.
+
+   The row is a two-column grid, not a flex row: the cite keys have to line up
+   down the left edge, and a flex row aligns each one to its own reference
+   instead. `min-content` on that column sizes it to the longest key present
+   rather than to a guess that a longer key would then break. */
+.dlg.picker.picker-list-dlg { min-width:min(42rem, 94vw); max-width:min(52rem, 96vw) }
+.picker-strip.picker-list { grid-template-columns:1fr; gap:0; padding:.3rem 0 .5rem 0 }
+.picker-list .picker-card {
+  display:grid; grid-template-columns:min-content 1fr; align-items:baseline;
+  gap:.1rem .9rem; padding:.5rem .7rem;
+  border-bottom:1px solid var(--border); border-radius:0;
+}
+.picker-list .picker-card:last-child { border-bottom:none }
+/* The key first and the reference beside it. `order` rather than reordering the
+   DOM, because picker.js builds every card the same way and the caption is what
+   the filter and the keyboard handler already reach for. */
+.picker-list .picker-caption {
+  order:0; font-size:var(--fs-xs); color:var(--text-muted);
+  letter-spacing:var(--tracking-wide); white-space:nowrap;
+}
+/* Not a thumbnail here: no fixed height, no frame, no centring. It is a text
+   block that flows, so a long author list makes the row taller rather than
+   being clipped or pushed into a tooltip. */
+.picker-list .picker-thumb {
+  order:1; display:block; height:auto; overflow:visible;
+  background:none; border:none;
+  font-size:var(--fs-md); line-height:1.45; text-align:left;
+}
+.cite-authors { color:var(--text) }
+.cite-title { color:var(--text-muted); font-style:italic }
+.cite-source { color:var(--text-dim) }
+.cite-none { color:var(--text-dim); font-style:italic }
+.picker-count { margin-right:auto; font-size:var(--fs-xs); color:var(--text-dim);
   letter-spacing:var(--tracking-wider); text-transform:uppercase }
 /* − XS + for the card size. The menu stepper's look, but not its classes:
    .menu-step is a .menu-item and carries a menu row's padding and full width. */
 .picker-size { display:flex; align-items:center; gap:.3rem; margin-right:.6rem }
-.picker-size button { padding:.25rem .5rem .15rem .5rem; font-size:.72rem }
+.picker-size button { padding:.25rem .5rem .15rem .5rem; font-size:var(--fs-sm) }
 .picker-size-value {
-  min-width:2.2rem; text-align:center; font-size:.6rem; color:var(--text-dim);
+  min-width:2.2rem; text-align:center; font-size:var(--fs-xs); color:var(--text-dim);
   letter-spacing:var(--tracking-wider); text-transform:uppercase;
 }
-.picker-empty { color:var(--text-dim); font-size:.65rem; padding:1.4rem .4rem }
+.picker-empty { color:var(--text-dim); font-size:var(--fs-sm); padding:1.4rem .4rem }
 .picker-strip::-webkit-scrollbar { width:8px; height:8px }
 .picker-strip::-webkit-scrollbar-thumb { background:var(--scrollbar); border-radius:2px }
 
@@ -403,22 +493,71 @@ button.primary { color:var(--text); border-color:var(--accent) }
 [data-panel-order="pdf-first"] #editorpane { order:3 }
 [data-panel-order="pdf-first"] .vdiv[data-resize="outline"] { order:4 }
 [data-panel-order="pdf-first"] #outlinepane { order:5 }
-#sidebar  { width:230px; min-width:120px; display:flex; flex-direction:column; background:var(--bg-panel) }
+/* `flex:none` for the same reason #outlinepane has it, which this was missing.
+   Without it the sidebar defaults to `flex:0 1 auto` — shrinkable — and the
+   editor and PDF panes ask for 55% + 45% of the row on top of it. The row is
+   over-subscribed, so the flex algorithm squeezes the sidebar back to its
+   min-width and holds it there. Dragging its divider set `style.width`
+   correctly and changed nothing on screen: 180px assigned, 120px rendered. A
+   fixed-width pane beside two proportional ones has to be `flex:none`. */
+#sidebar  { width:230px; min-width:120px; flex:none; display:flex; flex-direction:column; background:var(--bg-panel) }
 #editorpane { flex:1 1 55%; display:flex; flex-direction:column; min-width:0 }
 #pdfpane  { flex:1 1 45%; display:flex; flex-direction:column; min-width:0; background:var(--bg-panel) }
 
-.vdiv { width:1px; background:var(--theme-divider); cursor:col-resize; flex:none }
-.vdiv:hover { background:var(--theme-divider-hover) }
-.hdiv { height:1px; background:var(--theme-divider); cursor:row-resize; flex:none }
-.hdiv:hover { background:var(--theme-divider-hover) }
+/* Dividers: a 1px hairline with a 9px grab area.
+
+   Both halves of this are load-bearing.
+
+   `position:relative` — a static divider paints *below* any positioned
+   descendant of its neighbours, and both neighbours have one: #pdf sets
+   position:relative, and CodeMirror sets it on .cm-editor. With flex bases of
+   55%/45% the pane edges land on fractional pixels, and engines round them
+   differently, so a neighbour can cover the divider's 1px column in one browser
+   and not another. On WebKitGTK the three vertical dividers could not be
+   grabbed at all while #paneldiv could — and the only difference between them
+   is that #paneldiv is a child of <body> and so already picked up
+   `body > * { position:relative }` above.
+
+   The ::after — a 1px hit target is a defect on any engine; 6-8px is the usual
+   minimum. It is also the one target in the UI that --ui-scale does not grow,
+   so at the default 120% everything else is bigger and this was not. The
+   pseudo-element widens what can be pressed without widening what can be seen,
+   and overhangs into the panes rather than taking layout space of its own. */
+.vdiv, .hdiv {
+  position:relative; z-index:1; flex:none;
+  background:var(--theme-divider);
+  /* On the element, not the ::after — touch-action is resolved against the hit
+     element, and a pseudo-element's hits resolve to its originator. Without it
+     a touch drag scrolls the pane instead of moving the divider. */
+  touch-action:none;
+}
+.vdiv { width:1px; cursor:col-resize }
+.hdiv { height:1px; cursor:row-resize }
+/* Biased away from the scrollbars rather than centred. Every pane here is LTR
+   with `overflow:auto`, so its scrollbar sits on its *right* edge — which is
+   the edge each vertical divider abuts. A symmetric 4px overhang would take
+   half of an 8px scrollbar with it and make the PDF harder to scroll than the
+   divider was to grab. Overhanging into the pane on the right instead costs
+   nothing: those edges are padding and gutters. Same reasoning downward for
+   the horizontal one, into the panel head's own padding. */
+.vdiv::after, .hdiv::after { content:''; position:absolute }
+.vdiv::after { inset:0 -6px 0 -2px }
+.hdiv::after { inset:-2px 0 -6px 0 }
+.vdiv:hover, .hdiv:hover { background:var(--theme-divider-hover) }
+
+/* While a divider is being dragged. The pointer is captured, so the events
+   arrive wherever it actually is — but without this the drag paints a text
+   selection across every pane it crosses. The cursor is pinned from JS instead
+   of here, because it differs per divider. */
+body.dragging * { user-select:none !important }
 
 .panehead, .panelhead {
   flex:none; display:flex; align-items:center; gap:.4rem;
   padding:8px 14px 6px; border-bottom:1px solid var(--border);
-  font-size:.62rem; letter-spacing:var(--tracking-wider); text-transform:uppercase;
+  font-size:var(--fs-xs); letter-spacing:var(--tracking-wider); text-transform:uppercase;
   color:var(--text-dim); background:color-mix(in srgb, var(--bg-panel) 40%, transparent);
 }
-.panehead button, .panelhead button { padding:.2rem .45rem .1rem; font-size:.6rem }
+.panehead button, .panelhead button { padding:.2rem .45rem .1rem; font-size:var(--fs-xs) }
 
 /* ── file tree ──────────────────────────────────────────────────────── */
 #filetree { flex:1; overflow:auto; padding:4px 0 }
@@ -435,7 +574,7 @@ button.primary { color:var(--text); border-color:var(--accent) }
   font-family:inherit; text-transform:none; letter-spacing:normal;
   line-height:inherit; transition:none;
   padding:.22rem .6rem .16rem 1rem; cursor:pointer; white-space:nowrap;
-  overflow:hidden; text-overflow:ellipsis; font-size:.7rem; color:var(--text-muted);
+  overflow:hidden; text-overflow:ellipsis; font-size:var(--fs-sm); color:var(--text-muted);
 }
 .node:hover { background:var(--bg-hover); color:var(--text) }
 /* Focus is shown, but only for the keyboard: an inset bar on the other side
@@ -451,7 +590,7 @@ button.primary { color:var(--text); border-color:var(--accent) }
 .node.active { color:var(--text); box-shadow:inset 2px 0 0 var(--accent) }
 /* Directories are rows now, not headings: clickable, foldable, and indented
    with their contents so the nesting is visible. */
-.node.dir { color:var(--text-dim); letter-spacing:var(--tracking-wide); font-size:.66rem }
+.node.dir { color:var(--text-dim); letter-spacing:var(--tracking-wide); font-size:var(--fs-xs) }
 .node.dir::before { content:'▾ '; color:var(--text-dim) }
 .node.dir.folded::before { content:'▸ ' }
 .node.dir:hover { color:var(--text) }
@@ -486,7 +625,7 @@ button.primary { color:var(--text); border-color:var(--accent) }
 }
 #outlinepane[hidden], .vdiv[hidden] { display:none }
 #outline { flex:1; overflow:auto; padding:4px 0 }
-.node.sec { font-size:.68rem }
+.node.sec { font-size:var(--fs-sm) }
 /* An inset shadow rather than a border: the indent is set inline per level, so
    a border would shift the text 2px sideways as the cursor moves between
    headings. Same reason the PDF canvas uses one. */
@@ -495,7 +634,7 @@ button.primary { color:var(--text); border-color:var(--accent) }
    chapter whose include is commented out is exactly what you go looking for,
    but dimmed so it cannot be mistaken for part of the compiled document. */
 .node.orphan { opacity:.55; font-style:italic }
-.node.dim-note { font-size:.66rem }
+.node.dim-note { font-size:var(--fs-sm) }
 .node.dim-note:hover, .node.dim-note:focus-visible { background:none; box-shadow:none }
 
 /* ── editor ─────────────────────────────────────────────────────────── */
@@ -519,12 +658,12 @@ button.primary { color:var(--text); border-color:var(--accent) }
 .cm-activeLine { background:color-mix(in srgb, var(--bg-hover) 40%, transparent) }
 /* Diagnostics from the compile log, shown in the gutter. */
 .cm-diaggutter { min-width:1.1rem }
-.cm-diag { font-size:.55rem; line-height:1.7; display:block; text-align:center }
+.cm-diag { font-size:var(--fs-xs); line-height:1.7; display:block; text-align:center }
 .cm-diag-error { color:var(--err) } .cm-diag-warning { color:var(--warn) }
 /* Completion popup, in the app's own idiom rather than CodeMirror's default. */
 .cm-tooltip.cm-tooltip-autocomplete {
   background:var(--menu-bg); border:1px solid var(--border-md); border-radius:2px;
-  font-family:var(--font-mono); font-size:.7rem;
+  font-family:var(--font-mono); font-size:var(--fs-sm);
 }
 .cm-tooltip-autocomplete ul li { padding:.15rem .5rem; color:var(--text-muted) }
 .cm-tooltip-autocomplete ul li[aria-selected] { background:var(--bg-hover); color:var(--text) }
@@ -602,8 +741,12 @@ button.primary { color:var(--text); border-color:var(--accent) }
   filter: invert(1) hue-rotate(180deg);
   box-shadow: 0 0 0 1px #404040;
 }
+/* The preview compiled, but came back without click-to-source or without its
+   links. Marked here rather than in the status line, which the compile result
+   overwrites a moment later; the full reason is in the title. */
+#pdfmeta.warn { color:var(--warn); cursor:help }
 #pdfempty { flex:1; display:flex; align-items:center; justify-content:center;
-            color:var(--text-dim); font-size:.66rem; letter-spacing:var(--tracking-wider);
+            color:var(--text-dim); font-size:var(--fs-xs); letter-spacing:var(--tracking-wider);
             text-transform:uppercase }
 
 /* ── bottom panel ───────────────────────────────────────────────────── */
@@ -612,7 +755,7 @@ button.primary { color:var(--text); border-color:var(--accent) }
 #panel.collapsed .tabbody { display:none }
 .tab { border:0; border-bottom:1px solid transparent; border-radius:0; color:var(--text-dim) }
 .tab.active { color:var(--text); border-bottom-color:var(--accent) }
-.tabbody { flex:1; overflow:auto; padding:6px 14px; white-space:pre; font-size:.7rem; line-height:1.45 }
+.tabbody { flex:1; overflow:auto; padding:6px 14px; white-space:pre; font-size:var(--fs-sm); line-height:1.45 }
 .tabbody.hidden { display:none }
 /* Every scrolling surface in the app, in one place — a new one styled
    separately is how two panes end up with different scrollbars. */
@@ -632,7 +775,7 @@ button.primary { color:var(--text); border-color:var(--accent) }
 .issue { cursor:pointer; padding:.15rem 0; white-space:normal }
 .issue:hover { color:var(--text) }
 .issue .sev { display:inline-block; width:4.2rem; text-transform:uppercase;
-              letter-spacing:var(--tracking-wide); font-size:.62rem }
+              letter-spacing:var(--tracking-wide); font-size:var(--fs-xs) }
 .issue.error .sev { color:var(--err) } .issue.warning .sev { color:var(--warn) }
 .issue .where { color:var(--text-dim) }
-.empty { color:var(--text-dim); font-size:.66rem; letter-spacing:var(--tracking-wider); text-transform:uppercase }
+.empty { color:var(--text-dim); font-size:var(--fs-xs); letter-spacing:var(--tracking-wider); text-transform:uppercase }

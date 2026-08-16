@@ -19,8 +19,19 @@ const CMAP_URL = new URL('./pdfjs/cmaps/', import.meta.url).href;
 const FONT_URL = new URL('./pdfjs/standard_fonts/', import.meta.url).href;
 
 export class PdfPreview {
-  constructor(container) {
+  /**
+   * @param {HTMLElement} container
+   * @param {{onLog?: (msg: string, kind?: string) => void}} [opts]
+   *   Where a swallowed failure goes. Link indexing is best-effort by design,
+   *   but "this document has no links" and "reading its links threw" used to
+   *   look identical from the outside — both ended as an empty Map with nothing
+   *   said. Same shape as NativeTexEngine's `onLog`.
+   */
+  constructor(container, { onLog = () => {} } = {}) {
     this.container = container;
+    this.onLog = onLog;
+    /** Set when link indexing threw, so the app can say links are unavailable. */
+    this.linkError = null;
     this.doc = null;
     this.pageCount = 0;
     this.scale = 1;
@@ -52,7 +63,9 @@ export class PdfPreview {
         this.container.classList.toggle('pdf-overlink', !!this._linkAtEvent(ev));
       });
     };
-    this.container.addEventListener('mousemove', this._onMove);
+    // pointermove, not mousemove: one input model across the app, and it is the
+    // event a pen or a touch actually sends. `clientX`/`clientY` are the same.
+    this.container.addEventListener('pointermove', this._onMove);
 
     // Re-render on width change, debounced: canvas is raster, so a resize
     // without a re-render leaves the page soft.
@@ -169,11 +182,15 @@ export class PdfPreview {
           return { x: vx, y: vy };
         }
       });
-    } catch {
+    } catch (err) {
       // Links are an enhancement. A malformed annotation tree must leave the
       // preview working exactly as it did before, the same way a SyncTeX parse
-      // failure never fails a compile.
+      // failure never fails a compile — but it is still said out loud, because
+      // silently degrading to "this document has no links" is how a broken
+      // annotation path stays invisible for a release.
       this._links = new Map();
+      this.linkError = err.message;
+      this.onLog(`PDF link index failed: ${err.message}`, 'wrn');
     }
     return this._links;
   }
@@ -331,6 +348,7 @@ export class PdfPreview {
     this._renderToken++;
     this._docToken++;              // abandons any link indexing still in flight
     this._links = new Map();
+    this.linkError = null;
     // The offsets are into the document being replaced; keeping them would send
     // Back to an arbitrary place in the new one.
     this._back.length = 0;
@@ -341,7 +359,7 @@ export class PdfPreview {
 
   async destroy() {
     this._observer?.disconnect();
-    this.container.removeEventListener('mousemove', this._onMove);
+    this.container.removeEventListener('pointermove', this._onMove);
     clearTimeout(this._resizeTimer);
     await this.destroyDoc();
   }

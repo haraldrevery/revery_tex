@@ -92,8 +92,13 @@ export function pagesFromLog(log) {
  *     classes and the collections busytex never built.
  *
  * `systemWouldFix` is what lets the shell offer the switch only when switching
- * would actually help; it is false for a stale .bbl, because a system TeX
- * compiles the same wrong file unless biber regenerates it first.
+ * would actually help. It is true for a stale .bbl: this said the opposite —
+ * "a system TeX compiles the same wrong file" — and that was wrong about our own
+ * code. The native engine runs biber when the document asks for it
+ * (tex_engine_native.js), which regenerates the .bbl; that is the whole reason
+ * it exists. The offer was suppressed on the one limit a system TeX fixes most
+ * reliably. Where biber is *not* on the PATH the native engine names it and
+ * carries on, which is a better outcome than never mentioning the option.
  *
  * Returns [] for a clean log, so callers can spread it unconditionally.
  */
@@ -125,7 +130,7 @@ export function engineLimits(log) {
       severity: 'error',
       package: 'biblatex',
       kind: 'stale-bbl',
-      systemWouldFix: false,
+      systemWouldFix: true,
       message: `${stale[1]} was built by a different biblatex (this one expects ${version}). ` +
                'Its entries will not typeset — regenerate it with biber, or set ' +
                '\\usepackage[backend=bibtex]{biblatex}, which the bundled bibtex8 can build.'

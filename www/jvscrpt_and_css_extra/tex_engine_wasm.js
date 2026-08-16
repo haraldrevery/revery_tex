@@ -172,7 +172,14 @@ export class WasmTexEngine {
       // .bbl the project ships — the same way a missing package is named
       // rather than swallowed.
       let runBibtex = false;
+      let noBiber = false;
       if (bibtex === 'biber') {
+        // Reported as a limit, not only as log lines. The three suggestions
+        // below are good advice that nothing could act on: they went to a tab
+        // nobody had open, while the UI showed a successful compile over a
+        // document with every citation undefined. A limit reaches the Issues
+        // list and the notice bar, where the backend switch is one click.
+        noBiber = true;
         // Three ways forward, named, because "biber is unavailable" on its own
         // leaves someone with an empty bibliography and nothing to try. The
         // backend switch is a real option now that biblatex.bst is in the
@@ -227,6 +234,21 @@ export class WasmTexEngine {
       // report "✓ 49 pages · 0 errors" over a document whose opening pages are
       // filled with `family=Einstein, giveni=A. M., author1hash=…`.
       const limits = engineLimits(log);
+      // Ahead of the log-derived ones: this is the cause, and a stale .bbl is
+      // one of its symptoms. A reader scanning Issues should meet the reason
+      // before the consequence.
+      if (noBiber) {
+        limits.unshift({
+          severity: 'error',
+          package: 'biblatex',
+          kind: 'no-biber',
+          // A system TeX with real biber builds this correctly.
+          systemWouldFix: true,
+          message: 'This document uses biblatex with biber, which no in-browser engine can run. ' +
+                   'Switch it to \\usepackage[backend=bibtex]{biblatex} — the bundled bibtex8 ' +
+                   'builds that — or compile with your own TeX Live.'
+        });
+      }
       for (const l of limits) this._log('warn', l.message);
 
       return {

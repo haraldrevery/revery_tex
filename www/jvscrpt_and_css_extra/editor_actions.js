@@ -53,6 +53,88 @@ export function insertReference(view, kind, key) {
   return applyEdit(view, { ...reference(kind, key, from), to });
 }
 
+/* ── clipboard ───────────────────────────────────────────────────────── */
+
+/**
+ * Cut, Copy and Paste for the right-click menu.
+ *
+ * These exist because the menu takes the browser's own away. Turning the
+ * right-click Toolbox on replaces the native context menu wholesale, and with it
+ * went the three entries everyone reaches for — so the menu that replaced it has
+ * to put them back. The keyboard shortcuts always worked; a context menu without
+ * them just looks broken.
+ *
+ * Paste is the one that is genuinely not portable. `readText()` needs a secure
+ * context and, in WebKit, a per-use permission prompt, so it is offered only
+ * when the method exists and reports its own refusal when the promise rejects.
+ * Doing nothing silently is exactly what makes a menu feel dead.
+ *
+ * @param {() => object} view
+ * @param {(msg: string, cls?: string) => void} [report]  where a refusal is said
+ */
+export function clipboardRows(view, report = () => {}) {
+  // Read once here to decide what is *enabled*, and again inside each `run` to
+  // decide what to act on — the same split formattingRows uses. A menu row that
+  // acted on offsets captured when the menu was built would be one stale-doc
+  // away from cutting the wrong span.
+  const selected = () => {
+    const v = view();
+    return v ? { v, ...v.state.selection.main } : { v: null, from: 0, to: 0 };
+  };
+  const { from, to } = selected();
+  const hasSelection = from !== to;
+  const canWrite = !!navigator.clipboard?.writeText;
+  const canRead = !!navigator.clipboard?.readText;
+
+  /** @returns {{v: object, from: number, to: number}|null} null if it failed */
+  const copy = async () => {
+    const now = selected();
+    if (!now.v || now.from === now.to) return null;
+    try {
+      await navigator.clipboard.writeText(now.v.state.sliceDoc(now.from, now.to));
+      return now;
+    } catch (e) {
+      report(`✗ copy failed: ${e.message}`, 'err');
+      return null;
+    }
+  };
+
+  return [
+    {
+      type: 'action', label: 'Cut',
+      disabled: !hasSelection || !canWrite,
+      title: hasSelection ? 'Ctrl+X' : 'nothing selected',
+      // Only delete once the text is safely on the clipboard: a failed write
+      // followed by a delete would destroy the selection and hand back nothing.
+      run: async () => {
+        const done = await copy();
+        if (done) applyEdit(done.v, { from: done.from, to: done.to, insert: '', cursor: done.from });
+      }
+    },
+    {
+      type: 'action', label: 'Copy',
+      disabled: !hasSelection || !canWrite,
+      title: hasSelection ? 'Ctrl+C' : 'nothing selected',
+      run: copy
+    },
+    {
+      type: 'action', label: 'Paste',
+      disabled: !canRead,
+      title: canRead ? 'Ctrl+V' : 'this browser only allows paste from the keyboard',
+      run: async () => {
+        try {
+          const text = await navigator.clipboard.readText();
+          if (text) insertAtCursor(view(), text);
+        } catch {
+          // Denied, or no permission prompt available at all. Name the way that
+          // does work rather than leaving the click unexplained.
+          report('✗ paste needs permission — use Ctrl+V', 'err');
+        }
+      }
+    }
+  ];
+}
+
 /**
  * The formatting rows, shared by the Toolbox and the right-click menu so the
  * two cannot offer different things.

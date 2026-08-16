@@ -54,14 +54,19 @@ test('missing font outlines name lmodern, and a system LaTeX would fix it', asyn
   assert.match(l.message, /cm-super/);
 });
 
-test('a stale .bbl is an error, and a system LaTeX would NOT fix it', async () => {
+test('a stale .bbl is an error, and a system LaTeX WOULD fix it', async () => {
   const [l, ...rest] = await limits(STALE_BBL);
   assert.equal(rest.length, 0);
   assert.equal(l.kind, 'stale-bbl');
   // An error despite the compile succeeding: this is the whole point. A PDF
   // came out, and its opening pages are raw bibliography data.
   assert.equal(l.severity, 'error');
-  assert.equal(l.systemWouldFix, false);
+  // This read `false`, on the reasoning that a system TeX compiles the same
+  // wrong file. That was wrong about our own code: the native engine runs biber
+  // when the document asks for it, which rebuilds the .bbl — it is the reason
+  // that engine exists. The offer was suppressed on the one limit a system TeX
+  // fixes most reliably.
+  assert.equal(l.systemWouldFix, true);
   assert.equal(l.package, 'biblatex');
   assert.match(l.message, /main\.bbl/);
   // The version is captured without swallowing the sentence's full stop, and

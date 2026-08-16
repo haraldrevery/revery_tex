@@ -52,6 +52,45 @@ async function realClick(cdp, expr) {
 }
 
 /**
+ * A real press, move and release, starting at an element's centre.
+ *
+ * The same lesson as `realClick`, one layer down. A divider drag is three
+ * events, and every failure this has actually produced lives in the gaps
+ * between them: a hit target too small to receive the press, a pane painted on
+ * top of it, a release that arrives somewhere else. Dispatching them separately
+ * is the only way any of that is visible to a test.
+ *
+ * Two moves, not one: the first leaves the divider, which is where a handler
+ * without pointer capture loses the stream.
+ *
+ * @param {string} expr  JS evaluating to the element to grab
+ * @param {number} dx @param {number} dy  total movement, in CSS pixels
+ */
+async function realDrag(cdp, expr, dx, dy) {
+  const at = await cdp.evaluate(`(() => {
+    const el = ${expr};
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    // Not r.width/r.height: a 1px divider's grab area is a ::after that
+    // overhangs it, and the centre is what a person aims at either way.
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  })()`, true);
+  if (!at) return false;
+
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y, buttons: 0 });
+  await cdp.send('Input.dispatchMouseEvent',
+    { type: 'mousePressed', x: at.x, y: at.y, button: 'left', buttons: 1, clickCount: 1 });
+  for (const f of [0.5, 1]) {
+    await cdp.send('Input.dispatchMouseEvent',
+      { type: 'mouseMoved', x: at.x + dx * f, y: at.y + dy * f, button: 'left', buttons: 1 });
+  }
+  await cdp.send('Input.dispatchMouseEvent',
+    { type: 'mouseReleased', x: at.x + dx, y: at.y + dy, button: 'left', buttons: 0 });
+  await sleep(80);
+  return true;
+}
+
+/**
  * A real chord, dispatched at the browser rather than at an element.
  *
  * `new KeyboardEvent(...)` does not reach CodeMirror's keymap the way a real
@@ -350,6 +389,89 @@ async function main() {
       `${reset.theme} / ${reset.scale} / ${reset.font}`);
     check('reset closes the menu', reset.closed);
 
+    /* ── legibility: contrast and the type floor ────────────────────── */
+    // The reported bug: "the muted colour is too muted, can't read it, in both
+    // light and dark themes". It was measurable and nothing measured it —
+    // --text-dim sat at 1.5-1.8:1 in every theme while colouring folder names,
+    // gutter line numbers, log tab labels and every .menu-note.
+    //
+    // Computed from the live stylesheet rather than from a copy of the values,
+    // so lowering an alpha in theme.css fails here rather than in a bug report.
+    const legible = await cdp.evaluate(`(() => {
+      const lin = (c) => { c /= 255; return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+      const lum = ([r, g, b]) => 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+      const ratio = (a, b) => {
+        const [hi, lo] = [lum(a), lum(b)].sort((p, q) => q - p);
+        return (hi + 0.05) / (lo + 0.05);
+      };
+      // Resolve any CSS colour, including rgba(), to composited RGB over a
+      // known backdrop — the browser's own parser, so no colour maths here has
+      // to agree with theme.css about syntax.
+      const probe = document.createElement('span');
+      document.body.appendChild(probe);
+      const rgba = (value) => {
+        probe.style.color = '';
+        probe.style.color = value;
+        const m = getComputedStyle(probe).color.match(/[\\d.]+/g).map(Number);
+        return { rgb: m.slice(0, 3), a: m.length > 3 ? m[3] : 1 };
+      };
+      const over = (fg, bg) => fg.rgb.map((c, i) => c * fg.a + bg.rgb[i] * (1 - fg.a));
+
+      const out = {};
+      const root = document.documentElement;
+      const was = root.getAttribute('data-theme');
+      for (const theme of ['dark', 'light', 'paper', 'forest']) {
+        root.setAttribute('data-theme', theme);
+        const cs = getComputedStyle(root);
+        const v = (n) => rgba(cs.getPropertyValue(n).trim());
+        const panel = v('--bg-panel'), menu = v('--menu-bg'), bg = v('--bg');
+        const worst = (tok) => Math.min(...[panel, menu, bg].map(
+          (b) => ratio(over(v(tok), b), b.rgb)));
+        out[theme] = { muted: worst('--text-muted'), dim: worst('--text-dim') };
+      }
+      root.setAttribute('data-theme', was);
+      probe.remove();
+      return out;
+    })()`, true);
+
+    for (const [theme, r] of Object.entries(legible)) {
+      // AA is 4.5:1 for normal text. --text-dim is held to exactly that because
+      // it carries real content; --text-muted is the primary secondary colour
+      // and is held higher.
+      check(`${theme}: muted text stays readable`, r.muted >= 6.9, `${r.muted.toFixed(2)}:1`);
+      check(`${theme}: dim text meets AA`, r.dim >= 4.45, `${r.dim.toFixed(2)}:1`);
+    }
+
+    // The other half of the report: "some UI text elements are too small",
+    // naming two .menu-note sentences. They were .58rem — 11.1px at the default
+    // UI size. Nothing a reader takes in as a word now sits below --fs-xs.
+    const sizes = await cdp.evaluate(`(() => {
+      document.getElementById('toolbox').click();
+      const note = document.querySelector('.menu-container:not([hidden]) .menu-note');
+      const item = document.querySelector('.menu-container:not([hidden]) .menu-item');
+      const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
+      // Rounded: .68rem of a 19.2px root is 13.056px, which divides back to
+      // 0.6799999999999999 and loses a >= comparison against its own value.
+      const at = (el) => el ? Math.round(parseFloat(getComputedStyle(el).fontSize) / rem * 1000) / 1000 : 0;
+      const r = { note: at(note), item: at(item), noteText: note?.textContent.trim() };
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      // Every size the stylesheet actually paints, so a rule that quietly
+      // reintroduces a .58rem is caught wherever it is.
+      const painted = [...document.querySelectorAll('body *')]
+        .filter(el => el.offsetParent !== null && el.textContent.trim());
+      r.floor = Math.min(...painted.map(at));
+      // Name the offender, or a failure here is a number with nowhere to go.
+      const worst = painted.find(el => at(el) === r.floor);
+      r.worstSel = worst && (worst.id ? '#' + worst.id : '.' + [...worst.classList].join('.'));
+      return r;
+    })()`, true);
+
+    check('menu prose is at the prose size', sizes.note >= 0.72,
+      `${sizes.note}rem — "${(sizes.noteText || '').slice(0, 40)}…"`);
+    check('menu rows are no smaller', sizes.item >= 0.68, `${sizes.item}rem`);
+    check('nothing visible falls below the type floor', sizes.floor >= 0.68,
+      `smallest painted: ${sizes.floor}rem on ${sizes.worstSel}`);
+
     /* ── the PDF preview refits when the divider moves ──────────────── */
     // The reported bug: dragging the divider narrower than the width the PDF
     // was rendered at squashed the page — max-width:100% shrank the width while
@@ -441,6 +563,78 @@ async function main() {
       Math.abs(mapping.narrow.y - mapping.wide.y) < 1,
       `narrow (${mapping.narrow.x.toFixed(1)}, ${mapping.narrow.y.toFixed(1)}) · ` +
       `wide (${mapping.wide.x.toFixed(1)}, ${mapping.wide.y.toFixed(1)})`);
+
+    /* ── the dividers themselves ────────────────────────────────────── */
+    // Everything above drives the panes by assigning `style.flex` directly,
+    // which is the handler's *effect* and never touches the divider. Reported
+    // from the desktop build: three of the four dividers could not be grabbed
+    // at all. A 1px target with a pane painted over it fails exactly here, and
+    // nothing in this file could see it.
+    await cdp.evaluate(`(() => {
+      document.getElementById('editorpane').style.flex = '';
+      document.getElementById('pdfpane').style.flex = '';
+    })()`, true);
+
+    for (const [name, sel, axis] of [
+      ['sidebar', `document.querySelector('.vdiv[data-resize="sidebar"]')`, 'x'],
+      ['editor/PDF', `document.querySelector('.vdiv[data-resize="editor"]')`, 'x'],
+      ['outline', `document.querySelector('.vdiv[data-resize="outline"]')`, 'x']
+    ]) {
+      const measure = `(() => {
+        const p = document.getElementById('editorpane').getBoundingClientRect();
+        const s = document.getElementById('sidebar').getBoundingClientRect();
+        const o = document.getElementById('outlinepane').getBoundingClientRect();
+        return { editor: p.width, sidebar: s.width, outline: o.width };
+      })()`;
+      const was = await cdp.evaluate(measure, true);
+      const delta = name === 'outline' ? -60 : 60;
+      await realDrag(cdp, sel, axis === 'x' ? delta : 0, axis === 'x' ? 0 : delta);
+      const now = await cdp.evaluate(measure, true);
+      const moved = Math.abs(now.editor - was.editor) > 8 ||
+                    Math.abs(now.sidebar - was.sidebar) > 8 ||
+                    Math.abs(now.outline - was.outline) > 8;
+      check(`the ${name} divider can actually be dragged`, moved,
+        `sidebar ${was.sidebar.toFixed(0)}→${now.sidebar.toFixed(0)}, ` +
+        `editor ${was.editor.toFixed(0)}→${now.editor.toFixed(0)}, ` +
+        `outline ${was.outline.toFixed(0)}→${now.outline.toFixed(0)}`);
+    }
+
+    // The bug this is really guarding: the drag writes an inline height on
+    // #panel, and an inline style beats `#panel.collapsed { height:2rem }`. Once
+    // the panel had been dragged, Hide could never collapse it again — it
+    // emptied the tab body and left the box full height, which reads as a dead
+    // button. A `.click()` test would have missed the drag half entirely.
+    const panelHeights = await cdp.evaluate(`(() => {
+      const p = document.getElementById('panel');
+      p.classList.remove('collapsed');
+      p.style.height = '';
+      return { start: p.getBoundingClientRect().height };
+    })()`, true);
+    await realDrag(cdp, `document.getElementById('paneldiv')`, 0, -70);
+    panelHeights.dragged = await cdp.evaluate(
+      `document.getElementById('panel').getBoundingClientRect().height`, true);
+    await realClick(cdp, `document.getElementById('togglepanel')`);
+    await sleep(120);
+    panelHeights.hidden = await cdp.evaluate(
+      `document.getElementById('panel').getBoundingClientRect().height`, true);
+    await realClick(cdp, `document.getElementById('togglepanel')`);
+    await sleep(120);
+    panelHeights.shown = await cdp.evaluate(
+      `document.getElementById('panel').getBoundingClientRect().height`, true);
+
+    check('the log panel divider can be dragged',
+      panelHeights.dragged > panelHeights.start + 20,
+      `${panelHeights.start.toFixed(0)} → ${panelHeights.dragged.toFixed(0)}`);
+    check('Hide collapses the panel even after a drag',
+      panelHeights.hidden < panelHeights.dragged / 2,
+      `${panelHeights.dragged.toFixed(0)} → ${panelHeights.hidden.toFixed(0)}`);
+    check('and Show returns it to the dragged height',
+      Math.abs(panelHeights.shown - panelHeights.dragged) < 4,
+      `${panelHeights.hidden.toFixed(0)} → ${panelHeights.shown.toFixed(0)}`);
+
+    check('a drag leaves no selection painted across the panes',
+      await cdp.evaluate(`!document.body.classList.contains('dragging') &&
+                          document.body.style.cursor === ''`, true));
 
     /* ── the table builder ──────────────────────────────────────────── */
     // Before the formatting block, which replaces the whole cv document with a
@@ -663,6 +857,87 @@ async function main() {
     // A transient menu that is not removed leaves a dead <div> per right-click.
     check('context menus do not accumulate', fmt.after === fmt.baseline,
       `${fmt.baseline} permanent → ${fmt.after} after five right-clicks`);
+
+    /* ── clipboard rows ─────────────────────────────────────────────── */
+    // The menu replaces the browser's own, which had Cut, Copy and Paste at the
+    // top. Leaving them out did not remove a feature so much as move it
+    // somewhere nobody would look.
+    const clip = await cdp.evaluate(`(async () => {
+      const view = window.__reveryTexTest.view();
+      const target = document.querySelector('.cm-content');
+      const r = target.getBoundingClientRect();
+      const openMenu = () => {
+        target.dispatchEvent(new MouseEvent('contextmenu', {
+          bubbles: true, cancelable: true, clientX: r.left + 40, clientY: r.top + 20 }));
+        return document.querySelector('.menu-container:not([hidden])');
+      };
+      const rowsNow = (m) => [...m.querySelectorAll('.menu-item')]
+        .map(b => ({ label: b.textContent.trim(), disabled: b.disabled }));
+
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: 'copy this text' } });
+
+      // With a selection.
+      view.dispatch({ selection: { anchor: 5, head: 9 } });
+      const withSel = rowsNow(openMenu());
+      const copyRow = [...document.querySelectorAll('.menu-container .menu-item')]
+        .find(b => /^Copy$/i.test(b.textContent.trim()));
+      copyRow?.click();
+      await new Promise(res => setTimeout(res, 120));
+      let clipboardText = null;
+      try { clipboardText = await navigator.clipboard.readText(); } catch { /* not granted */ }
+
+      // Without one: Cut and Copy have nothing to act on.
+      view.dispatch({ selection: { anchor: 3, head: 3 } });
+      const noSel = rowsNow(openMenu());
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+
+      // Cut, on a fresh selection.
+      view.dispatch({ selection: { anchor: 0, head: 5 } });
+      openMenu();
+      [...document.querySelectorAll('.menu-container .menu-item')]
+        .find(b => /^Cut$/i.test(b.textContent.trim()))?.click();
+      await new Promise(res => setTimeout(res, 150));
+
+      return {
+        withSel, noSel, clipboardText,
+        afterCut: view.state.doc.toString(),
+        // The Toolbox button is "insert and format" — Copy there would be noise.
+        toolboxLabels: (() => {
+          document.getElementById('toolbox').click();
+          const m = document.querySelector('.menu-container:not([hidden])');
+          const l = m ? [...m.querySelectorAll('.menu-item')].map(b => b.textContent.trim()) : [];
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          return l;
+        })()
+      };
+    })()`, true);
+
+    const labelsOf = (rows) => rows.map(r => r.label);
+    check('the right-click menu offers Cut, Copy and Paste',
+      ['Cut', 'Copy', 'Paste'].every(l => labelsOf(clip.withSel).includes(l)),
+      labelsOf(clip.withSel).slice(0, 5).join(' | '));
+    check('and puts them above the formatting rows',
+      labelsOf(clip.withSel).indexOf('Cut') < labelsOf(clip.withSel).indexOf('Bold'));
+    check('Cut and Copy are enabled with a selection',
+      clip.withSel.filter(r => /^(Cut|Copy)$/.test(r.label)).every(r => !r.disabled));
+    // Shown and dimmed rather than dropped, so the rows below do not move
+    // between one opening of the menu and the next.
+    check('and disabled — not hidden — without one',
+      clip.noSel.filter(r => /^(Cut|Copy)$/.test(r.label)).every(r => r.disabled) &&
+      labelsOf(clip.noSel).includes('Cut'),
+      labelsOf(clip.noSel).slice(0, 3).join(' | '));
+    // Chrome grants clipboard-read to the driven page; where it is refused this
+    // reads null and the check is skipped rather than failing on a permission.
+    if (clip.clipboardText !== null) {
+      check('Copy puts the selection on the clipboard',
+        clip.clipboardText === 'this', JSON.stringify(clip.clipboardText));
+    }
+    // 'copy this text' minus characters 0..5, which is 'copy '.
+    check('Cut removes the selection from the document',
+      clip.afterCut === 'this text', JSON.stringify(clip.afterCut));
+    check('the Toolbox button does not carry clipboard rows',
+      !['Cut', 'Copy', 'Paste'].some(l => clip.toolboxLabels.includes(l)),
+      clip.toolboxLabels.slice(0, 4).join(' | '));
 
     const toolbox = await cdp.evaluate(`(() => {
       document.getElementById('toolbox').click();
@@ -894,6 +1169,9 @@ async function main() {
     check('and closes the menu', ref.menusClosed === true);
 
     /* ── citations ──────────────────────────────────────────────────── */
+    // A list of full references, not the grid of cards it was and not the
+    // submenu before that. The submenu showed a title cut at 40 characters; the
+    // grid could fit either two readable cards or twelve truncated ones.
     const cite = await cdp.evaluate(`(() => {
       const view = window.__reveryTexTest.view();
       view.dispatch({ selection: { anchor: view.state.doc.length } });
@@ -902,20 +1180,111 @@ async function main() {
         .find(b => /insert citation/i.test(b.textContent));
       if (!trigger) return { found: false };
       trigger.click();
-      const panel = [...document.querySelectorAll('.submenu')].find(p => !p.hidden);
-      const rows = panel ? [...panel.querySelectorAll('.menu-item')] : [];
-      return { found: true, count: rows.length, labels: rows.map(b => b.textContent.trim()) };
+      const panel = document.querySelector('.dlg.picker');
+      const cards = panel ? [...panel.querySelectorAll('.picker-card')] : [];
+      return {
+        found: true,
+        count: cards.length,
+        labels: cards.map(c => c.querySelector('.picker-caption').textContent.trim()),
+        hasFilter: !!panel?.querySelector('.picker-filter'),
+        isList: !!panel?.querySelector('.picker-strip.picker-list'),
+        // The − XS + stepper sizes a grid card; in a list it would do nothing.
+        hasSizer: !!panel?.querySelector('.picker-size'),
+        // One column, so arrow-up/down move by one row.
+        cols: panel
+          ? getComputedStyle(panel.querySelector('.picker-strip'))
+              .gridTemplateColumns.split(' ').filter(Boolean).length
+          : 0
+      };
     })()`, true);
-    await realClick(cdp, `[...document.querySelectorAll('.submenu')].find(p => !p.hidden)?.querySelector('.menu-item')`);
+
+    // The rows paint lazily, on an IntersectionObserver — give it a frame.
+    await new Promise(r => setTimeout(r, 250));
+    Object.assign(cite, await cdp.evaluate(`(() => {
+      const cards = [...document.querySelectorAll('.dlg.picker .picker-card')];
+      const thumb = (c) => c.querySelector('.picker-thumb');
+      const part = (c, sel) => (c.querySelector(sel)?.textContent || '').trim();
+      const painted = cards.filter(c => thumb(c)?.textContent.trim());
+      const first = painted[0];
+      return {
+        previews: cards.map(c => (thumb(c)?.textContent || '').trim()),
+        parts: first && {
+          authors: part(first, '.cite-authors'),
+          title: part(first, '.cite-title'),
+          source: part(first, '.cite-source')
+        },
+        // Normal body size, not the .58rem the card used. Compared against the
+        // root rather than to a fixed px so this holds at any --ui-scale.
+        sizeRatio: first
+          ? parseFloat(getComputedStyle(thumb(first)).fontSize) /
+            parseFloat(getComputedStyle(document.documentElement).fontSize)
+          : 0
+      };
+    })()`, true));
+
+    // Filtering is the point of the change: type an author's name and the list
+    // should narrow to entries by that author, not just ones whose key matches.
+    cite.filtered = await cdp.evaluate(`(() => {
+      const panel = document.querySelector('.dlg.picker');
+      const cards = [...panel.querySelectorAll('.picker-card')];
+      const author = cards.map(c => c.querySelector('.cite-authors')?.textContent).find(Boolean);
+      if (!author) return null;
+      const word = author.split(/[,;\\s]+/).filter(w => w.length > 3)[0];
+      const box = panel.querySelector('.picker-filter');
+      box.value = word;
+      box.dispatchEvent(new Event('input'));
+      const shown = cards.filter(c => !c.hidden);
+      box.value = '';
+      box.dispatchEvent(new Event('input'));
+      return { word, shown: shown.length, total: cards.length };
+    })()`, true);
+
+    await realClick(cdp, `document.querySelector('.dlg.picker .picker-card:not([hidden])')`);
     cite.tail = await cdp.evaluate(
       `window.__reveryTexTest.view().state.doc.toString().slice(-30)`, true);
+
     check('citations are listed from the bibliography',
       cite.found && cite.count > 0, `${cite.count} entr(ies)`);
-    // Author and year, not the key: "smith2020" is what goes in the document,
-    // not what you scan a list for.
-    check('entries are named by author and year',
-      cite.labels?.some(l => /\d{4}/.test(l)), (cite.labels || []).slice(0, 2).join(' | '));
+    check('and open in a picker with a filter box', cite.hasFilter === true);
+    check('as a single-column list, with no card-size stepper',
+      cite.isList === true && cite.cols === 1 && cite.hasSizer === false,
+      `list=${cite.isList} cols=${cite.cols} sizer=${cite.hasSizer}`);
+    // The key is the caption, because the key is what gets inserted; the
+    // reference beside it is what you actually recognise the work by.
+    check('each row is labelled with its cite key',
+      cite.labels?.every(l => l && !/\s/.test(l)), (cite.labels || []).slice(0, 3).join(' | '));
+    check('and carries the reference in three parts',
+      !!cite.parts?.authors && !!cite.parts?.title && !!cite.parts?.source,
+      cite.parts && `${cite.parts.authors} | ${cite.parts.title} | ${cite.parts.source}`);
+    // The complaint this answers: the card text was .58rem, under 12px at the
+    // default UI size. Body is .75rem.
+    check('at the body text size, not smaller',
+      cite.sizeRatio >= 0.75, `${cite.sizeRatio?.toFixed(3)}rem`);
+    check('filtering by an author narrows the list',
+      cite.filtered && cite.filtered.shown > 0 && cite.filtered.shown < cite.filtered.total,
+      cite.filtered && `"${cite.filtered.word}" → ${cite.filtered.shown}/${cite.filtered.total}`);
     check('picking one inserts a \\cite', /\\cite\{[^}]+\}$/.test(cite.tail || ''), cite.tail);
+
+    /* ── the biblatex backend, and the way out of a stale .bbl ──────── */
+    // The bundled engine has no biber and never can — biber is Perl. Its advice
+    // on a stale .bbl is to set backend=bibtex, which bundled bibtex8 really can
+    // build; but the option was ignored by detection, so a document that took
+    // the advice still reported 'biber' and still got no bibliography. The
+    // advice printed again next compile, unchanged.
+    const bib = await cdp.evaluate(`(async () => {
+      const { inferBibTool } = await import('./jvscrpt_and_css_extra/project_store.js');
+      const { switchBiblatexBackend } = await import('./jvscrpt_and_css_extra/latex_snippets.js');
+      const biber  = '\\\\usepackage[backend=biber]{biblatex}\\n\\\\addbibresource{r.bib}';
+      const edit = switchBiblatexBackend(biber);
+      const fixed = biber.slice(0, edit.from) + edit.insert + biber.slice(edit.to);
+      return { before: inferBibTool(biber), after: inferBibTool(fixed), fixed };
+    })()`, true);
+
+    check('a biblatex document on biber reports biber', bib.before === 'biber', bib.before);
+    check('and reports bibtex once the backend says so',
+      bib.after === 'bibtex', `${bib.before} → ${bib.after}`);
+    check('the one-click fix rewrites the package options',
+      /backend=bibtex/.test(bib.fixed || '') && !/biber/.test(bib.fixed || ''), bib.fixed);
 
     const refFig = await cdp.evaluate(`(() => {
       const view = window.__reveryTexTest.view();
@@ -2450,6 +2819,55 @@ async function main() {
     await sleep(1500);
     const reinferred = await cdp.evaluate(`document.getElementById('engine').textContent`, true);
     check('a new project goes back to the inference', /pdflatex/.test(reinferred), reinferred);
+
+    /* ── biblatex without biber: from dead end to one click ─────────── */
+    // The whole point of this feature, driven end to end. biber is Perl, so no
+    // in-browser engine will ever run it; a biblatex document therefore
+    // compiled to a PDF with every citation undefined and said so only in a log
+    // tab, with nothing to press. The log did suggest backend=bibtex — but
+    // detection ignored the option, so taking the advice changed nothing.
+    await cdp.evaluate(`window.__reveryTexApp.compile('book-biber')`, true).catch(() => {});
+    await cdp.waitFor(`!document.getElementById('notice').hidden`,
+      { what: 'the biber notice', timeoutMs: 120000 });
+
+    const offered = await cdp.evaluate(`(() => {
+      const n = document.getElementById('notice');
+      return {
+        text: n.textContent.trim(),
+        buttons: [...n.querySelectorAll('button')].map(b => b.textContent.trim()),
+        issues: document.getElementById('issuecount').textContent
+      };
+    })()`, true);
+    check('a document needing biber says so where it can be acted on',
+      /biber/i.test(offered.text), offered.text.slice(0, 60));
+    check('and offers the fix that works in a browser',
+      offered.buttons.includes('Use bundled bibtex'), offered.buttons.join(' | '));
+
+    await realClick(cdp,
+      `[...document.querySelectorAll('#notice button')].find(b => /bundled bibtex/i.test(b.textContent))`);
+    await cdp.waitFor(`/pages/.test(document.getElementById('status').textContent)`,
+      { what: 'the recompile', timeoutMs: 180000 });
+
+    const backendFix = await cdp.evaluate(`(() => {
+      const doc = window.__reveryTexTest.view().state.doc.toString();
+      return {
+        backend: (/backend\\s*=\\s*\\w+/.exec(doc) || [])[0] || null,
+        status: document.getElementById('status').textContent,
+        dirty: document.getElementById('dirty').textContent,
+        issues: document.getElementById('issuecount').textContent,
+        noticeHidden: document.getElementById('notice').hidden
+      };
+    })()`, true);
+
+    check('pressing it rewrites the backend', /=\s*bibtex$/.test(backendFix.backend || ''),
+      backendFix.backend);
+    // Into the buffer, never straight to disk: it is an ordinary edit, so it
+    // marks the file modified and Ctrl+Z takes it back.
+    check('as an undoable edit, not a silent write to disk',
+      backendFix.dirty === 'modified', `dirty: "${backendFix.dirty}"`);
+    check('and the bibliography then builds',
+      /✓/.test(backendFix.status) && backendFix.noticeHidden,
+      `${offered.issues} → ${backendFix.issues} · ${backendFix.status}`);
 
     const expected = /favicon|\/api\/projects/i;
     const real = pageErrors.filter(e => !expected.test(e));

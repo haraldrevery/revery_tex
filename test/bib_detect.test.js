@@ -33,6 +33,38 @@ test('biblatex resolves to biber', async () => {
   assert.equal(await inferBibTool('\\usepackage{biblatex}'), 'biber');
 });
 
+test('biblatex with backend=bibtex resolves to bibtex, not biber', async () => {
+  // The bug this covers: the option string was ignored, so *any* biblatex
+  // reported 'biber' and the app refused to run a tool. Meanwhile the log was
+  // telling people to write exactly this line — biblatex.bst ships in the slim
+  // bundle, so bundled bibtex8 can build the .bbl. Following the advice did
+  // nothing, and the same advice was printed again next compile.
+  assert.equal(await inferBibTool('\\usepackage[backend=bibtex]{biblatex}'), 'bibtex');
+  assert.equal(await inferBibTool('\\usepackage[backend=bibtex8]{biblatex}'), 'bibtex');
+  assert.equal(
+    await inferBibTool('\\usepackage[style=authoryear, backend = bibtex]{biblatex}\n\\addbibresource{r.bib}'),
+    'bibtex', 'reached past other options, and past whitespace around the =');
+  // \addbibresource still means biblatex; it just no longer decides the backend.
+  assert.equal(await inferBibTool('\\addbibresource{r.bib}\n\\usepackage[backend=bibtex]{biblatex}'), 'bibtex');
+});
+
+test('a backend set through ExecuteBibliographyOptions is honoured too', async () => {
+  assert.equal(
+    await inferBibTool('\\usepackage{biblatex}\n\\ExecuteBibliographyOptions{backend=bibtex}'),
+    'bibtex');
+  assert.equal(
+    await inferBibTool('\\usepackage{biblatex}\n\\ExecuteBibliographyOptions{sorting=nyt}'),
+    'biber', 'no backend named anywhere is still biber, which is biblatex\'s default');
+});
+
+test('a commented-out backend does not count', async () => {
+  // stripTexComments runs first, so this is the biber default rather than the
+  // line someone tried and put back.
+  assert.equal(
+    await inferBibTool('% \\usepackage[backend=bibtex]{biblatex}\n\\usepackage[backend=biber]{biblatex}'),
+    'biber');
+});
+
 test('classic bibliography resolves to bibtex', async () => {
   assert.equal(await inferBibTool('\\bibliography{refs}'), 'bibtex');
   assert.equal(await inferBibTool('\\bibliographystyle{plain}\n\\bibliography{refs}'), 'bibtex');
@@ -69,10 +101,18 @@ test('biblatex wins when both shapes appear', async () => {
 const FIXTURES = path.join(__dirname, '..', '..', 'latex_project_tests');
 const haveFixtures = fs.existsSync(FIXTURES);
 
-test('the book fixture is detected as biblatex', { skip: !haveFixtures }, async () => {
-  const src = fs.readFileSync(path.join(FIXTURES, 'hrldrvry_book_templt_v2', 'main.tex'), 'utf8');
-  assert.equal(await inferBibTool(src), 'biber',
-    'the book template uses \\addbibresource and \\printbibliography');
+test('the book templates build with the bundled bibtex8', { skip: !haveFixtures }, async () => {
+  // They asked for biber and shipped a prebuilt main.bbl, because no WASM build
+  // has biber. biblatex then rejected that .bbl as the wrong format version and
+  // every citation came out undefined — the flagship template demonstrating the
+  // bug. On backend=bibtex the bundle's own bibtex8 builds the .bbl, so the
+  // bibliography is real everywhere and no .bbl needs committing.
+  for (const dir of ['hrldrvry_book_templt_v1', 'hrldrvry_book_templt_v2']) {
+    const src = fs.readFileSync(path.join(FIXTURES, dir, 'main.tex'), 'utf8');
+    assert.equal(await inferBibTool(src), 'bibtex', `${dir} should be on backend=bibtex`);
+    assert.ok(!fs.existsSync(path.join(FIXTURES, dir, 'main.bbl')),
+      `${dir} should ship no .bbl — bibtex8 builds one on every compile`);
+  }
 });
 
 test('the thesis fixture needs no bibliography tool', { skip: !haveFixtures }, async () => {
@@ -150,4 +190,72 @@ test('a commented-out bibliography is not detected', { skip: !haveFixtures }, as
   const src = fs.readFileSync(path.join(FIXTURES, 'homework_template', 'main.tex'), 'utf8');
   assert.equal(await inferBibTool(src), null,
     'the homework template only mentions \\bibliography inside comments');
+});
+
+/* ── detection reads the document, not just the main file ────────────── */
+
+/**
+ * A fake NativeAPI over a plain {path: content} map.
+ *
+ * readProjectFromDisk is the only way in: `describe()` is private, which is
+ * right — what matters is that a project opened from a folder comes out with
+ * the correct tools, not how it got there.
+ */
+const openFolder = async (files) => {
+  const { readProjectFromDisk } = await store();
+  return readProjectFromDisk({
+    readDirectory: async () => Object.keys(files).map(path => ({ path, type: 'file' })),
+    readTextFile: async (path) => ({ content: files[path], stamp: null }),
+    readBinaryFile: async () => new Uint8Array()
+  }, '/tmp/proj');
+};
+
+test('a preamble in an \\input-ed file is still read', async () => {
+  // The silent failure: describe() scanned main.tex alone, so a project that
+  // keeps its preamble in its own file got no index and no bibliography at all
+  // — and nothing was logged, because as far as the app knew the document had
+  // never asked for either.
+  const p = await openFolder({
+    'main.tex': '\\documentclass{book}\n\\input{preamble}\n\\begin{document}\\printindex\\end{document}',
+    'preamble.tex': '\\usepackage{biblatex}\n\\addbibresource{r.bib}\n\\makeindex\n'
+  });
+  assert.equal(p.bibtex, 'biber');
+  assert.equal(p.makeindex, true);
+});
+
+test('the backend option survives being in an included preamble', async () => {
+  const p = await openFolder({
+    'main.tex': '\\documentclass{book}\n\\input{config/preamble.tex}\n',
+    'config/preamble.tex': '\\usepackage[backend=bibtex]{biblatex}\n\\addbibresource{r.bib}\n'
+  });
+  assert.equal(p.bibtex, 'bibtex');
+});
+
+test('a file nothing includes does not decide the document', async () => {
+  // The book fixture ships main_legacy.tex, a complete alternative main file
+  // that nothing reads. Concatenating the folder rather than walking from the
+  // main file would let its preamble set tools for a document it is not part of.
+  const p = await openFolder({
+    'main.tex': '\\documentclass{article}\n\\begin{document}hi\\end{document}',
+    'main_legacy.tex': '\\documentclass{book}\n\\makeindex\n\\addbibresource{r.bib}\n'
+  });
+  assert.equal(p.bibtex, null);
+  assert.equal(p.makeindex, false);
+});
+
+test('a commented-out include is not followed', async () => {
+  const p = await openFolder({
+    'main.tex': '\\documentclass{book}\n% \\input{preamble}\n',
+    'preamble.tex': '\\makeindex\n'
+  });
+  assert.equal(p.makeindex, false);
+});
+
+test('an include cycle terminates', async () => {
+  const p = await openFolder({
+    'main.tex': '\\documentclass{book}\n\\input{a}\n',
+    'a.tex': '\\input{b}\n',
+    'b.tex': '\\input{a}\n\\makeindex\n'
+  });
+  assert.equal(p.makeindex, true);
 });

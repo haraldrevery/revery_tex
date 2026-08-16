@@ -158,3 +158,83 @@ test('commands typed into the caption box still work', async () => {
   const { escapeCaption } = await mod();
   assert.equal(escapeCaption('\\emph{Measured} results'), '\\emph{Measured} results');
 });
+
+/* ── biblatex backend ────────────────────────────────────────────────── */
+
+/** Apply an edit the way editor_actions.applyEdit would, for readability. */
+const applied = (src, edit) =>
+  edit === null ? null : src.slice(0, edit.from) + edit.insert + src.slice(edit.to);
+
+test('a bare \\usepackage{biblatex} gains the backend option', async () => {
+  const { switchBiblatexBackend } = await mod();
+  const src = '\\documentclass{book}\n\\usepackage{biblatex}\n\\addbibresource{r.bib}\n';
+  assert.equal(applied(src, switchBiblatexBackend(src)),
+    '\\documentclass{book}\n\\usepackage[backend=bibtex]{biblatex}\n\\addbibresource{r.bib}\n');
+});
+
+test('an existing backend is replaced in place, keeping the other options', async () => {
+  // In place, not appended: the author's option order is theirs, and moving it
+  // makes a one-word change look like a rewrite in a diff.
+  const { switchBiblatexBackend } = await mod();
+  const src = '\\usepackage[style=authoryear,backend=biber,sorting=nyt]{biblatex}';
+  assert.equal(applied(src, switchBiblatexBackend(src)),
+    '\\usepackage[style=authoryear,backend=bibtex,sorting=nyt]{biblatex}');
+});
+
+test('other options are kept when there was no backend', async () => {
+  const { switchBiblatexBackend } = await mod();
+  const src = '\\usepackage[style=numeric]{biblatex}';
+  assert.equal(applied(src, switchBiblatexBackend(src)),
+    '\\usepackage[backend=bibtex,style=numeric]{biblatex}');
+});
+
+test('a document already on bibtex is left alone', async () => {
+  // null, not a no-op edit: the caller uses it to decide whether to offer the
+  // button at all, and an edit that changes nothing would still mark the file
+  // modified and push a useless entry onto the undo stack.
+  const { switchBiblatexBackend } = await mod();
+  assert.equal(switchBiblatexBackend('\\usepackage[backend=bibtex]{biblatex}'), null);
+  assert.equal(switchBiblatexBackend('\\usepackage[backend=bibtex8]{biblatex}'), null);
+});
+
+test('a document that is not biblatex has nothing to switch', async () => {
+  const { switchBiblatexBackend } = await mod();
+  assert.equal(switchBiblatexBackend('\\bibliography{refs}'), null);
+  assert.equal(switchBiblatexBackend(''), null);
+});
+
+test('the edit touches only the backend value', async () => {
+  // As small as it can be, so an annotated option list survives it.
+  const { switchBiblatexBackend } = await mod();
+  const src = 'before\n\\usepackage[backend=biber]{biblatex}\nafter';
+  const edit = switchBiblatexBackend(src);
+  assert.equal(src.slice(edit.from, edit.to), 'biber');
+  assert.equal(applied(src, edit), 'before\n\\usepackage[backend=bibtex]{biblatex}\nafter');
+});
+
+test('a bracket inside an option comment does not hide the package', async () => {
+  // The line that actually broke this, from the book template. `[^\]]*` stops
+  // at the `]` in "[1]", so the option group never closes and the whole
+  // \usepackage call went unrecognised — the button reported "could not find
+  // the \usepackage{biblatex} line" on the very document it was offered for.
+  const { switchBiblatexBackend } = await mod();
+  const src = [
+    '\\usepackage[',
+    '  backend   = biber,       % use biber for full Unicode support',
+    '  style     = numeric,     % Vancouver-style [1] [2] [3] citations',
+    ']{biblatex}'
+  ].join('\n');
+  const out = applied(src, switchBiblatexBackend(src));
+  assert.match(out, /backend   = bibtex,/);
+  // Alignment and every comment survive, because only the value was replaced.
+  assert.match(out, /% Vancouver-style \[1\] \[2\] \[3\] citations/);
+  assert.match(out, /% use biber for full Unicode support/);
+});
+
+test('a commented-out backend is not the one edited', async () => {
+  const { switchBiblatexBackend } = await mod();
+  const src = '\\usepackage[\n  % backend = biber,\n  backend = biber,\n]{biblatex}';
+  const out = applied(src, switchBiblatexBackend(src));
+  assert.match(out, /% backend = biber,/, 'the commented line is left alone');
+  assert.match(out, /\n  backend = bibtex,/, 'the live one is switched');
+});

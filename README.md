@@ -609,6 +609,14 @@ Each of these cost real debugging time:
   handler — it carried the grant anyway, which meant the browser build ran with
   its main XSS protection off while the desktop build did not. The three CSPs
   drifting apart is only ever visible at runtime, in one shell.
+- **`dragDropEnabled` is `false` in `tauri.conf.json`, deliberately.** With it on
+  — which is Tauri's default, and what this config was copied with — Tauri
+  installs its own drag-and-drop handler on the webview and emits a Rust-side
+  event instead. Nothing in `tauri/src/` ever listened for that event, so
+  dropping a file on the window did nothing at all, *and* the handler competed
+  with the HTML5 drag-and-drop the file tree is built on. Turning it off gives
+  the webview its native behaviour back. Do not turn it on again without adding
+  a Rust listener that does something.
 - **Paths handed to the Web Worker must be absolute.** A relative path is
   re-resolved against the worker's own location, which is already inside
   `engine/dist/`, producing `engine/dist/engine/dist/busytex.js`.

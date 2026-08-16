@@ -37,10 +37,14 @@ import { initOutline, refreshOutline, scheduleOutline, applyOutlineVisibility } 
 import { buildTree, flattenTree, normalizePath } from './file_tree.js';
 import { referencesTo } from './document_model.js';
 import { $, download } from './dom.js';
-import { readProjectFromDisk, readProjectFromFixture, TEXT_EXT_RE } from './project_store.js';
+import {
+  readProjectFromDisk, readProjectFromFixture, TEXT_EXT_RE, inferBibTool
+} from './project_store.js';
+import { switchBiblatexBackend } from './latex_snippets.js';
+import { applyEdit } from './editor_actions.js';
 import {
   initLogConsole, rawLog, clearLog, setStatus, showTab, togglePanel,
-  setIssues, getIssues, hasErrors, logText
+  setPanelHeight, savePanelHeight, setIssues, getIssues, hasErrors, logText
 } from './log_console.js';
 
 const CM = window.CM;
@@ -236,11 +240,16 @@ attachMenu($('toolbox'), () => toolboxRows({ view: () => view, project: () => pr
  * Right-click inside the editor.
  *
  * Off by default, and a setting, because taking over the context menu costs
- * spellcheck suggestions, clipboard access and Look Up — and the same actions
- * are already one click away in the topbar. Turned on, it opens for any
- * right-click in the editor, selection or not: the formatting rows act on the
- * selection when there is one, and insert an empty `\textbf{}` with the cursor
- * inside when there is not.
+ * spellcheck suggestions and Look Up — and the same actions are already one
+ * click away in the topbar. Turned on, it opens for any right-click in the
+ * editor, selection or not: the formatting rows act on the selection when there
+ * is one, and insert an empty `\textbf{}` with the cursor inside when there is
+ * not.
+ *
+ * Cut, Copy and Paste are rows in it rather than a fourth thing this costs.
+ * They were the obvious gap: replacing the native menu took away the three
+ * entries people right-click *for*, and the shortcuts still working is not the
+ * same as the menu being usable.
  *
  * Outside the editor the browser's menu is never touched, either way.
  */
@@ -249,7 +258,7 @@ document.addEventListener('contextmenu', (e) => {
   if (!view || !$('editor').contains(e.target)) return;
   e.preventDefault();
   openMenuAt(e.clientX, e.clientY,
-    () => contextRows({ view: () => view, project: () => project }));
+    () => contextRows({ view: () => view, project: () => project, report: setStatus }));
 });
 
 // Diagnostics carry a line number only when the log gave one; the gutter shows
@@ -1503,6 +1512,8 @@ async function compile() {
         rawLog('wrn', `synctex unavailable: ${e.message}`);
       }
       await showPdf(r.pdf, r.pages);
+      // After showPdf, which writes #pdfmeta — this appends to it.
+      reportInteractivity();
       const errs = getIssues().filter(d => d.severity === 'error').length;
       const warns = getIssues().filter(d => d.severity === 'warning').length;
       setStatus(`✓ ${r.pages} pages · ${errs} errors, ${warns} warnings · ${secs}s`, errs ? 'warn' : 'ok');
@@ -1535,35 +1546,96 @@ async function compile() {
 }
 
 /**
- * Connect a wall the bundled engine cannot pass to the setting that clears it.
+ * Rewrite the open document's biblatex backend, and recompile.
  *
- * The setting has always existed; nothing ever pointed at it from the failure
- * that it fixes, so a user hit `cannot open encoding file` and reached for a
- * system TeX by hand or gave up.
+ * Through the editor, not the file: it lands in the buffer as an ordinary edit,
+ * so it marks the file modified, Ctrl+Z takes it back, and nothing is written to
+ * disk that the user did not save. A one-click repair that silently rewrote a
+ * preamble on disk would be a worse bug than the one it fixes.
+ */
+async function useBundledBibtex() {
+  if (!project) return;
+  const main = project.main;
+  const f = project.files.get(main);
+  const edit = switchBiblatexBackend(typeof f?.content === 'string' ? f.content : '');
+  if (!edit) { setStatus('✗ could not find the \\usepackage{biblatex} line', 'err'); return; }
+
+  hideNotice();
+  // Into the open editor when it is the file on screen, so the change is
+  // visible and undoable where the user is looking; otherwise straight into the
+  // buffer, which openFile would show the same way.
+  if (currentPath === main && view) {
+    applyEdit(view, edit);
+  } else {
+    f.content = f.content.slice(0, edit.from) + edit.insert + f.content.slice(edit.to);
+    f.dirty = true;
+    refreshDirty();
+  }
+  // The tool the document needs has changed, so re-derive it before compiling —
+  // otherwise this compile still runs with the old answer.
+  project.bibtex = inferBibTool(f.content);
+  rawLog('inf', `biblatex switched to backend=bibtex in ${main}`);
+  await compile();
+}
+
+/**
+ * Point a wall the bundled engine cannot pass at whatever actually clears it.
  *
- * Only when switching would genuinely help. `canOfferSystem()` is the engine
- * host's own narrowing — desktop, and a project on disk — and `systemWouldFix`
- * excludes the limits a different engine compiles exactly as wrongly: a stale
- * .bbl is the same stale .bbl under TeX Live unless biber rewrites it.
+ * Two different walls, with two different ways out, and they are not the same
+ * shape:
+ *
+ *   - **Missing fonts or packages** — the bundle is smaller than TeX Live.
+ *     Only a system TeX fixes this, so the offer is desktop-only.
+ *   - **A stale .bbl** — biblatex refuses a .bbl built by another version, and
+ *     no WASM build has biber to rebuild it. Two ways out here: switch the
+ *     document's backend to the bundled bibtex8, which works *everywhere*
+ *     including the browser, or switch to a system TeX that has real biber.
+ *
+ * The second used to be offered nowhere at all. `systemWouldFix` was false for
+ * it on the mistaken grounds that a system TeX would compile the same wrong
+ * file, and this function returned early off the desktop — so a browser user
+ * with a stale .bbl got a log line and no way to act on it.
  */
 function offerSystemFor(limits = [], missing = []) {
   if (settings.settings.engineSource === 'system') return;
-  if (!engineHost.canOfferSystem()) return;
 
-  const reason = limits.find(l => l.systemWouldFix)
-    ? 'This needs fonts the bundled engine omits.'
-    : missing.length
-      ? `${missing.join(', ')} is not in the bundled distribution.`
-      : null;
-  if (!reason) return;
+  const actions = [];
+  const reasons = [];
 
-  showNotice(`${reason} Your own LaTeX installation has it.`, [
-    {
-      label: 'Use system LaTeX',
-      onClick: () => { settings.set('engineSource', 'system'); hideNotice(); compile(); }
-    },
-    { label: 'Dismiss', onClick: hideNotice }
-  ]);
+  // Works in every shell, so it is assembled before the desktop narrowing.
+  // Offered only when the document really is biblatex-on-biber: on a classic
+  // \bibliography{} document the button would mean nothing.
+  //
+  // Both kinds, because they are the same problem seen from two sides. `no-biber`
+  // is the cause — the bundled engine cannot run biber — and `stale-bbl` is what
+  // you get when a project worked around it by committing a .bbl that has since
+  // gone out of date. Either way the backend switch is the fix that needs no
+  // second machine.
+  if (limits.some(l => l.kind === 'stale-bbl' || l.kind === 'no-biber') &&
+      project?.bibtex === 'biber') {
+    reasons.push(limits.some(l => l.kind === 'stale-bbl')
+      ? 'This bibliography was built by a different biblatex and will not typeset.'
+      : 'This document needs biber, which no in-browser engine can run.');
+    actions.push({ label: 'Use bundled bibtex', onClick: useBundledBibtex });
+  }
+
+  if (engineHost.canOfferSystem()) {
+    if (limits.some(l => l.kind === 'missing-font-outlines')) {
+      reasons.push('This needs fonts the bundled engine omits.');
+    } else if (missing.length) {
+      reasons.push(`${missing.join(', ')} is not in the bundled distribution.`);
+    }
+    if (reasons.length || limits.some(l => l.systemWouldFix)) {
+      actions.push({
+        label: 'Use system LaTeX',
+        onClick: () => { settings.set('engineSource', 'system'); hideNotice(); compile(); }
+      });
+    }
+  }
+
+  if (!actions.length || !reasons.length) return;
+  actions.push({ label: 'Dismiss', onClick: hideNotice });
+  showNotice(reasons.join(' '), actions);
 }
 
 async function showPdf(bytes, pages) {
@@ -1571,7 +1643,7 @@ async function showPdf(bytes, pages) {
   $('pdfempty').style.display = 'none';
   $('pdf').style.display = 'block';
   if (!preview) {
-    preview = new PdfPreview($('pdf'));
+    preview = new PdfPreview($('pdf'), { onLog: (msg, kind = 'wrn') => rawLog(kind, msg) });
     preview.onPageClick(({ page, x, y, link, native }) => {
       // A hyperref link wins over inverse search: clicking "Figure 3" means
       // "show me figure 3", not "show me where I typed \ref{fig:3}". Alt keeps
@@ -1627,6 +1699,34 @@ async function showPdf(bytes, pages) {
   $('savepdf').disabled = false;
 }
 
+/**
+ * Say when the preview compiled but came back less interactive than usual.
+ *
+ * Every way this can go wrong was silent. SyncTeX absent, SyncTeX empty, the
+ * annotation tree throwing — each returned quietly and left an app where
+ * clicking the PDF did nothing, clicking a heading moved only the cursor, and
+ * nothing anywhere said why. That is indistinguishable from the feature being
+ * broken, and it is what makes this class of bug survive a release.
+ *
+ * The status line is not the place for it: the compile result is written there
+ * immediately afterwards and would wipe it. This goes in the PDF pane's own
+ * header, next to the page count, where it stays for as long as it is true.
+ */
+function reportInteractivity() {
+  const notes = [];
+  const sync = syncTex.statusMessage();
+  if (sync) notes.push(sync);
+  if (preview?.linkError) notes.push(`PDF links unavailable (${preview.linkError})`);
+
+  const meta = $('pdfmeta');
+  meta.classList.toggle('warn', notes.length > 0);
+  if (!notes.length) { meta.title = ''; return; }
+
+  meta.textContent += ' · ⚠ limited';
+  meta.title = notes.join('\n');
+  for (const n of notes) rawLog('wrn', n);
+}
+
 $('compile').onclick = compile;
 $('save').onclick = saveAll;
 $('open').onclick = openFolder;
@@ -1667,20 +1767,89 @@ $('exportzip').onclick = exportZip;
 $('savepdf').onclick = () => lastPdf && download(new Blob([lastPdf], { type: 'application/pdf' }), 'output.pdf');
 
 // ── pane resizing ──────────────────────────────────────────────────────
-function draggable(el, onMove) {
-  el.addEventListener('mousedown', (e) => {
+
+/**
+ * Make a divider draggable.
+ *
+ * Pointer events with capture, not mousedown + document listeners. Three
+ * separate failures came out of the old shape, and capture answers all of them:
+ *
+ *   - Release the button outside the window and no `mouseup` was ever delivered,
+ *     so the divider stayed glued to the cursor until the next click.
+ *   - The pointer leaves a 1px divider on the first pixel of movement, which put
+ *     every subsequent event over the editor or the canvas. Capture routes them
+ *     back here regardless of what is underneath.
+ *   - Dragging across the editor selected text on the way past. `body.dragging`
+ *     turns selection off for the duration rather than each pane defending
+ *     itself.
+ *
+ * `onDone` is where a size is persisted: writing to localStorage on every
+ * pointermove would be a synchronous JSON round-trip per frame.
+ */
+function draggable(el, onMove, onDone = () => {}) {
+  el.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;          // right-click is not a drag
     e.preventDefault();
+    el.setPointerCapture(e.pointerId);
+    document.body.classList.add('dragging');
+    // Pinned from the divider's own rule rather than hard-coded, so col-resize
+    // and row-resize each stay themselves for the whole drag instead of
+    // flickering to whatever is under the pointer.
+    document.body.style.cursor = getComputedStyle(el).cursor;
+
     const move = (ev) => onMove(ev);
-    const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); };
-    document.addEventListener('mousemove', move);
-    document.addEventListener('mouseup', up);
+    const end = () => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', end);
+      el.removeEventListener('pointercancel', end);
+      document.body.classList.remove('dragging');
+      document.body.style.cursor = '';
+      onDone();
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', end);
+    // A capture broken by the system (an alt-tab, a touch cancelled by a
+    // scroll gesture) fires this and never pointerup. Without it the dragging
+    // class would stay on and the whole UI would stop selecting text.
+    el.addEventListener('pointercancel', end);
   });
 }
+
 // By attribute, not by index: `divs[0]` and `divs[1]` silently reassign
 // themselves the moment a divider is added anywhere in the markup.
 const divider = (name) => document.querySelector(`.vdiv[data-resize="${name}"]`);
 
-draggable(divider('sidebar'), (e) => { $('sidebar').style.width = Math.max(120, e.clientX) + 'px'; });
+/**
+ * Pane sizes ride in the settings store beside the collapsed log panel — see
+ * the comment at the bottom of settings.js, which has always said pane widths
+ * belong there. They are remembered layout, not preferences with choices, so
+ * they get no menu row.
+ */
+function saveLayout() {
+  settings.settings.layout = {
+    sidebar: $('sidebar').style.width || '',
+    editorFlex: $('editorpane').style.flex || '',
+    pdfFlex: $('pdfpane').style.flex || '',
+    outline: $('outlinepane').style.width || ''
+  };
+  settings.save();
+}
+
+function applyLayout() {
+  const l = settings.settings.layout;
+  if (!l || typeof l !== 'object') return;
+  // Assigning an invalid or empty string is a no-op in CSSOM, so a hand-edited
+  // store cannot wedge the layout — it just does not apply.
+  if (l.sidebar) $('sidebar').style.width = l.sidebar;
+  if (l.editorFlex) $('editorpane').style.flex = l.editorFlex;
+  if (l.pdfFlex) $('pdfpane').style.flex = l.pdfFlex;
+  if (l.outline) $('outlinepane').style.width = l.outline;
+}
+applyLayout();
+
+draggable(divider('sidebar'),
+  (e) => { $('sidebar').style.width = Math.max(120, e.clientX) + 'px'; },
+  saveLayout);
 draggable(divider('editor'), (e) => {
   const ws = $('workspace').getBoundingClientRect();
   const left = $('sidebar').getBoundingClientRect().width;
@@ -1689,18 +1858,22 @@ draggable(divider('editor'), (e) => {
   const frac = Math.min(0.85, Math.max(0.15, (e.clientX - ws.left - left) / span));
   $('editorpane').style.flex = `1 1 ${frac * 100}%`;
   $('pdfpane').style.flex = `1 1 ${(1 - frac) * 100}%`;
-});
+}, saveLayout);
 // The outline is measured from the right edge, so its width does not change
 // when the panes to its left are dragged.
 draggable(divider('outline'), (e) => {
   const w = Math.min(window.innerWidth - 320, Math.max(140, window.innerWidth - e.clientX));
   $('outlinepane').style.width = w + 'px';
-});
+}, saveLayout);
+// Through setPanelHeight, never by writing style.height here: the panel owns
+// its own collapsed state, and an inline height set behind its back is what
+// stopped Hide from ever collapsing it again.
 draggable($('paneldiv'), (e) => {
   const h = Math.min(window.innerHeight - 160, Math.max(32, window.innerHeight - e.clientY));
-  $('panel').style.height = h + 'px';
+  setPanelHeight(h);
   $('panel').classList.remove('collapsed');
-});
+  $('togglepanel').textContent = 'Hide';
+}, savePanelHeight);
 
 // ── unsaved-changes guard ──────────────────────────────────────────────
 // The crash backup covers a crash. It does not cover deliberately closing the

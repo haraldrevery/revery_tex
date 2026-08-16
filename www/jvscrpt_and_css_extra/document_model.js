@@ -12,7 +12,10 @@
 // broken document — and it must never become the thing that decides what to
 // compile.
 
-import { stripTexComments } from './project_store.js';
+// The include graph lives in project_store.js, not here, because `describe()`
+// needs it too and this module already depends on that one — the other
+// direction would be a cycle.
+import { stripTexComments, resolveInput, documentOrder } from './project_store.js';
 
 /** Environments worth indexing, and what kind of thing each is. */
 const ENVIRONMENTS = {
@@ -106,13 +109,38 @@ function lineOffsets(text) {
 }
 
 /**
+ * The fields the citation list assembles a reference from.
+ *
+ * Everything past `year` was added when the picker stopped being a row of
+ * truncated cards and became a list of full references — a journal article
+ * without its journal, volume and pages is not a reference, it is a hint. The
+ * `field` reader below is generic, so this is a list rather than new parsing.
+ *
+ * Still deliberately shallow: no crossrefs, no @string expansion, no month
+ * normalisation. It reads what is written in the entry.
+ */
+const BIB_FIELDS = [
+  // `editor` is not a nicety: an edited volume carries no `author` at all, so
+  // without it a whole class of entries lists under no name whatsoever.
+  'author', 'editor', 'title', 'year',
+  'journal', 'booktitle', 'publisher', 'institution', 'school',
+  'volume', 'number', 'pages', 'edition', 'doi', 'url'
+];
+
+/** Entry types that are directives to BibTeX, not works anyone can cite. */
+const BIB_NON_ENTRIES = new Set(['comment', 'preamble', 'string', 'control']);
+
+/**
  * BibTeX entries with the fields worth showing in a picker.
  * Deliberately shallow: enough to tell two papers apart, not a .bib parser.
  */
 function scanBib(text, out) {
   for (const m of text.matchAll(/@(\w+)\s*\{\s*([^,\s}]+)\s*,/g)) {
     const type = m[1].toLowerCase();
-    if (type === 'comment' || type === 'preamble' || type === 'string') continue;
+    // `control` belongs here as much as the other three: REVTeX bibliographies
+    // open with `@CONTROL{apsrev42Control,author="08",…}`, which was being
+    // listed as a citable work by someone called "08".
+    if (BIB_NON_ENTRIES.has(type)) continue;
     const key = m[2];
     // The entry body runs to the matching close brace of the @type{ group.
     const g = readGroup(text, text.indexOf('{', m.index));
@@ -126,12 +154,11 @@ function scanBib(text, out) {
       if (q) return q[1].trim();
       return (/^\s*([^,\n}]+)/.exec(body.slice(f.index + f[0].length)) || [, ''])[1].trim();
     };
-    out.push({
-      key, type,
-      author: field('author').replace(/[{}]/g, ''),
-      title: field('title').replace(/[{}]/g, ''),
-      year: field('year')
-    });
+    // Braces are stripped from every field, not just author and title: they are
+    // BibTeX's casing protection ({LaTeX}) and grouping, never content.
+    const entry = { key, type };
+    for (const name of BIB_FIELDS) entry[name] = field(name).replace(/[{}]/g, '');
+    out.push(entry);
   }
 }
 
@@ -209,51 +236,6 @@ function scanFile(path, raw, acc) {
   for (const m of text.matchAll(/\\DeclareMathOperator\s*\*?\s*\{?\\([a-zA-Z@]+)\}?\s*\{([^}]*)\}/g)) {
     acc.macros[`\\${m[1]}`] = `\\operatorname{${m[2]}}`;
   }
-}
-
-/* ── the include graph ───────────────────────────────────────────────── */
-
-/**
- * The file `\input{raw}` names, or null.
- *
- * TeX resolves relative to the working directory, which is the project root, so
- * that is tried first; the file's own directory is a fallback because people
- * write `\input{parts/a}` from `parts/b.tex` and expect it to work under
- * `\graphicspath`-style habits. The extension is optional in TeX and usually
- * omitted, so both spellings are tried.
- */
-function resolveInput(raw, fromFile, files) {
-  const cleaned = raw.replace(/^\.\//, '').trim();
-  if (!cleaned) return null;
-  const dir = fromFile.includes('/') ? fromFile.slice(0, fromFile.lastIndexOf('/') + 1) : '';
-  for (const base of dir ? [cleaned, dir + cleaned] : [cleaned]) {
-    for (const candidate of [base, `${base}.tex`]) {
-      if (files.has(candidate)) return candidate;
-    }
-  }
-  return null;
-}
-
-/**
- * The files the document actually reads, in the order it reads them.
- *
- * This matters more than it sounds. The book fixture ships a `main_legacy.tex`
- * — a complete alternative main file that nothing includes. Concatenating every
- * file's sections would put a second, contradictory copy of the whole book in
- * the outline. Walking from `main` is what makes the outline the *document's*
- * structure rather than the folder's.
- */
-function documentOrder(main, inputs, files) {
-  const order = [];
-  const seen = new Set();
-  const walk = (path) => {
-    if (!path || seen.has(path) || !files.has(path)) return;
-    seen.add(path);                                  // before recursing: cycles
-    order.push(path);
-    for (const raw of inputs[path] || []) walk(resolveInput(raw, path, files));
-  };
-  walk(main);
-  return order;
 }
 
 /* ── the index ───────────────────────────────────────────────────────── */
@@ -338,8 +320,10 @@ export function scanProject(project) {
     inputs: acc.inputs,
     // `main` is set by project_store; the fallback keeps scanProject usable on
     // a bare {files} map, as the tests use it.
+    // The scan above already recorded what each file pulls in, so the walk is
+    // handed that map rather than re-reading every source for it.
     order: documentOrder(project.main || (project.files.has('main.tex') ? 'main.tex' : null),
-                         acc.inputs, project.files)
+                         project.files, (p) => acc.inputs[p])
   };
 }
 

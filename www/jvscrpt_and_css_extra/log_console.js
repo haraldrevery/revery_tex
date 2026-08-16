@@ -137,14 +137,53 @@ export function showTab(name) {
   if ($('panel').classList.contains('collapsed')) togglePanel(true);
 }
 
+/**
+ * The height a drag last left the panel at, so Show returns to it.
+ *
+ * Load-bearing, not a nicety. Dragging #paneldiv writes an *inline* height on
+ * #panel, and an inline style outranks `#panel.collapsed { height:2rem }` — so
+ * once the panel had ever been dragged, Hide could never collapse it again. The
+ * tab body hid and the box kept its full height, which reads as a dead button.
+ * Collapsing therefore has to take the inline height back off, which means
+ * something has to remember what it was.
+ */
+let expandedHeight = Number(settings.settings.panelHeight) || null;
+
+/**
+ * Called by the divider drag on every frame, so the height survives a collapse.
+ * Deliberately does no I/O: persisting here would be a synchronous JSON
+ * round-trip through localStorage per pointermove. `savePanelHeight` does that
+ * once, when the drag ends.
+ */
+export function setPanelHeight(px) {
+  expandedHeight = px;
+  $('panel').style.height = `${px}px`;
+}
+
+/** Persist whatever the drag settled on. */
+export function savePanelHeight() {
+  settings.settings.panelHeight = expandedHeight;
+  settings.save();
+}
+
 export function togglePanel(open) {
   const p = $('panel');
   const collapsed = open === undefined ? !p.classList.contains('collapsed') : !open;
+  if (collapsed) {
+    // Read back whatever the drag left before dropping it: this may be the
+    // first collapse since a drag, and the stylesheet cannot win against it.
+    const h = parseFloat(p.style.height);
+    if (Number.isFinite(h)) expandedHeight = h;
+    p.style.height = '';
+  } else if (expandedHeight) {
+    p.style.height = `${expandedHeight}px`;
+  }
   p.classList.toggle('collapsed', collapsed);
   $('togglepanel').textContent = collapsed ? 'Show' : 'Hide';
   // Not in SCHEMA: this is remembered layout, not a user preference with
   // choices, so it rides along in the same store without a menu row.
   settings.settings.panelCollapsed = collapsed;
+  settings.settings.panelHeight = expandedHeight;
   settings.save();
 }
 

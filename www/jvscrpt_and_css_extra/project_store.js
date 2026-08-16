@@ -56,6 +56,33 @@ export function inferEngine(src) {
     ? 'xetex' : 'pdftex';
 }
 
+/** Anything that means "this document is biblatex", whatever its backend. */
+const BIBLATEX_RE =
+  /\\(?:addbibresource|printbibliography)|\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{biblatex\}/;
+
+/**
+ * The `backend=` biblatex was given, or null if it never says.
+ *
+ * Two places carry it, and both turn up in real preambles: the package options
+ * on `\usepackage[…]{biblatex}`, and a later `\ExecuteBibliographyOptions{…}`.
+ * The package form is checked first because it is the common one — and because
+ * it is the one the app's own stale-.bbl advice tells people to write.
+ */
+export function biblatexBackend(text) {
+  // Stripped here as well as by the caller. Not belt-and-braces: `[^\]]*` stops
+  // at the first `]` it meets, and real option lists carry comments like
+  // "% Vancouver-style [1] [2] [3] citations" — with those still in place the
+  // option group never closes and the backend reads as unset.
+  const src = stripTexComments(text);
+  const pkg = /\\(?:usepackage|RequirePackage)\[([^\]]*)\]\{biblatex\}/.exec(src);
+  const exec = /\\ExecuteBibliographyOptions(?:\[[^\]]*\])?\{([^}]*)\}/.exec(src);
+  for (const opts of [pkg?.[1], exec?.[1]]) {
+    const m = opts && /\bbackend\s*=\s*(\w+)/.exec(opts);
+    if (m) return m[1].toLowerCase();
+  }
+  return null;
+}
+
 /**
  * Which bibliography tool a document needs, or null for none.
  *
@@ -64,11 +91,22 @@ export function inferEngine(src) {
  * running the wrong one fails in a way that reads as a broken document. Both
  * shapes are in the test fixtures — the book template is biblatex, homework is
  * classic — so guessing by "whichever is installed" is wrong for one of them.
+ *
+ * biblatex's backend is read rather than assumed. It used to be: any biblatex at
+ * all reported 'biber', option string ignored — which made the app's own advice
+ * a dead end. On a stale .bbl it prints "set \usepackage[backend=bibtex]
+ * {biblatex}, which the bundled bibtex8 can build", and biblatex.bst really does
+ * ship in the slim bundle; but a document that took the advice still reported
+ * 'biber', so the app still refused to run anything and printed the same
+ * suggestion again. Following it changed nothing.
  */
 export function inferBibTool(src) {
   src = stripTexComments(src);
-  if (/\\(?:addbibresource|printbibliography)|\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{biblatex\}/.test(src)) {
-    return 'biber';
+  if (BIBLATEX_RE.test(src)) {
+    // bibtex8 is what the bundled engine actually runs for 'bibtex'; biblatex
+    // names it either way, and both spellings mean the same backend here.
+    const backend = biblatexBackend(src);
+    return backend === 'bibtex' || backend === 'bibtex8' ? 'bibtex' : 'biber';
   }
   // \bibliography{} and nothing else. It is what writes \bibdata into the .aux,
   // and \bibdata is the only thing BibTeX can act on — without it the run ends
@@ -84,6 +122,68 @@ export function inferBibTool(src) {
   return null;
 }
 
+/* ── the include graph ───────────────────────────────────────────────── */
+/* It lives here, not in document_model.js where it grew, because two things now
+   need it and document_model.js already imports from this file — putting it the
+   other way round would be a cycle, and a second copy of the walk is exactly
+   what drifts. This module imports nothing, which is what makes it the floor. */
+
+/** Every file `\input` or `\include` names in one source. */
+export function includesIn(src) {
+  // `\includegraphics` and `\includeonly` do not match: neither has `{`
+  // directly after the command name.
+  return [...stripTexComments(src).matchAll(/\\(?:input|include)\s*\{([^}]*)\}/g)]
+    .map(m => m[1].trim());
+}
+
+/**
+ * The file `\input{raw}` names, or null.
+ *
+ * TeX resolves relative to the working directory, which is the project root, so
+ * that is tried first; the file's own directory is a fallback because people
+ * write `\input{parts/a}` from `parts/b.tex` and expect it to work under
+ * `\graphicspath`-style habits. The extension is optional in TeX and usually
+ * omitted, so both spellings are tried.
+ */
+export function resolveInput(raw, fromFile, files) {
+  const cleaned = raw.replace(/^\.\//, '').trim();
+  if (!cleaned) return null;
+  const dir = fromFile.includes('/') ? fromFile.slice(0, fromFile.lastIndexOf('/') + 1) : '';
+  for (const base of dir ? [cleaned, dir + cleaned] : [cleaned]) {
+    for (const candidate of [base, `${base}.tex`]) {
+      if (files.has(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+/**
+ * The files the document actually reads, in the order it reads them.
+ *
+ * This matters more than it sounds. The book fixture ships a `main_legacy.tex`
+ * — a complete alternative main file that nothing includes. Concatenating every
+ * file's sections would put a second, contradictory copy of the whole book in
+ * the outline. Walking from `main` is what makes the outline the *document's*
+ * structure rather than the folder's.
+ *
+ * @param {(path: string) => string[]} includesOf  what each file pulls in.
+ *        A callback because the two callers already differ: the project index
+ *        has scanned every file and hands over the map it built, while
+ *        `describe` reads them as it walks. One walk either way.
+ */
+export function documentOrder(main, files, includesOf) {
+  const order = [];
+  const seen = new Set();
+  const walk = (path) => {
+    if (!path || seen.has(path) || !files.has(path)) return;
+    seen.add(path);                                  // before recursing: cycles
+    order.push(path);
+    for (const raw of includesOf(path) || []) walk(resolveInput(raw, path, files));
+  };
+  walk(main);
+  return order;
+}
+
 export function b64ToBytes(b64) {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
@@ -91,11 +191,35 @@ export function b64ToBytes(b64) {
   return out;
 }
 
-/** Everything derived from the main file's source, in one place. */
-function describe(project, mainSrc) {
-  project.engine = inferEngine(mainSrc);
-  project.makeindex = /\\makeindex/.test(stripTexComments(mainSrc));
-  project.bibtex = inferBibTool(mainSrc);
+/**
+ * Everything derived from the document's source, in one place.
+ *
+ * The *document*, not the main file. This used to read `main.tex` alone, which
+ * silently lost the index and the bibliography for every project that keeps its
+ * preamble in an `\input`-ed file — a common enough layout, and one that failed
+ * without a word, because as far as the app was concerned the document had never
+ * asked for either.
+ *
+ * Files are walked from the main file rather than concatenated wholesale: a
+ * folder often holds an alternative main file nobody includes (the book fixture
+ * ships `main_legacy.tex`), and reading its preamble too would pick up settings
+ * this document never asked for.
+ */
+function describe(project) {
+  const srcOf = (path) => {
+    const c = project.files.get(path)?.content;
+    return typeof c === 'string' ? c : '';
+  };
+  const order = documentOrder(project.main, project.files, (p) => includesIn(srcOf(p)));
+  // Comments are stripped per file, not once over the join, so a `%` at the end
+  // of one file cannot comment out the start of the next. That guard is why the
+  // homework fixture's commented-out `\bibliography{…}` does not run bibtex —
+  // and widening the scan makes it matter more, not less.
+  const src = order.map(p => stripTexComments(srcOf(p))).join('\n');
+
+  project.engine = inferEngine(src);
+  project.makeindex = /\\makeindex/.test(src);
+  project.bibtex = inferBibTool(src);
   return project;
 }
 
@@ -156,7 +280,7 @@ export async function readProjectFromDisk(api, root, { onWarn = () => {} } = {})
   }
 
   project.main = pickMain(mainCandidates, texFiles.map(f => f.path));
-  return describe(project, project.files.get(project.main)?.content || '');
+  return describe(project);
 }
 
 /**

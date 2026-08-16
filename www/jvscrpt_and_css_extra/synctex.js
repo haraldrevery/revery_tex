@@ -36,6 +36,33 @@ export class SyncTex {
     this.byLine = new Map();    // `${tag}:${line}` -> SyncRecord[]
     this.projectFiles = [];
     this.ready = false;
+    /**
+     * Why `ready` is false, which is not the same question as whether it is.
+     *
+     * Click-to-source failing used to be indistinguishable from click-to-source
+     * being pointed at the wrong place: every path here returned quietly and the
+     * UI had nothing to say. The three causes need three different answers from
+     * the user — the engine wrote no file, the file was empty of records, or it
+     * would not parse — so they are told apart here rather than guessed at by
+     * the caller.
+     *
+     * @type {'ok'|'absent'|'empty'|'error'}
+     */
+    this.status = 'absent';
+    this.error = null;
+  }
+
+  /**
+   * A sentence for the UI, or null when SyncTeX is working.
+   * Phrased as what the reader loses, because that is the thing they noticed.
+   */
+  statusMessage() {
+    switch (this.status) {
+      case 'ok':     return null;
+      case 'absent': return 'no SyncTeX file — click-to-source is unavailable';
+      case 'empty':  return 'SyncTeX file has no records — click-to-source is unavailable';
+      default:       return `SyncTeX unreadable (${this.error}) — click-to-source is unavailable`;
+    }
   }
 
   /** @param {Uint8Array} bytes raw (gzipped) .synctex contents */
@@ -44,9 +71,19 @@ export class SyncTex {
     this.records.length = 0;
     this.byLine.clear();
     this.ready = false;
-    if (!bytes || !bytes.length) return this;
+    this.error = null;
+    if (!bytes || !bytes.length) { this.status = 'absent'; return this; }
 
-    const text = await gunzip(bytes);
+    let text;
+    try {
+      text = await gunzip(bytes);
+    } catch (e) {
+      // Recorded before rethrowing, so a caller that catches this still ends up
+      // with an object that can say what went wrong.
+      this.status = 'error';
+      this.error = e.message;
+      throw e;
+    }
 
     let unit = 1, magnification = 1000, xOffset = 0, yOffset = 0;
     let page = 0;
@@ -98,6 +135,7 @@ export class SyncTex {
     }
 
     this.ready = this.records.length > 0;
+    this.status = this.ready ? 'ok' : 'empty';
     return this;
   }
 

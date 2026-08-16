@@ -334,7 +334,18 @@ function createMenu(spec, opts = {}) {
       b.className = 'menu-item';
       b.setAttribute('role', 'menuitem');
       b.textContent = row.label;
-      b.onclick = () => { close(); row.run(); };
+      // An action that cannot do anything right now — Copy with no selection —
+      // is shown rather than hidden, so the menu keeps the same shape and the
+      // rows do not move under the pointer between one opening and the next.
+      // `title` is where the reason goes.
+      if (row.disabled) {
+        b.disabled = true;
+        b.setAttribute('aria-disabled', 'true');
+        if (row.title) b.title = row.title;
+      } else {
+        b.onclick = () => { close(); row.run(); };
+        if (row.title) b.title = row.title;
+      }
       el.appendChild(b);
     }
   }

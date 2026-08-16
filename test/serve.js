@@ -135,16 +135,47 @@ const PROJECTS = {
     dir: 'hrldrvry_book_templt_v2',
     main: 'main.tex',
     engine: 'xetex',
+    // Still 49, and that is not a coincidence worth mistrusting: the stale .bbl
+    // did not produce *fewer* pages, it produced the same pages filled with raw
+    // database fields typeset as body text. Swapping garbage for a real
+    // bibliography of the same length leaves the count alone. What changed is
+    // that the log went from 17 undefined citations to none.
     expectPages: 49,
     rerun: true,
     makeindex: true,
-    // biblatex, so the tool is biber — which no WASM build has. The gate passes
-    // this through (engine_smoke.html), so the run covers that branch: the
-    // bundled engine must say it cannot build the bibliography and carry on
-    // with the committed .bbl, rather than failing the compile or quietly
-    // running bibtex8 instead and producing a wrong one.
+    // The template asks for backend=bibtex, so bibtex8 builds the .bbl here and
+    // the bibliography is real. It used to ask for biber and ship a prebuilt
+    // .bbl, which biblatex rejected as the wrong format version — every citation
+    // came out undefined. See `book-biber` below, which keeps that branch
+    // covered without leaving the template broken.
+    bibtex: 'bibtex',
+    note: 'biblatex on bibtex8, which the bundle ships; no biber needed.'
+  },
+  'book-biber': {
+    dir: 'hrldrvry_book_templt_v2',
+    main: 'main.tex',
+    engine: 'xetex',
+    // No page assertion: what is being checked is a *log* branch, and the page
+    // count of a document whose bibliography cannot be built is not a stable
+    // thing to pin.
+    expectPages: null,
+    rerun: true,
+    makeindex: true,
     bibtex: 'biber',
-    note: 'Uses the committed main.bbl; biber does not exist in WASM.'
+    // The branch the `book` fixture used to carry, kept alive by patching the
+    // backend back in flight rather than by leaving a real template broken. The
+    // bundled engine must say it cannot build the bibliography and carry on,
+    // rather than failing the compile or quietly running bibtex8 instead and
+    // producing a wrong one.
+    note: 'backend=biber, patched in: biber does not exist in WASM.',
+    patches: [
+      {
+        file: 'main.tex',
+        why: 'back to backend=biber, to exercise the "no biber in WASM" branch',
+        find: /backend(\s*)=(\s*)bibtex\b/,
+        replace: 'backend$1=$2biber'
+      }
+    ]
   },
   homework: {
     dir: 'homework_template',

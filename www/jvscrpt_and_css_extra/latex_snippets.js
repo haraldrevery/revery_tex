@@ -114,6 +114,96 @@ export function insertBlock(text, at, block) {
   return { from: at, to: at, insert, cursor: at + insert.length };
 }
 
+/**
+ * The source with comment bodies blanked to spaces.
+ *
+ * Length-preserving, unlike project_store's `stripTexComments`, because the
+ * caller needs offsets that still index the original buffer — it is producing
+ * an edit, not a reading. A `%` escaped as `\%` is literal and stays.
+ */
+function maskComments(src) {
+  let out = '';
+  for (let i = 0; i < src.length; ) {
+    if (src[i] === '\\') { out += src.slice(i, i + 2); i += 2; continue; }
+    if (src[i] === '%') {
+      const nl = src.indexOf('\n', i);
+      const end = nl === -1 ? src.length : nl;
+      out += ' '.repeat(end - i);
+      i = end;
+      continue;
+    }
+    out += src[i++];
+  }
+  return out;
+}
+
+/**
+ * Point biblatex at the bundled bibtex8 instead of biber.
+ *
+ * The one repair for the failure the bundled engine cannot compile around: no
+ * WASM build has biber, because biber is Perl, so a biblatex document either
+ * ships a prebuilt `.bbl` or gets no bibliography. When that `.bbl` was built by
+ * a different biblatex the entries do not typeset at all — and regenerating it
+ * needs the very tool that is missing. `backend=bibtex` breaks the loop:
+ * `biblatex.bst` ships in the slim bundle, so bibtex8 can build the `.bbl` here.
+ *
+ * Three preamble shapes, because all three are written in practice:
+ *
+ *     \usepackage{biblatex}                  → \usepackage[backend=bibtex]{biblatex}
+ *     \usepackage[style=authoryear]{biblatex}→ \usepackage[backend=bibtex,style=…]{…}
+ *     \usepackage[backend=biber]{biblatex}   → \usepackage[backend=bibtex]{biblatex}
+ *
+ * Only the package options are rewritten. A `backend=` set later through
+ * `\ExecuteBibliographyOptions` is left alone deliberately: editing two places
+ * to express one intent is how a preamble ends up contradicting itself, and the
+ * package option is the one biblatex reads first.
+ *
+ * The edit is as small as it can be — the value alone where there is one — so
+ * that an annotated option list survives it. Real preambles look like this:
+ *
+ *     \usepackage[
+ *       backend   = biber,       % use biber for full Unicode support
+ *       style     = numeric,     % Vancouver-style [1] [2] [3] citations
+ *     ]{biblatex}
+ *
+ * Replacing the whole call would take every one of those comments with it.
+ *
+ * @returns {{from:number, to:number, insert:string, cursor:number}|null}
+ *   null when there is nothing to change — not biblatex, already on bibtex, or
+ *   the backend is only ever set outside the package options.
+ */
+export function switchBiblatexBackend(text) {
+  const src = String(text);
+  // Matched against the masked copy, not the source. That `[1] [2] [3]` in the
+  // comment above is a real line from the book template, and `[^\]]*` stops
+  // dead at its first `]` — the option group then never closes and the whole
+  // call goes unrecognised. Masking is length-preserving, so every offset the
+  // match reports still indexes the original text.
+  const mask = maskComments(src);
+  const m = /\\(?:usepackage|RequirePackage)(?:\[([^\]]*)\])?\{biblatex\}/.exec(mask);
+  if (!m) return null;
+
+  const opts = m[1] ?? null;
+  const edit = (from, to, insert) => ({ from, to, insert, cursor: from + insert.length });
+
+  if (opts !== null) {
+    const optStart = m.index + m[0].indexOf('[') + 1;
+    const has = /\bbackend(\s*=\s*)(\w+)/.exec(opts);
+    if (has) {
+      if (/^bibtex8?$/i.test(has[2])) return null;                 // already there
+      // Just the value, so alignment, spacing and the trailing comment all stay.
+      const at = optStart + has.index + has[0].length - has[2].length;
+      return edit(at, at + has[2].length, 'bibtex');
+    }
+    // No backend named: put one at the head of the list, where it reads first.
+    return edit(optStart, optStart, 'backend=bibtex,');
+  }
+
+  // `\usepackage{biblatex}` — no group to edit, so one is added.
+  const at = m.index + m[0].indexOf('{biblatex}');
+  return edit(at, at, '[backend=bibtex]');
+}
+
 /** `\ref{…}` / `\eqref{…}` / `\cite{…}` at the cursor. */
 export function reference(kind, key, at) {
   const cmd = { equation: 'eqref', citation: 'cite' }[kind] || 'ref';

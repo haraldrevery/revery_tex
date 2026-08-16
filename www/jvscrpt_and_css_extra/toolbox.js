@@ -8,7 +8,7 @@
 // feature in this menu scans project text or touches CodeMirror directly.
 
 import { projectIndex, environmentsOfKind, resolveGraphic } from './document_model.js';
-import { formattingRows, insertBlockAtCursor, insertReference } from './editor_actions.js';
+import { clipboardRows, formattingRows, insertBlockAtCursor, insertReference } from './editor_actions.js';
 import { tableBlock, availableRules } from './table_builder.js';
 import { slug, uniqueLabel, figureBlock, equationBlock } from './latex_snippets.js';
 import { openDialog } from './dialog.js';
@@ -241,18 +241,142 @@ function referenceEquationPicker(view, project) {
 
 /* ── citations ───────────────────────────────────────────────────────── */
 
-/** `Smith, Jane and Doe, John` → `Smith et al.` — enough to tell entries apart. */
-export function citationRowLabel(entry) {
-  const first = (entry.author || '').split(' and ')[0].split(',')[0].trim();
-  const many = (entry.author || '').includes(' and ');
-  const who = first ? `${first}${many ? ' et al.' : ''}` : entry.key;
-  const year = entry.year ? ` ${entry.year}` : '';
-  const title = (entry.title || '').replace(/\s+/g, ' ');
-  const head = `${who}${year}`;
-  return title ? `${head} — ${title.slice(0, 40)}${title.length > 40 ? '…' : ''}` : head;
+/**
+ * Everything about an entry that is worth filtering on.
+ *
+ * The picker's filter box matches against this, so typing an author's surname,
+ * a word from a title, a year or the cite key all find the same entry. The old
+ * submenu could only be read down, and it showed a title cut at 40 characters —
+ * on a bibliography of any size, finding the right paper meant knowing its key
+ * already, which is exactly what a picker exists to avoid.
+ */
+export function citationSearchText(e) {
+  return [
+    e.key, e.author, e.editor, e.title, e.year, e.type,
+    e.journal, e.booktitle, e.publisher, e.institution, e.school, e.doi
+  ].filter(Boolean).join(' ');
 }
 
-function citationRow(view, project) {
+/**
+ * The handful of TeX escapes that actually turn up in a bibliography.
+ *
+ * Not a LaTeX interpreter, and deliberately not extensible. A `.bib` title is
+ * source, and the honest default for source is to show it — but four escaped
+ * punctuation marks and three logo macros account for very nearly everything
+ * anyone has ever written in a real `title` field, and leaving `\&` on screen
+ * in a list of references reads as a bug rather than as fidelity. Anything
+ * outside this table is left exactly as written.
+ */
+/* Two details that are not arbitrary.
+
+   No `\b` after the macro names. The real fixtures write `The {\TeX}book`, and
+   scanBib strips braces on the way in — they are BibTeX's casing protection,
+   not content — so this sees `The \TeXbook`. A word boundary would refuse to
+   match before that `b` and leave the backslash on screen, which is what it did.
+
+   Longest name first. `\LaTeXe` has to be taken before `\LaTeX`, and `\LaTeX`
+   before `\TeX`, or each is eaten by the shorter one and leaves a stray tail. By
+   the time the `\TeX` rule runs the LaTeX matches have already lost their
+   backslash, so it cannot reach inside them. */
+const TEX_TEXT = [
+  [/\\LaTeXe/g, 'LaTeX2e'],
+  [/\\LaTeX/g, 'LaTeX'],
+  [/\\TeX/g, 'TeX'],
+  [/\\([&%_#$])/g, '$1'],
+  [/\s---\s/g, ' — '],          // {\LaTeX} --- {Wikipedia}
+  [/(\w)--(\w)/g, '$1–$2']      // page ranges: 45--67
+];
+
+/** A bib field as prose: escapes resolved, whitespace collapsed. */
+export function bibText(raw) {
+  let s = String(raw || '');
+  for (const [re, to] of TEX_TEXT) s = s.replace(re, to);
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * One entry as the three parts of a reference.
+ *
+ * Three strings rather than one, so the row can give the title and the source
+ * different weight and so each part can be asserted on its own. Nothing is
+ * truncated and no author is dropped for an "et al." — the list exists to show
+ * the whole reference, which is what a 40-character card could never do.
+ *
+ * `source` is assembled from whichever fields the entry actually has, in the
+ * order a reference reads: where it appeared, then where in it, then when, then
+ * how to find it. An entry missing all of them yields an empty string rather
+ * than a line of stray punctuation.
+ */
+export function formatReference(e = {}) {
+  // An edited volume has no `author` at all — `@book{goossens1993, editor={…}}`
+  // is the standard shape, and reading only `author` left every one of them
+  // listed under no name. The "(eds.)" is what stops that reading as authorship.
+  const names = (raw) => bibText(raw).split(/\s+and\s+/).filter(Boolean).join('; ');
+  const authors = names(e.author) ||
+    (names(e.editor) ? `${names(e.editor)} (eds.)` : '');
+  const title = bibText(e.title);
+
+  // Where it appeared. A work has at most one of these; `publisher` also rides
+  // along for a book that names both its series and its publisher.
+  const container = bibText(e.journal) || bibText(e.booktitle) ||
+                    bibText(e.institution) || bibText(e.school);
+  const publisher = bibText(e.publisher);
+
+  // Where in it. "544(1)" and "544" both read correctly; "(1)" alone does not,
+  // so an issue with no volume is dropped rather than shown bare.
+  const volume = bibText(e.volume);
+  const number = bibText(e.number);
+  const at = volume ? `${volume}${number ? `(${number})` : ''}` : '';
+
+  const parts = [
+    [container, publisher].filter(Boolean).join(', '),
+    bibText(e.edition) && `${bibText(e.edition)} ed.`,
+    at,
+    bibText(e.pages) && `pp. ${bibText(e.pages)}`,
+    bibText(e.year)
+  ].filter(Boolean);
+
+  // The locator goes last and keeps its own separator: a DOI reads as an
+  // address, not as another comma-separated fact about the work.
+  const locator = e.doi ? `doi:${bibText(e.doi)}` : bibText(e.url);
+  const source = [parts.join(', '), locator].filter(Boolean).join(' · ');
+
+  return { authors, title, source };
+}
+
+/**
+ * One row of the citation list: the full reference, in reading order.
+ *
+ * Rendered as text at the body size rather than as a card — see the
+ * `layout: 'list'` branch of openPicker. There is nothing to re-fit when the
+ * card size steps, which is why this passes no `onResize` hook.
+ */
+function paintCitation(e, mount) {
+  mount.classList.add('cite-row');
+
+  const line = (cls, text) => {
+    if (!text) return;
+    const d = document.createElement('div');
+    d.className = cls;
+    d.textContent = text;
+    mount.appendChild(d);
+  };
+
+  const { authors, title, source } = formatReference(e);
+
+  // A bare \bibitem key carries no fields at all. Saying so is more useful than
+  // an empty row that looks like a rendering failure.
+  if (!authors && !title && !source) {
+    line('cite-none', 'no bibliography entry — key only');
+    return;
+  }
+
+  line('cite-authors', authors);
+  line('cite-title', title);
+  line('cite-source', source);
+}
+
+function citationPicker(view, project) {
   const ix = projectIndex(project());
   // Entries with parsed fields first; a \bibitem key with no metadata is still
   // citable, so keys without an entry are appended rather than dropped.
@@ -262,18 +386,21 @@ function citationRow(view, project) {
     ...ix.citations.filter(k => !known.has(k)).map(key => ({ key, author: '', title: '', year: '' }))
   ];
 
-  if (!entries.length) return { type: 'note', label: 'no bibliography entries found' };
-
-  return {
-    type: 'submenu',
-    label: 'Insert citation',
-    hint: String(entries.length),
-    actions: entries.map(e => ({
-      label: citationRowLabel(e),
-      title: `${e.key}${e.title ? `\n\n${e.title}` : ''}${e.author ? `\n${e.author}` : ''}`,
-      run: () => insertReference(view(), 'citation', e.key)
-    }))
-  };
+  openPicker({
+    title: 'Insert citation',
+    // A list, not the grid the figure and equation pickers use. A reference is
+    // three lines of prose; a grid cell wide enough to hold one fits two to a
+    // screen, and narrow enough to fit twelve truncates all of them.
+    layout: 'list',
+    items: entries,
+    text: citationSearchText,
+    // The key, because the key is what gets inserted. The reference beside it
+    // is how you actually recognise the work.
+    label: (e) => e.key,
+    preview: paintCitation,
+    empty: 'no bibliography entries found',
+    onPick: (e) => insertReference(view(), 'citation', e.key)
+  });
 }
 
 /**
@@ -289,7 +416,7 @@ export function insertRows({ view, project }) {
     tableReferenceRow(view, project),
     { type: 'action', label: 'Insert equation…', run: () => insertEquationDialog(view, project) },
     { type: 'action', label: 'Reference an equation…', run: () => referenceEquationPicker(view, project) },
-    citationRow(view, project)
+    { type: 'action', label: 'Insert citation…', run: () => citationPicker(view, project) }
   ];
 }
 
@@ -304,15 +431,22 @@ export function toolboxRows(ctx) {
 }
 
 /**
- * The right-click menu: the same rows, formatting first.
+ * The right-click menu: clipboard, then formatting, then inserting.
  *
- * It only opens over a selection (see the app shell), and with text selected
- * the likely intent is to format it — so that half goes on top. Both menus are
- * built from the same two pieces, which is what stops them drifting into
- * offering different things.
+ * Clipboard first because this menu *replaced* the browser's own, which had Cut,
+ * Copy and Paste at the top — leaving them out did not remove a feature so much
+ * as move it somewhere nobody would look. Formatting comes next: the menu opens
+ * over a selection as often as not, and with text selected the likely intent is
+ * to format it. Everything below is the same `insertRows` the Toolbox button
+ * shows, which is what stops the two drifting into offering different things.
+ *
+ * @param {{view: () => object, project: () => object|null,
+ *          report?: (msg: string, cls?: string) => void}} ctx
  */
 export function contextRows(ctx) {
   return [
+    ...clipboardRows(ctx.view, ctx.report),
+    { type: 'divider' },
     ...formattingRows(ctx.view),
     { type: 'divider' },
     ...insertRows(ctx)

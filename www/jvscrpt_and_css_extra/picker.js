@@ -70,8 +70,16 @@ function storedSize() {
  *        serve images and equations without knowing what either one is
  * @param {(item: object) => void} opts.onPick
  * @param {string} [opts.empty]  shown instead of the grid when there is nothing
+ * @param {'grid'|'list'} [opts.layout]  'list' gives one full-width row per item
+ *        instead of a grid of cards. For items whose preview is prose — a
+ *        bibliography reference is three lines of it — where a grid cell is
+ *        either too narrow to read or too wide to fit more than two on screen.
+ *        The size stepper is dropped in this mode: it sets --picker-card, which
+ *        only sizes a grid, and a visible control that does nothing is worse
+ *        than one that is not offered.
  */
-export function openPicker({ title, items, text, label: labelOf = text, preview, onResize, onPick, empty = 'nothing to show' }) {
+export function openPicker({ title, items, text, label: labelOf = text, preview, onResize, onPick, empty = 'nothing to show', layout = 'grid' }) {
+  const isList = layout === 'list';
   // Every URL this picker hands out, so close() can take them all back.
   const urls = [];
   const blobUrl = (bytes, type) => {
@@ -82,7 +90,7 @@ export function openPicker({ title, items, text, label: labelOf = text, preview,
 
   const modal = openModal({
     title,
-    className: 'dlg picker',
+    className: `dlg picker${isList ? ' picker-list-dlg' : ''}`,
     onClose: () => { for (const u of urls) URL.revokeObjectURL(u); urls.length = 0; },
     onKey: (e) => {
       const STEP = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: 0, ArrowUp: 0 };
@@ -108,7 +116,7 @@ export function openPicker({ title, items, text, label: labelOf = text, preview,
   modal.body.appendChild(filter);
 
   const strip = document.createElement('div');
-  strip.className = 'picker-strip';
+  strip.className = `picker-strip${isList ? ' picker-list' : ''}`;
   modal.body.appendChild(strip);
 
   const count = document.createElement('span');
@@ -166,6 +174,9 @@ export function openPicker({ title, items, text, label: labelOf = text, preview,
   updateCount();
 
   /* ── card size ─────────────────────────────────────────────────────── */
+  // Grid only. A list row is as wide as the dialog and as tall as its text, so
+  // there is no card to size — the stepper is not built at all rather than
+  // built and hidden, which keeps `applySize` from having to know about it.
 
   let at = storedSize();
 
@@ -212,7 +223,7 @@ export function openPicker({ title, items, text, label: labelOf = text, preview,
   cancel.type = 'button';
   cancel.textContent = 'Cancel';
   cancel.onclick = () => modal.close();
-  modal.foot.append(count, sizer, cancel);
+  modal.foot.append(count, ...(isList ? [] : [sizer]), cancel);
   modal.panel.appendChild(modal.foot);
 
   filter.focus();

@@ -198,6 +198,42 @@ test('reads bib entries with the fields a picker needs', async () => {
   assert.equal(jones.year, '1999');
 });
 
+test('reads the fields a full reference needs, not just three', async () => {
+  // The citation picker shows the whole reference, so a journal article without
+  // its journal, volume and pages is not something anyone can recognise.
+  const ix = await scan({
+    'refs.bib': [
+      '@article{boccaletti2014,',
+      '  title={The structure and dynamics of multilayer networks},',
+      '  volume={544}, number={1}, pages={1--122},',
+      '  journal={Physics Reports}, publisher={Elsevier BV},',
+      '  doi={10.1016/j.physrep.2014.07.001}, year={2014},',
+      '  author={Boccaletti, S. and Bianconi, G.}',
+      '}'
+    ].join('\n')
+  });
+  const e = ix.bib.find(b => b.key === 'boccaletti2014');
+  assert.equal(e.journal, 'Physics Reports');
+  assert.equal(e.publisher, 'Elsevier BV');
+  assert.equal(e.volume, '544');
+  assert.equal(e.number, '1');
+  assert.equal(e.pages, '1--122');
+  assert.equal(e.doi, '10.1016/j.physrep.2014.07.001');
+});
+
+test('@CONTROL is a directive to BibTeX, not a work you can cite', async () => {
+  // REVTeX bibliographies open with one. It was being listed as a citable
+  // entry by an author called "08".
+  const ix = await scan({
+    'refs.bib': [
+      '@CONTROL{apsrev42Control,author="08",editor="1",pages="0",title="0",year="1"}',
+      '@book{real1999, author = {A. Person}, title = {A Real Book}, year = 1999}'
+    ].join('\n')
+  });
+  assert.deepEqual(ix.bib.map(b => b.key), ['real1999']);
+  assert.deepEqual(ix.citations, ['real1999']);
+});
+
 test('\\bibitem keys count as citations', async () => {
   const ix = await scan({ 'main.tex': '\\bibitem[X]{manual99} Manual entry' });
   assert.deepEqual(ix.citations, ['manual99']);

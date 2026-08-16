@@ -20,7 +20,7 @@ const CDP_PORT = Number(process.env.CDP_PORT) || 9333;
 const TIMEOUT_MS = Number(process.env.COMPILE_TIMEOUT) || 900000;
 const LOG_DIR = path.join(__dirname, '..', 'build_tools', 'phase0_logs');
 
-const ALL = ['cv', 'book-legacy', 'book', 'homework', 'bibtex', 'missing-pkg'];
+const ALL = ['cv', 'book-legacy', 'book', 'book-biber', 'homework', 'bibtex', 'missing-pkg'];
 const targets = process.argv.slice(2).filter(a => !a.startsWith('-'));
 const wanted = targets.length ? targets : ALL;
 
