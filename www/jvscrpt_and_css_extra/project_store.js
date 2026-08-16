@@ -204,8 +204,25 @@ export function b64ToBytes(b64) {
  * folder often holds an alternative main file nobody includes (the book fixture
  * ships `main_legacy.tex`), and reading its preamble too would pick up settings
  * this document never asked for.
+ *
+ * Exported because this used to run exactly once, when the folder was read, and
+ * nothing could revise it afterwards. Adding `\makeindex` or a `\bibliography{}`
+ * mid-session therefore did nothing at all until the folder was reopened — and
+ * unlike the engine, which at least has the topbar dropdown to overrule it,
+ * neither of those has an override anywhere in the UI. The main file changing
+ * has the same effect, since the whole walk starts from it.
+ *
+ * Safe to call repeatedly: it derives from the buffers and assigns, holding no
+ * state of its own.
+ *
+ * **Only for projects that came from disk.** The dev-server fixtures declare
+ * their metadata by hand in `test/serve.js`, deliberately — one pins
+ * `bibtex: 'biber'` purely to exercise the no-biber path, another pins
+ * `main: 'main_legacy.tex'`, and a serve-time patch rewrites the backend in the
+ * source. Re-deriving those from the text would quietly dismantle exactly the
+ * cases the compile gate is built on. Callers gate on `project.onDisk`.
  */
-function describe(project) {
+export function redescribeProject(project) {
   const srcOf = (path) => {
     const c = project.files.get(path)?.content;
     return typeof c === 'string' ? c : '';
@@ -224,8 +241,42 @@ function describe(project) {
 }
 
 /**
+ * Every file the project could reasonably be compiled from.
+ *
+ * A `.tex` carrying `\documentclass`; or, when nothing does, every `.tex` —
+ * because a project whose preamble lives in an `\input`-ed file still has to be
+ * compilable. Comments are stripped first: a parked
+ * `% \documentclass{article}` is not a document.
+ *
+ * Computed from the buffers on demand rather than recorded at read time, so it
+ * cannot go stale when a file is created, imported, renamed or deleted. Both
+ * the initial guess and the document selector read it, which is what stops
+ * those two from ever disagreeing about what the alternatives are.
+ *
+ * The current main is always included even if it would not otherwise qualify —
+ * the list is a menu, and a menu that omits the thing it is currently set to
+ * cannot show its own state.
+ */
+export function mainCandidates(project) {
+  const tex = [...project.files.keys()].filter(p => /\.tex$/i.test(p));
+  const withClass = tex.filter((p) => {
+    const c = project.files.get(p)?.content;
+    return typeof c === 'string' && /\\documentclass/.test(stripTexComments(c));
+  });
+  const list = withClass.length ? withClass : tex;
+  if (project.main && !list.includes(project.main)) list.push(project.main);
+  return list.sort((a, b) => a.localeCompare(b));
+}
+
+/**
  * The main file: a .tex containing \documentclass, preferring main.tex, then
  * anything at the top level over anything nested.
+ *
+ * A guess, and only ever a guess — `cv_template/` holds four `\documentclass`
+ * files and no `main.tex`, so this picks one of them alphabetically and the
+ * other three are documents the app would otherwise never compile. That is why
+ * `mainCandidates` above is exported and the choice is offered in the UI rather
+ * than being the end of the matter.
  */
 function pickMain(candidates, fallback) {
   const list = candidates.length ? candidates : fallback;
@@ -258,7 +309,6 @@ export async function readProjectFromDisk(api, root, { onWarn = () => {} } = {})
     files: new Map()
   };
 
-  const mainCandidates = [];
   for (const f of files) {
     const isText = TEXT_EXT_RE.test(f.path);
     try {
@@ -271,16 +321,16 @@ export async function readProjectFromDisk(api, root, { onWarn = () => {} } = {})
         content = await api.readBinaryFile(f.path);
       }
       project.files.set(f.path, { content, binary: !isText, dirty: false, stamp });
-      if (isText && /\.tex$/i.test(f.path) && /\\documentclass/.test(content)) {
-        mainCandidates.push(f.path);
-      }
     } catch (err) {
       onWarn(`skipped ${f.path}: ${err}`);
     }
   }
 
-  project.main = pickMain(mainCandidates, texFiles.map(f => f.path));
-  return describe(project);
+  // Candidates come from the buffers now rather than from a list built in the
+  // loop above: one definition, shared with the selector, so the guess and the
+  // alternatives offered against it cannot describe different sets.
+  project.main = pickMain(mainCandidates(project), texFiles.map(f => f.path));
+  return redescribeProject(project);
 }
 
 /**

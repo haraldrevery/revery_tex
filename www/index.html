@@ -57,7 +57,13 @@
        button here. It had both, and a setting with two controls is how the two
        end up disagreeing — the standalone Theme button was removed for the same
        reason. -->
-  <span id="docname" class="docname"></span>
+  <!-- The document that gets compiled, and a way to change it. A folder can
+       hold several \documentclass files — cv_template has four and no main.tex
+       — and which one is the document is a choice, not something the app can
+       read off the filenames. A button, like #project and #engine beside it,
+       for the same reason they are: a native <select> draws the OS popup. -->
+  <button id="docname" class="docname" data-label="Document"
+          title="The document that gets compiled"></button>
   <div class="spacer"></div>
   <button id="status" class="statusline">idle</button>
   <button id="outlinetoggle" title="Show the document outline">Outline</button>

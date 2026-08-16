@@ -25,6 +25,24 @@ export function createEngineHost({ api, settings, onLog, onStatus, projectIsOnDi
   let engine = null;
   let source = null;
 
+  /**
+   * A system TeX was asked for, tried, and could not start.
+   *
+   * Without this the fallback below is undone on the very next compile.
+   * `acquire()` would set `source = 'bundled'` while `wanted()` still answered
+   * 'system', so every subsequent compile saw `source !== want`, disposed a
+   * perfectly good engine, re-probed the system TeX that had already failed,
+   * and paid a **full WASM re-initialisation** — worker, texmf data packages
+   * and all — to arrive back exactly where it started. The fallback is supposed
+   * to be a one-time cost, and this is what makes it one.
+   *
+   * Deliberately not cleared by `dispose()`: switching projects must not turn a
+   * known-broken installation back into something worth several seconds of
+   * probing. Only `resetEngineChoice()` clears it, and only the user asking for
+   * a system TeX again calls that.
+   */
+  let systemUnavailable = false;
+
   // Engine log levels are not the panel's; map once, here, rather than at each
   // construction site.
   const log = (line, level) =>
@@ -43,6 +61,8 @@ export function createEngineHost({ api, settings, onLog, onStatus, projectIsOnDi
     if (settings.settings.engineSource !== 'system') return 'bundled';
     if (!NativeTexEngine.available(api)) return 'bundled';
     if (!projectIsOnDisk()) return 'bundled';
+    // Already tried and already failed — see systemUnavailable.
+    if (systemUnavailable) return 'bundled';
     return 'system';
   }
 
@@ -72,6 +92,9 @@ export function createEngineHost({ api, settings, onLog, onStatus, projectIsOnDi
       if (want !== 'system') { engine = null; source = null; throw err; }
       log(String(err.message || err), 'error');
       log('falling back to the bundled engine', 'warn');
+      // Remembered, so the next compile does not throw this engine away to
+      // re-probe an installation that has already said no.
+      systemUnavailable = true;
       engine = build('bundled');
       source = 'bundled';
       await engine.init();
@@ -86,9 +109,43 @@ export function createEngineHost({ api, settings, onLog, onStatus, projectIsOnDi
     source = null;
   }
 
+  /**
+   * Ask the live engine to stop.
+   *
+   * What that means differs by engine and the caller has to be able to say so,
+   * which is why `source` is readable alongside this:
+   *
+   *   - **bundled** — the worker is terminated outright. The engine object stays
+   *     and re-initialises itself on the next `compile()`, so nothing is dropped
+   *     here; the cost is paid then, and it is a real one.
+   *   - **system** — only a flag. It is checked between passes, and there is no
+   *     IPC to kill a running child, so the `pdflatex` already executing runs to
+   *     completion and only the passes after it are skipped.
+   *
+   * Neither settles the promise the caller is awaiting — the vendored wrapper
+   * holds its own 180 s timeout and rejects only then — so the caller must stop
+   * awaiting on its own rather than treating this as the end of the compile.
+   */
+  async function cancel() {
+    if (!engine) return null;
+    try { await engine.cancel?.(); } catch { /* already gone */ }
+    return source;
+  }
+
   return {
     acquire,
     dispose,
+    cancel,
+
+    /**
+     * Forget that a system TeX failed, so the next compile tries it again.
+     *
+     * The app calls this when `engineSource` changes. Choosing System LaTeX is
+     * how someone says "I have installed it now" — or "try again, I fixed my
+     * PATH" — and that has to be able to overrule the memo, or the setting
+     * would be permanently dead after one bad probe.
+     */
+    resetEngineChoice() { systemUnavailable = false; },
 
     /**
      * Whether offering to switch to a system LaTeX would actually help.
@@ -100,8 +157,13 @@ export function createEngineHost({ api, settings, onLog, onStatus, projectIsOnDi
      * offering a switch that would silently fall back to the bundled engine is
      * worse than not offering one, since the user would read the unchanged
      * failure as "switching didn't help" rather than "switching didn't happen".
+     *
+     * `systemUnavailable` is the third case and the same argument: an
+     * installation that has already failed to start would fall back again, so
+     * the offer would be a button that changes nothing.
      */
-    canOfferSystem: () => NativeTexEngine.available(api) && projectIsOnDisk(),
+    canOfferSystem: () =>
+      NativeTexEngine.available(api) && projectIsOnDisk() && !systemUnavailable,
 
     /** What the last acquire actually produced — 'bundled' | 'system' | null. */
     get source() { return source; }

@@ -221,9 +221,15 @@ button.primary { color:var(--text); border-color:var(--accent) }
 }
 /* The two variable-length items give way first, so the controls keep their
    labels at any UI size rather than the row wrapping or clipping a button. */
+/* A menu trigger since the main document became selectable, so it inherits the
+   base button rule. The border is cleared exactly as .statusline clears its
+   own: this reads as a label that happens to open a menu, not as a fourth
+   bordered control competing with Save and Compile. The padding stays — it is
+   the click target — and min-width:0 keeps it the first thing to give way when
+   the bar narrows, which is what the comment above is about. */
 .docname {
   font-size:var(--fs-xs); letter-spacing:var(--tracking-wide); color:var(--text-muted);
-  text-transform:uppercase;
+  text-transform:uppercase; border-color:transparent;
   min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
 .statusline {

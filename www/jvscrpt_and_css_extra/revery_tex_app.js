@@ -41,7 +41,8 @@ import { buildTree, flattenTree, normalizePath } from './file_tree.js';
 import { referencesTo } from './document_model.js';
 import { $, download } from './dom.js';
 import {
-  readProjectFromDisk, readProjectFromFixture, TEXT_EXT_RE, inferBibTool
+  readProjectFromDisk, readProjectFromFixture, TEXT_EXT_RE, inferBibTool,
+  redescribeProject, mainCandidates
 } from './project_store.js';
 import { switchBiblatexBackend } from './latex_snippets.js';
 import { applyEdit } from './editor_actions.js';
@@ -57,6 +58,11 @@ const CM = window.CM;
 // call sites below read identically — only the rendering changed.
 const projectSel = new SelectMenu($('project'), { empty: 'no project' });
 const engineSel = new SelectMenu($('engine'), { empty: 'engine' });
+// Which file is *the document*. Inferred at load and overridable here, because
+// the inference is a guess between several equally valid answers — see
+// pickMain. Before this the guess was final, and the three files it did not
+// pick in a folder like cv_template could not be compiled at all.
+const mainSel = new SelectMenu($('docname'), { empty: 'no document' });
 
 // ── state ──────────────────────────────────────────────────────────────
 let project = null;          // { key, main, engine, files: Map<path, {content, dirty}> }
@@ -618,6 +624,11 @@ const emptyDirs = new Set();
 function renderTree() {
   const tree = $('filetree');
   tree.textContent = '';
+  // The document menu lists `.tex` files, so it changes whenever the tree does —
+  // a new file, an import, a rename, a delete. Refreshed here rather than at
+  // each of those call sites, because that is four places to remember and the
+  // fifth one added later is the one that gets forgotten.
+  syncMainSelect();
   if (!project) return;
 
   // Binaries are shown too, dimmed. They are what \includegraphics points at,
@@ -1111,11 +1122,11 @@ async function moveEntry(from, to, isDir) {
   const moving = isDir ? filesUnder(from) : [from];
 
   if (!isDir && from === project.main) {
-    setStatus('✗ the main file is what gets compiled — move it outside the app', 'err');
+    setStatus('✗ that is the main document — pick a different one first', 'err');
     return false;
   }
   if (isDir && moving.includes(project.main)) {
-    setStatus('✗ that folder holds the main file', 'err');
+    setStatus('✗ that folder holds the main document — pick a different one first', 'err');
     return false;
   }
   // A folder cannot go inside itself: every path being moved is also a path
@@ -1169,7 +1180,7 @@ async function moveEntry(from, to, isDir) {
 
 async function renameEntry(path, isDir) {
   if (!isDir && path === project.main) {
-    setStatus('✗ the main file is what gets compiled — rename it outside the app', 'err');
+    setStatus('✗ that is the main document — pick a different one first', 'err');
     return;
   }
   askName({ title: isDir ? 'Rename folder' : 'Rename file', label: 'New path',
@@ -1181,7 +1192,7 @@ async function renameEntry(path, isDir) {
 async function deleteEntry(path, isDir) {
   const doomed = isDir ? filesUnder(path) : [path];
   if (doomed.includes(project.main)) {
-    setStatus('✗ the main file is what gets compiled — it cannot be deleted here', 'err');
+    setStatus('✗ that is the main document — pick a different one first', 'err');
     return;
   }
   if (!isDir && !project.files.has(path)) return;
@@ -1308,6 +1319,93 @@ function syncEngineSelect() {
   engineSel.value = chosenEngine || preferredEngine();
 }
 engineSel.onchange = (v) => { chosenEngine = v; };
+
+/* ── which file is the document ──────────────────────────────────────── */
+
+/**
+ * Fill the document menu from what the project actually holds.
+ *
+ * Read live from the buffers on every call rather than cached, so creating,
+ * importing, renaming or deleting a `.tex` is reflected without anything having
+ * to remember to invalidate a list.
+ */
+let mainSelSig = null;
+function syncMainSelect() {
+  if (!project) { mainSelSig = null; mainSel.setOptions([]); return; }
+  // Cheap gate in front of an expensive scan. `mainCandidates` strips comments
+  // from every .tex in the project, and renderTree — which calls this — runs on
+  // things as ordinary as folding a directory. On a large thesis that is a
+  // visible stutter for an answer that has not changed. The signature covers
+  // everything that could change it: which .tex files exist, how long each is,
+  // and which one is currently the main. Same device as projectIndex's cache in
+  // document_model.js, and cheap because it never touches file contents.
+  let sig = `${project.key}|${project.main}|`;
+  for (const [p, f] of project.files) {
+    if (/\.tex$/i.test(p)) sig += `${p}:${typeof f.content === 'string' ? f.content.length : 'b'};`;
+  }
+  if (sig !== mainSelSig) {
+    mainSelSig = sig;
+    mainSel.setOptions(mainCandidates(project).map(p => ({ label: p, value: p })));
+  }
+  // Always, not only on a rebuild: setOptions falls back to the first option
+  // when the previous value is gone, and this puts it back on the file that is
+  // actually the main.
+  mainSel.value = project.main;
+}
+
+/**
+ * Remember the choice, per project.
+ *
+ * Rides in the settings store as an undeclared key, the same arrangement
+ * `collapsedDirs` and `layout` already use — settings.js passes anything not in
+ * SCHEMA through untouched. Keyed by project key rather than by full path so
+ * the same folder reopened from a different mount still finds its answer; two
+ * projects sharing a name is the same harmless collision the folded-directory
+ * set already accepts.
+ */
+function rememberMainFile() {
+  if (!project?.key) return;
+  const store = settings.settings.mainByProject ?? {};
+  store[project.key] = project.main;
+  settings.settings.mainByProject = store;
+  settings.save();
+}
+
+/** The remembered choice for this project, if it still names a file. */
+function applyRememberedMain() {
+  const want = settings.settings.mainByProject?.[project.key];
+  if (!want || want === project.main || !project.files.has(want)) return;
+  project.main = want;
+  if (project.onDisk) redescribeProject(project);
+}
+
+/**
+ * Compile a different file from now on.
+ *
+ * Everything derived from the main file has to be re-derived with it: the
+ * include graph starts there, so the engine, the bibliography tool and
+ * `\makeindex` are all answers about *this* document and not the previous one.
+ * The tree's `.main` mark, the outline's reading order and the preview all
+ * follow for the same reason.
+ */
+async function setMainFile(path) {
+  if (!project || path === project.main || !project.files.has(path)) return;
+  project.main = path;
+  rememberMainFile();
+  if (project.onDisk) redescribeProject(project);
+  // The PDF on screen belongs to the document we just stopped compiling, and
+  // Download would still have handed over its bytes.
+  await resetPreview();
+  syncMainSelect();
+  syncEngineSelect();
+  renderTree();
+  scheduleOutline();
+  openFile(path);
+  rawLog('inf', `main document is now ${path}`);
+  setStatus(`main document · ${path}`, 'ok');
+}
+
+mainSel.onchange = (v) => { setMainFile(v); };
 
 async function loadProjects() {
   // Order matters. Chromium always has openFolder, so checking that first would
@@ -1526,8 +1624,13 @@ async function loadFromDisk(root) {
   // have a main.tex, and reusing one's state for the other would hand over its
   // undo history along with it.
   docStates.clear();
+  // And so does the PDF, for the same reason.
+  await resetPreview();
+  // Before anything reads project.main: the remembered choice overrules the
+  // inference, and the tree, the outline and the editor all key off it.
+  applyRememberedMain();
 
-  $('docname').textContent = project.main;
+  syncMainSelect();
   projectSel.setOptions([{ label: project.key, value: project.key }]);
   chosenEngine = null;              // a new document gets its own inference
   syncEngineSelect();
@@ -1546,8 +1649,12 @@ async function loadProject(key) {
   const { project: loaded, patchLog } = await readProjectFromFixture(key);
   project = loaded;
   docStates.clear();                // as in loadFromDisk, and for the same reason
+  await resetPreview();             // likewise
 
-  $('docname').textContent = project.main;
+  // No applyRememberedMain here: a fixture's main file is declared by the dev
+  // server on purpose (book-legacy pins main_legacy.tex), and a remembered
+  // override would silently compile something the gate did not ask for.
+  syncMainSelect();
   refreshDirty();
   chosenEngine = null;              // as in loadFromDisk, and for the same reason
   syncEngineSelect();
@@ -1573,16 +1680,110 @@ const engineHost = createEngineHost({
   projectIsOnDisk: () => !!project?.onDisk
 });
 
+// Choosing the engine source again means "try it now" — a system TeX that
+// failed to start is remembered inside the host so it is not re-probed on every
+// compile, and this is the one thing that clears that memo. Registered here
+// rather than folded into the listener at the top of the file because it is the
+// host's own concern and the host does not exist until this line.
+settings.onChange((key) => {
+  if (key === 'engineSource' || key === null) engineHost.resetEngineChoice();
+});
+
+/**
+ * Which compile is current.
+ *
+ * A generation token, the same device `pdf_preview.js` uses for `_renderToken`
+ * and `_docToken`, and here for the same reason: cancelling cannot make the
+ * promise we are awaiting settle. The vendored wrapper holds its own 180 s
+ * timeout and rejects only when it expires, so terminating the worker leaves
+ * this function waiting up to three minutes on a compile the user has already
+ * abandoned. Bumping the token is what lets us stop waiting — and, just as
+ * importantly, throw away the answer if it ever does arrive, so a cancelled run
+ * cannot paint its pages and its diagnostics over a newer one.
+ */
+let compileRun = 0;
+let compiling = false;
+
+/**
+ * Compile ⇄ Cancel. The button is the only control that offers to stop.
+ *
+ * `data-compiling` is the machine-readable half, and it is not incidental. A
+ * running compile used to be legible only as `disabled` on this button, which
+ * is exactly what a driver watched to know a compile had finished — and the
+ * moment the button became a live Cancel it stopped being disabled at all, so
+ * that signal silently became "never running". Anything asking the question
+ * needs an answer that does not depend on the control happening to be
+ * unclickable; `__reveryTexApp.compiling` below is the same fact for callers
+ * that should not have to know the markup.
+ */
+function setCompileButton(running) {
+  const btn = $('compile');
+  btn.textContent = running ? 'Cancel' : 'Compile';
+  btn.toggleAttribute('data-compiling', running);
+  btn.classList.toggle('primary', !running);
+  btn.title = running
+    // Said plainly, because the two engines stop differently and a button that
+    // implied an immediate halt would be lying about one of them.
+    ? (engineHost.source === 'system'
+        ? 'Stop after the pass now running'
+        : 'Stop this compile — the engine restarts on the next one')
+    : 'Ctrl+Enter';
+}
+
+/**
+ * Abandon the running compile.
+ *
+ * The UI is freed here rather than waiting for the engine: `engineHost.cancel()`
+ * stops what it can, but the token above is what actually ends this run as far
+ * as the app is concerned.
+ */
+async function cancelCompile() {
+  if (!compiling) return;
+  const wasSystem = engineHost.source === 'system';
+  compileRun++;                  // everything in flight is now stale
+  compiling = false;
+  setCompileButton(false);
+  setStatus('cancelling…', 'warn');
+  await engineHost.cancel();
+  rawLog('wrn', wasSystem
+    ? 'compile cancelled — the pass already running will finish, no further passes'
+    : 'compile cancelled — engine worker terminated, it restarts on the next compile');
+  setStatus('compile cancelled', 'warn');
+}
+
 async function compile() {
   if (!project) return;
-  const btn = $('compile');
-  if (btn.disabled) return;
-  btn.disabled = true;
+  // Ctrl+Enter during a compile does nothing, as it always has. Stopping is the
+  // button's job, and a shortcut that meant "compile" one moment and "throw away
+  // the compile" the next would be a bad thing to have under muscle memory.
+  if (compiling) return;
+  const run = ++compileRun;
+  const stale = () => run !== compileRun;
+  compiling = true;
+  setCompileButton(true);
   clearLog();
   setIssues([]);
 
   try {
+    // What the document asks for, as it reads *now*. This was derived once when
+    // the folder was opened and never again, so a `\makeindex` or a
+    // `\bibliography{}` added since was invisible until the folder was
+    // reopened. Here rather than on every keystroke: it walks the include
+    // graph, it cannot cause a stutter at this frequency, and a compile is
+    // precisely the moment the answer has to be right.
+    //
+    // Only for projects on disk — the fixtures' metadata is declared by hand in
+    // test/serve.js on purpose. See redescribeProject.
+    //
+    // Inside the try, not above it: anything that throws before the try leaves
+    // `compiling` true with no finally to clear it, which wedges every later
+    // compile for the life of the page.
+    if (project.onDisk) redescribeProject(project);
+
     const eng = await engineHost.acquire();
+    // Starting the engine is itself several seconds and downloads the texmf
+    // packages, so it is a place someone reaches for Cancel.
+    if (stale()) return;
     // The dropdown reflects what the engine can actually do, so it is filled
     // after acquiring rather than at boot — capabilities are not known until
     // the engine has started.
@@ -1609,6 +1810,11 @@ async function compile() {
       bibtex: project.bibtex || null,
       makeindex: !!project.makeindex
     });
+    // The one that matters. A cancelled bundled compile still resolves or
+    // rejects eventually — up to 180 s later, when the wrapper's own timeout
+    // fires — and without this it would then write its log, its diagnostics and
+    // its pages over whatever the user has done since.
+    if (stale()) return;
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
 
     if (r.log) rawLog(r.success ? 'dbg' : 'err', r.log);
@@ -1649,11 +1855,19 @@ async function compile() {
       offerSystemFor(r.limits, r.missingPackages);
     }
   } catch (err) {
+    // A cancelled compile reaches here too — terminating the worker makes the
+    // wrapper reject. It is not a failure anyone needs reporting, and saying so
+    // would overwrite the "compile cancelled" the user just asked for.
+    if (stale()) return;
     setStatus(`✗ ${err.message}`, 'err');
     rawLog('err', `✗ ${err.message}`);
     showTab('raw');
   } finally {
-    btn.disabled = false;
+    // Only if this run is still the current one. When it is not, either
+    // cancelCompile has already freed the UI or a newer compile now owns it,
+    // and re-enabling from here would take the Cancel away from a compile that
+    // is genuinely still running.
+    if (!stale()) { compiling = false; setCompileButton(false); }
   }
 }
 
@@ -1750,6 +1964,40 @@ function offerSystemFor(limits = [], missing = []) {
   showNotice(reasons.join(' '), actions);
 }
 
+/**
+ * Put the preview back to "nothing has been compiled yet".
+ *
+ * Loading a project cleared the editor states, the log and the issues, but not
+ * this pane — so the previous project's document stayed on screen, Download
+ * handed over *its* bytes, and Ctrl+click resolved against *its* SyncTeX
+ * records. Every one of those is a wrong answer delivered confidently, which is
+ * worse than an empty pane.
+ *
+ * Both halves reuse teardown that already exists rather than adding a second
+ * way to clear the same state: `destroyDoc` already abandons in-flight link
+ * indexing, drops the back-stack and empties the canvases, and `parse(null)`
+ * already returns through the branch that clears every map and reports
+ * 'absent'. A SyncTeX `reset()` would have been a second spelling of that.
+ */
+async function resetPreview() {
+  lastPdf = null;
+  if (preview) {
+    try { await preview.destroyDoc(); } catch { /* nothing left to tear down */ }
+  }
+  await syncTex.parse(null);
+
+  $('pdf').style.display = 'none';
+  $('pdfempty').style.display = '';
+  const meta = $('pdfmeta');
+  meta.textContent = '';
+  // Both set by reportInteractivity, and neither is cleared by writing the text
+  // above — the ⚠ would otherwise outlive the document it was about.
+  meta.classList.remove('warn');
+  meta.title = '';
+  $('savepdf').disabled = true;
+  $('pdfback').disabled = true;
+}
+
 async function showPdf(bytes, pages) {
   lastPdf = bytes;
   $('pdfempty').style.display = 'none';
@@ -1839,7 +2087,7 @@ function reportInteractivity() {
   for (const n of notes) rawLog('wrn', n);
 }
 
-$('compile').onclick = compile;
+$('compile').onclick = () => (compiling ? cancelCompile() : compile());
 $('save').onclick = saveAll;
 $('open').onclick = openFolder;
 
@@ -2104,6 +2352,17 @@ window.__reveryTexTest = {
 // Headless driver hook, same contract as the Phase 0 harness.
 window.__reveryTexApp = {
   get ready() { return !!project; },
+  /**
+   * Whether a compile is in flight.
+   *
+   * The button's `disabled` used to answer this by accident, and a driver that
+   * waited on it went from "wait for the compile" to "return immediately" the
+   * moment Cancel replaced it — with the run then racing two live compiles.
+   * This is the question stated properly, so it cannot rot the same way.
+   */
+  get compiling() { return compiling; },
+  /** Stop the running compile, as the button does. */
+  cancel() { return cancelCompile(); },
   /** The bytes the Export button would download — a click gives the driver nothing. */
   async exportBytes() { return project ? (await buildExportZip()).bytes : null; },
   setBuffer(path, text) {

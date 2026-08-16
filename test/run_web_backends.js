@@ -128,7 +128,10 @@ async function main() {
     check('wrapper directory stripped', loaded.paths.includes('main.tex'),
       loaded.paths.join(', '));
     check('subdirectory preserved', loaded.paths.includes('chapters/one.tex'));
-    check('main file identified', loaded.docname === 'main.tex', loaded.docname);
+    // Substring, not equality: #docname is a SelectMenu now — the document is a
+    // choice, not a caption — so it carries the same " ▾" affordance #project
+    // and #engine do.
+    check('main file identified', /\bmain\.tex\b/.test(loaded.docname), loaded.docname);
     check('Export now available', !loaded.exportDisabled);
 
     /* ── edit, save into browser storage, and read it back ──────────── */

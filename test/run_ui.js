@@ -2003,8 +2003,11 @@ async function main() {
                  .some(n => n.classList.contains('main')) };
     })()`, true);
     // The compile targets the main file by name, so losing it breaks the
-    // project in a way nothing in the UI would explain.
-    check('the main file cannot be deleted', /main file/i.test(mainGuard.status) && mainGuard.survived,
+    // project in a way nothing in the UI would explain. The refusal now points
+    // at the document selector rather than telling people to leave the app,
+    // because re-pointing main is what makes this file ordinary again.
+    check('the main file cannot be deleted',
+      /main document/i.test(mainGuard.status) && mainGuard.survived,
       mainGuard.status);
 
     const deleted = await cdp.evaluate(`(async () => {
@@ -2888,14 +2891,20 @@ async function main() {
     await cdp.evaluate(`window.__reveryTexTest.view().focus(); true`, true);
     const beforeChord = await cdp.evaluate(`(() => ({
       len: window.__reveryTexTest.view().state.doc.length,
-      compiling: document.getElementById('compile').disabled
+      compiling: window.__reveryTexApp.compiling
     }))()`, true);
     await pressChord(cdp, 'Enter', 'Enter');
     const afterChord = await cdp.evaluate(`(() => ({
       len: window.__reveryTexTest.view().state.doc.length,
-      // compile() disables the button synchronously, so this is true while the
-      // run is still in flight — which is the only proof it started at all.
-      compiling: document.getElementById('compile').disabled,
+      // compile() sets this synchronously, so it is true while the run is still
+      // in flight — which is the only proof it started at all.
+      //
+      // Not the compile button's disabled flag, which is what this read
+      // before. The button is a live Cancel while a compile runs, so it is
+      // never disabled now, and that reading quietly became "no compile ever
+      // starts" — including for the two waitFors below, which then let the
+      // suite race two live compiles.
+      compiling: window.__reveryTexApp.compiling,
       dirty: document.getElementById('dirty').textContent
     }))()`, true);
     check('Ctrl+Enter starts a compile',
@@ -2903,7 +2912,7 @@ async function main() {
     check('Ctrl+Enter does not touch the document',
       afterChord.len === beforeChord.len && !afterChord.dirty,
       `${beforeChord.len} → ${afterChord.len}${afterChord.dirty ? ` (${afterChord.dirty})` : ''}`);
-    await cdp.waitFor('!document.getElementById("compile").disabled',
+    await cdp.waitFor('!window.__reveryTexApp.compiling',
       { what: 'the Ctrl+Enter compile to finish', timeoutMs: 180000 });
 
     // And from outside the editor, where they were not bound at all: clicking a
@@ -2922,7 +2931,7 @@ async function main() {
     const claimed = await cdp.evaluate(`window.__uiSaw`, true);
     check('the chords work outside the editor too', outside && claimed === true,
       `focus moved=${outside}, claimed=${claimed}`);
-    await cdp.waitFor('!document.getElementById("compile").disabled',
+    await cdp.waitFor('!window.__reveryTexApp.compiling',
       { what: 'the second compile to finish', timeoutMs: 180000 });
 
     /* ── a refused drop refuses, rather than moving to the root ─────── */
@@ -3007,6 +3016,123 @@ async function main() {
     await sleep(1500);
     const reinferred = await cdp.evaluate(`document.getElementById('engine').textContent`, true);
     check('a new project goes back to the inference', /pdflatex/.test(reinferred), reinferred);
+
+    /* ── which file is the document is a choice ─────────────────────── */
+    // It was not. pickMain guessed once, at load, and the guess was final —
+    // cv_template holds four \documentclass files and no main.tex, so three of
+    // its documents could not be compiled by the app at all. The chosen one was
+    // additionally protected from rename, move and delete, so there was not
+    // even a workaround.
+    //
+    // `cv` is the fixture for exactly that folder, and is already open.
+    await cdp.waitFor(`!window.__reveryTexApp.compiling`,
+      { what: 'the cv project to settle', timeoutMs: 180000 });
+    await realClick(cdp, `document.getElementById('docname')`);
+    await sleep(250);
+    const docMenu = await cdp.evaluate(`(() => {
+      const items = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .map(b => b.textContent.trim().replace(/^[■□]\\s*/, ''));
+      return { items, marked: [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .filter(b => b.textContent.trim().startsWith('■'))
+        .map(b => b.textContent.trim().replace(/^■\\s*/, '')) };
+    })()`, true);
+    check('every document in the folder is offered, not just the guessed one',
+      docMenu.items.length === 4 && docMenu.items.includes('personligt_brev_en.tex'),
+      `${docMenu.items.length}: ${docMenu.items.join(', ')}`);
+    check('and the one being compiled is the one marked',
+      docMenu.marked.length === 1 && docMenu.marked[0] === 'cv_harald_thirslund_sv.tex',
+      docMenu.marked.join(', '));
+
+    const pickedDoc = await realClick(cdp,
+      `[...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+         .find(b => /personligt_brev_en\\.tex/.test(b.textContent))`);
+    await sleep(400);
+    const afterPick = await cdp.evaluate(`(() => ({
+      button: document.getElementById('docname').textContent,
+      editor: document.getElementById('editortitle').textContent,
+      // The tree's ■ mark has to follow, or two places disagree about what the
+      // document is.
+      marked: [...document.querySelectorAll('#filetree .node.main')].map(n => n.dataset.path)
+    }))()`, true);
+    check('picking one makes it the document', pickedDoc &&
+      /personligt_brev_en/.test(afterPick.button) &&
+      afterPick.marked.join() === 'personligt_brev_en.tex',
+      `${afterPick.button.trim()} · tree=${afterPick.marked.join()}`);
+    check('and opens it in the editor', /personligt_brev_en\.tex/.test(afterPick.editor),
+      afterPick.editor);
+
+    // The proof: it is the chosen file that is handed to the engine.
+    await cdp.evaluate(`window.__reveryTexApp.compile()`, true).catch(() => {});
+    const compiledHeader = await cdp.evaluate(header, true);
+    check('and it is the chosen file that compiles',
+      /personligt_brev_en\.tex/.test(compiledHeader), compiledHeader);
+
+    /* ── a project switch does not leave the last PDF behind ────────── */
+    // Download handed over the *previous* project's bytes, and Ctrl+click
+    // resolved against its SyncTeX records, because loading a project cleared
+    // the editor states, the log and the issues but never this pane.
+    const hadPdf = await cdp.evaluate(
+      `!document.getElementById('savepdf').disabled`, true);
+    await realClick(cdp, `document.getElementById('project')`);
+    await sleep(200);
+    await realClick(cdp,
+      `[...document.querySelectorAll('.menu-container .menu-item')]
+         .find(b => b.textContent.trim().replace(/^[■□]\\s*/, '') === 'bibtex')`);
+    await sleep(800);
+    const afterSwitch = await cdp.evaluate(`(() => ({
+      download: document.getElementById('savepdf').disabled,
+      meta: document.getElementById('pdfmeta').textContent,
+      back: document.getElementById('pdfback').disabled,
+      pages: document.querySelectorAll('#pdf canvas.pdfpage').length,
+      empty: getComputedStyle(document.getElementById('pdfempty')).display
+    }))()`, true);
+    check('switching project clears the PDF pane', hadPdf &&
+      afterSwitch.download && afterSwitch.back && afterSwitch.pages === 0 &&
+      afterSwitch.meta === '' && afterSwitch.empty !== 'none',
+      `download disabled=${afterSwitch.download} canvases=${afterSwitch.pages} ` +
+      `meta="${afterSwitch.meta}" empty=${afterSwitch.empty}`);
+
+    /* ── a compile can be stopped ───────────────────────────────────── */
+    // Both engines have implemented cancel() all along and nothing ever called
+    // either. Cancelling cannot make the engine's promise settle — the vendored
+    // wrapper holds its own 180s timeout and rejects only then — so what is
+    // actually being checked here is that the *app* stops waiting, and that the
+    // abandoned run never lands its result afterwards.
+    await cdp.waitFor(`!window.__reveryTexApp.compiling`,
+      { what: 'the bibtex project to settle', timeoutMs: 180000 });
+    const cancelled = await cdp.evaluate(`(async () => {
+      window.__reveryTexApp.compile('book');           // deliberately not awaited
+      await new Promise(r => setTimeout(r, 600));
+      const running = window.__reveryTexApp.compiling;
+      const label = document.getElementById('compile').textContent;
+      const flagged = document.getElementById('compile').hasAttribute('data-compiling');
+      await window.__reveryTexApp.cancel();
+      return { running, label, flagged,
+               after: window.__reveryTexApp.compiling,
+               afterLabel: document.getElementById('compile').textContent,
+               status: document.getElementById('status').textContent };
+    })()`, true);
+    check('the button offers to cancel while a compile runs',
+      cancelled.running && /cancel/i.test(cancelled.label) && cancelled.flagged,
+      `${cancelled.label} · data-compiling=${cancelled.flagged}`);
+    check('cancelling frees the UI without waiting for the engine',
+      cancelled.after === false && /compile/i.test(cancelled.afterLabel) &&
+      /cancel/i.test(cancelled.status),
+      `${cancelled.afterLabel} · ${cancelled.status}`);
+
+    // And the abandoned run must never write its pages over what came after.
+    // The wrapper rejects a terminated worker, so this is the window in which a
+    // late result would have landed.
+    await sleep(2500);
+    const afterCancel = await cdp.evaluate(`(() => ({
+      compiling: window.__reveryTexApp.compiling,
+      pages: document.querySelectorAll('#pdf canvas.pdfpage').length,
+      status: document.getElementById('status').textContent
+    }))()`, true);
+    check('and the abandoned compile never lands a result',
+      afterCancel.compiling === false && afterCancel.pages === 0 &&
+      !/pages/.test(afterCancel.status),
+      `canvases=${afterCancel.pages} · ${afterCancel.status}`);
 
     /* ── biblatex without biber: from dead end to one click ─────────── */
     // The whole point of this feature, driven end to end. biber is Perl, so no
