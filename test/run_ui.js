@@ -472,6 +472,63 @@ async function main() {
     check('nothing visible falls below the type floor', sizes.floor >= 0.68,
       `smallest painted: ${sizes.floor}rem on ${sizes.worstSel}`);
 
+    /* ── the search panel follows the theme ─────────────────────────── */
+    // Ctrl+F came up white-on-black-text with Arial inputs inside a dark app:
+    // CodeMirror ships a light/dark pair for its panels and picks the light one,
+    // because nothing here calls EditorView.theme with `dark: true`. It was the
+    // one piece of chrome that ignored the theme entirely.
+    //
+    // Compared against each theme's own tokens rather than against fixed
+    // colours, so this keeps holding if a palette is retuned.
+    await cdp.evaluate(`window.__reveryTexTest.view().focus()`, true);
+    await pressChord(cdp, 'f', 'KeyF');
+    const find = {};
+    for (const theme of ['dark', 'light', 'paper', 'forest']) {
+      // Through the same call settings.js makes: `color-scheme` rides along with
+      // `data-theme`, and it is what decides how the browser paints a native
+      // checkbox. Setting the attribute alone leaves form controls in the old
+      // scheme — which looks exactly like a styling bug, and cost a detour here.
+      await cdp.evaluate(`(() => {
+        const r = document.documentElement;
+        r.setAttribute('data-theme', '${theme}');
+        r.style.colorScheme = ('${theme}' === 'dark' || '${theme}' === 'forest') ? 'dark' : 'light';
+      })()`, true);
+      await sleep(120);
+      find[theme] = await cdp.evaluate(`(() => {
+        const panel = document.querySelector('.cm-panels');
+        if (!panel) return null;
+        const probe = document.createElement('span');
+        document.body.appendChild(probe);
+        const token = (n) => {
+          probe.style.color = '';
+          probe.style.color = getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+          return getComputedStyle(probe).color;
+        };
+        const field = document.querySelector('.cm-textfield');
+        const r = {
+          panelBg: getComputedStyle(panel).backgroundColor,
+          menuBg: token('--menu-bg'),
+          fieldFont: getComputedStyle(field).fontFamily.split(',')[0].replace(/["']/g, ''),
+          fieldColor: getComputedStyle(field).color,
+          text: token('--text')
+        };
+        probe.remove();
+        return r;
+      })()`, true);
+    }
+    await cdp.evaluate(`document.querySelector('.cm-panel [name=close]')?.click()`, true);
+
+    for (const [theme, f] of Object.entries(find)) {
+      check(`${theme}: the search panel uses the theme's surface`,
+        !!f && f.panelBg === f.menuBg, f && `${f.panelBg} vs --menu-bg ${f.menuBg}`);
+      check(`${theme}: and the theme's text colour`,
+        !!f && f.fieldColor === f.text, f && `${f.fieldColor} vs --text ${f.text}`);
+    }
+    // Arial is what it was, and the giveaway that nothing had touched it.
+    check('the search field is in the app font, not the browser default',
+      Object.values(find).every(f => f && /Harald/.test(f.fieldFont)),
+      Object.values(find)[0]?.fieldFont);
+
     /* ── the PDF preview refits when the divider moves ──────────────── */
     // The reported bug: dragging the divider narrower than the width the PDF
     // was rendered at squashed the page — max-width:100% shrank the width while

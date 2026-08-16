@@ -669,6 +669,75 @@ body.dragging * { user-select:none !important }
 .cm-tooltip-autocomplete ul li[aria-selected] { background:var(--bg-hover); color:var(--text) }
 .cm-completionDetail { color:var(--text-dim); font-style:normal; margin-left:.6rem }
 
+/* ── the search panel (Ctrl+F) ──
+   CodeMirror ships its own light/dark pair for this and picks the *light* one,
+   because nothing here calls EditorView.theme with `dark: true`. So the panel
+   came up white-on-black-text inside a dark app, with Arial inputs — the one
+   piece of chrome that ignored the theme entirely.
+
+   Setting `dark: true` would only trade one hard-coded palette for another and
+   would still be wrong for the paper theme, which is light but not white. These
+   are the app's own tokens instead, so all four themes are right by
+   construction.
+
+   No !important: style-mod injects at the top of <head>, ahead of this file, so
+   equal specificity is decided by order and these win. The two-class selectors
+   below match the `.ͼ1 .cm-panels` shape of the rules they replace. */
+.cm-editor .cm-panels {
+  background:var(--menu-bg); color:var(--text);
+  font-family:var(--font-mono); font-size:var(--fs-sm);
+}
+.cm-editor .cm-panels-top    { border-bottom:1px solid var(--border-md) }
+.cm-editor .cm-panels-bottom { border-top:1px solid var(--border-md) }
+.cm-editor .cm-panel.cm-search { padding:.5rem .6rem .55rem .6rem; line-height:2 }
+/* The labels beside the checkboxes — "match case", "regexp", "by word". */
+.cm-editor .cm-panel.cm-search label {
+  color:var(--text-muted); font-size:var(--fs-xs);
+  text-transform:uppercase; letter-spacing:var(--tracking-wide);
+  margin-left:.5rem; white-space:nowrap;
+}
+/* --text, not --accent: accent-color has to be opaque. Every --accent here
+   carries alpha, and Chrome composites a translucent one into the *unchecked*
+   box as well, which painted all three as solid dark squares — they read as
+   permanently ticked. --text is the only opaque foreground token. */
+.cm-editor .cm-panel input[type="checkbox"] { accent-color:var(--text); margin-right:.25rem }
+.cm-editor .cm-textfield {
+  font-family:var(--font-mono); font-size:var(--fs-sm);
+  color:var(--text); background:var(--bg);
+  border:1px solid var(--border-md); border-radius:2px;
+  padding:.25rem .4rem .15rem .4rem; margin-right:.4rem;
+}
+.cm-editor .cm-textfield:focus { outline:none; border-color:var(--accent) }
+.cm-editor .cm-textfield::placeholder { color:var(--text-dim) }
+/* The editor already themes its own selection; these inputs are ordinary DOM
+   and were still painting the browser's blue inside a themed panel. */
+.cm-editor .cm-textfield::selection { background:var(--sel); color:var(--text) }
+/* The app's own button, rather than CodeMirror's gradient. Restated here
+   because `.cm-button` outranks the bare `button` rule these come from. */
+.cm-editor .cm-button {
+  font-family:var(--font-mono); font-size:var(--fs-xs); text-transform:uppercase;
+  letter-spacing:var(--tracking-wide); color:var(--text-muted);
+  background:none; background-image:none;
+  border:1px solid var(--border-md); border-radius:2px;
+  padding:.25rem .55rem .15rem .55rem; margin-right:.3rem; cursor:pointer;
+}
+.cm-editor .cm-button:hover { color:var(--text); border-color:var(--accent); background:var(--bg-hover) }
+.cm-editor .cm-button:active { background:var(--bg-hover); background-image:none }
+/* The ✕, which CodeMirror parks in the corner as bare text. */
+.cm-editor .cm-panel.cm-search [name="close"] {
+  color:var(--text-dim); font-size:var(--fs-sm); padding:0 .35rem; cursor:pointer;
+}
+.cm-editor .cm-panel.cm-search [name="close"]:hover { color:var(--text) }
+
+/* Matches. Two different questions, so two different colours: every hit gets
+   the warning hue, and the one you are on gets the accent — the same split the
+   rest of the app uses for "here is something" versus "you are here". */
+.cm-editor .cm-searchMatch { background:color-mix(in srgb, var(--warn) 30%, transparent) }
+.cm-editor .cm-searchMatch-selected { background:color-mix(in srgb, var(--accent) 55%, transparent) }
+/* Other occurrences of whatever is selected — highlightSelectionMatches, which
+   is on all the time, so it stays quieter than a deliberate search. */
+.cm-editor .cm-selectionMatch { background:color-mix(in srgb, var(--accent) 20%, transparent) }
+
 /* ── pdf ────────────────────────────────────────────────────────────── */
 /* scrollbar-gutter reserves the scrollbar's width permanently. Without it a
    re-render changes page height, which can add or remove the scrollbar, which
