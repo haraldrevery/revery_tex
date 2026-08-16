@@ -26,6 +26,8 @@ import * as settings from './settings.js';
 import { attachMenu, openMenuAt, SelectMenu } from './menus.js';
 import { toolboxRows, contextRows } from './toolbox.js';
 import { openDialog, dialogIsOpen } from './dialog.js';
+import { openLegal, copySourceLink } from './legal.js';
+import { openAbout } from './about.js';
 import {
   CUSTOM, applyCustomBackground, hasCustomBackground,
   chooseCustomBackground, forgetCustomBackground
@@ -230,6 +232,21 @@ function settingsMenuSpec() {
   return rows;
 }
 attachMenu($('settings'), settingsMenuSpec, { align: 'right' });
+
+// The logo menu: what the application is, rather than what the document is.
+//
+// `align: 'left'` unlike the two below — it hangs from the left edge of the bar.
+// "Source code" leads, and copies rather than opens: neither desktop shell will
+// open a browser (by design), so an item that navigated would do nothing there.
+// It is first because AGPL section 13 obliges a hosted copy to offer its source
+// to every visitor, and a menu that buries that offer under About discharges it
+// poorly.
+attachMenu($('logo'), () => [
+  { type: 'action', label: 'Source code', run: () => copySourceLink() },
+  { type: 'divider' },
+  { type: 'action', label: 'Legal', run: () => openLegal() },
+  { type: 'action', label: 'About', run: () => openAbout() }
+], { align: 'left' });
 
 // The Toolbox — insert and format. Its rows live in toolbox.js; this is the
 // wiring that tells them which button, which editor and which project.

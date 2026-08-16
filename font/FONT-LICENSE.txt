@@ -1,1 +1,15 @@
-Copyright © 2026 Harald Thirslund. These font files are for display purposes on this website only. All rights reserved. For licensing inquiries, contact haraldreverycontact@gmail.com
+HARALD REVERY TYPEFACES
+Copyright © 2026 Harald Mark Thirslund, Sweden. All rights reserved.
+
+"HaraldReveryTextFont" and "HaraldReveryMonoFont", in every format in this
+directory and in www/fonts/, are proprietary brand assets. They are not
+covered by the licence of the software they ship with.
+
+You may keep and use these files, unmodified and in place, to build and run 
+Revery TeX. You may not extract them, modify them, or
+use them in any other project, product, service, website or branding.
+
+Full terms: the LICENSE-ASSETS file at the root of this repository, which
+governs and takes precedence over this summary.
+
+Licensing enquiries: contact@haraldrevery.com

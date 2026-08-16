@@ -287,6 +287,53 @@ async function main() {
     } else if (tex.available) {
       console.log('  · no system TeX on this machine — live checks skipped');
     }
+
+    /* ── the source offer, in a shell that refuses to open a browser ──── */
+    // This is the one check that has to run here rather than in Chrome. The
+    // Legal page's links are inert in this shell by design — main.js denies
+    // every window open and blocks off-origin navigation — so an offer that
+    // depended on clicking a link would be silently broken on the desktop and
+    // perfectly fine in every browser test. AGPL section 6 asks for the offer to
+    // accompany the binary, so it has to be recoverable *here*.
+    console.log('\n── the source offer ────────────────────────────────────────────');
+
+    const offer = await cdp.evaluate(`(async () => {
+      const { openLegal } = await import('./jvscrpt_and_css_extra/legal.js');
+      openLegal();
+      const dlg = document.querySelector('.legal-dlg');
+      const block = dlg?.querySelector('.legal-source');
+      const copy = block?.querySelector('.legal-copy');
+      const anchor = block?.querySelector('a.legal-link');
+      return {
+        open: !!dlg,
+        // The address as a reader sees it, not as a link target.
+        visibleText: block?.textContent || '',
+        hasCopy: !!copy,
+        anchorHref: anchor?.href || ''
+      };
+    })()`, true);
+
+    check('Legal opens in the desktop shell', offer.open);
+    check('the source address is readable as text, not only as a link target',
+      /https:\/\/github\.com\/haraldrevery\/revery_tex/.test(offer.visibleText),
+      offer.visibleText.trim().slice(0, 80));
+    check('and it names this build',
+      /version \d+\.\d+\.\d+/.test(offer.visibleText));
+    check('a Copy button is offered, since the link cannot be followed here',
+      offer.hasCopy);
+
+    // The clipboard is the actual recovery path on desktop. Read it back:
+    // "writeText did not throw" is not the same as "the address is on the
+    // clipboard", and this shell is where that distinction has teeth.
+    const copied = await cdp.evaluate(`(async () => {
+      const { copySourceLink } = await import('./jvscrpt_and_css_extra/legal.js');
+      await copySourceLink();
+      try { return await navigator.clipboard.readText(); }
+      catch (e) { return 'READ_FAILED: ' + e.message; }
+    })()`, true);
+    check('Source code copies the address to the clipboard',
+      /^https:\/\/github\.com\/haraldrevery\/revery_tex$/.test((copied || '').trim()),
+      copied);
   } finally {
     cleanup();
     if (failures) console.log(`\n--- electron output ---\n${stderr.slice(-2000)}`);

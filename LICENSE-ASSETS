@@ -1,0 +1,88 @@
+REVERY TEX — BRAND ASSETS LICENSE
+Copyright © 2026 Harald Mark Thirslund, Sweden. All rights reserved.
+
+The software in this project is licensed under the GNU Affero General Public
+License v3.0 or later (see the LICENSE file); the source files written by the
+copyright holder are additionally available under the Apache License 2.0 (see
+LICENSE-APACHE). THIS FILE governs the brand assets, which are not source code
+and are NOT covered by either of those licences.
+
+1. COVERED MATERIAL ("the Assets")
+
+   a. The Harald Revery typefaces ("HaraldReveryTextFont" and
+      "HaraldReveryMonoFont") in every format and location, including
+      font/ and www/fonts/ (.ttf, .otf, .woff, .woff2).
+   b. The background photographs in www/image_assets/.
+   c. The Revery logo in every form, INCLUDING the glyph outline path data
+      embedded as an inline SVG in www/index.html, and the application icons
+      in tauri/icons/ (.png, .ico, .icns).
+
+   The Assets are shared with Revery Notebook and appear here with the
+   copyright holder's intent. They are separate works, aggregated with the
+   software for distribution.
+
+2. LIMITED PERMISSION
+
+   You may keep and use the Assets, unmodified and in their existing
+   locations, solely to build, run, and distribute this software (only as
+   is) — including forks and modified versions of this repository — so that
+   the application functions and appears as intended.
+
+   This permission is granted to every recipient of the software, runs with
+   the software, and may not be revoked for a copy already distributed. It
+   is deliberately broad enough that possessing this file never prevents
+   anyone from exercising their rights under the AGPL: you can always build,
+   run, modify, host, and redistribute the software with the Assets in place.
+
+3. PROHIBITED
+
+   Except as allowed in section 2, you may NOT, without prior written
+   permission from the copyright holder:
+   a. extract, copy, or redistribute any Asset separately from this
+      software;
+   b. modify an Asset or create derivative works of it;
+   c. use any Asset (including the typefaces and the logo) in any other
+      project, product, service, website, or branding;
+   d. sell or sublicense any Asset.
+
+   All rights not expressly granted are reserved.
+
+4. RELATIONSHIP TO THE AGPL
+
+   This file is a declining of trademark and brand-identity rights, of the
+   kind expressly permitted by AGPL-3.0 section 7(e). It grants no rights
+   over the software's source code and takes none away. Nothing in this file
+   restricts any permission the AGPL gives you with respect to the code.
+
+   If you fork this project and wish to distribute it under your own name and
+   identity, remove the Assets and substitute your own. Section 2 exists so
+   that you are never obliged to — but the Assets identify Revery, not the
+   software, and a fork carrying its own branding is the expected outcome.
+
+   Should any term in section 3 ever be held to operate as a further
+   restriction on the rights granted by the AGPL, that term is severed and
+   has no effect, and the remainder of this file continues to apply.
+
+5. PERMISSION REQUESTS
+
+   contact@haraldrevery.com — https://haraldrevery.com
+
+6. THIRD-PARTY MATERIAL
+
+   Third-party components bundled with this repository — the TeX Live
+   engines and macro tree, texlyre-busytex, BusyTeX, pdf.js, CodeMirror,
+   KaTeX and its fonts, and MiniLZ4 — are NOT Assets and are governed by
+   their own licences. See the NOTICE file, and the application's Legal
+   page, for the full inventory and licence texts.
+
+   In particular, the fonts inside the TeX Live tree (Computer Modern, Latin
+   Modern, the TeX Gyre family and others) are third-party material under
+   their own licences, not Assets. Section 3 does not apply to them.
+
+7. NO WARRANTY
+
+   The Assets are provided "AS IS", without warranty of any kind.
+
+8. GOVERNING LAW
+
+   This license is governed by the laws of Sweden.

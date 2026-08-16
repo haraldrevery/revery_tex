@@ -189,7 +189,7 @@ function createMenu(spec, opts = {}) {
           b.setAttribute('role', 'menuitem');
           b.textContent = act.label;
           if (act.title) b.title = act.title;
-          b.onclick = () => { close(); act.run(); };
+          b.onclick = () => { close(); button?.focus(); act.run(); };
           panel.appendChild(b);
         }
 
@@ -343,7 +343,14 @@ function createMenu(spec, opts = {}) {
         b.setAttribute('aria-disabled', 'true');
         if (row.title) b.title = row.title;
       } else {
-        b.onclick = () => { close(); row.run(); };
+        // Focus back to the trigger before the action runs, as Escape already
+        // does above. `close()` only hides the menu, so without this the focus
+        // stays on a row that is now invisible: calling .focus() on it does
+        // nothing and focus falls to <body>. That is invisible for a row that
+        // toggles a setting, and costs a keyboard user their place for a row
+        // that opens a dialog — the dialog records document.activeElement to
+        // return focus to, and would record the hidden row.
+        b.onclick = () => { close(); button?.focus(); row.run(); };
         if (row.title) b.title = row.title;
       }
       el.appendChild(b);

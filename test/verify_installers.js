@@ -40,6 +40,21 @@ function have(cmd) {
 const REQUIRED = ['busytex.wasm', 'texlive-slim-core.data', 'texlive-slim-icu.data'];
 
 /**
+ * Licence files that must travel with every binary.
+ *
+ * AGPL §6 requires the licence and the source offer to accompany the object
+ * code; Apache §4(d) requires NOTICE. Checked here rather than trusted, because
+ * both packagers express it differently — electron-builder needs each path added
+ * to its `files:` whitelist, Tauri needs `bundle.resources` — and Tauri shipped
+ * *neither* file until this check existed. Two packagers independently getting
+ * the same thing right is not a strategy; see the comment in electron-builder.yml.
+ *
+ * Matched on basename: the two shells put resources in different directories,
+ * and where they land is not the thing being asserted.
+ */
+const LICENCES = ['LICENSE', 'LICENSE-APACHE', 'LICENSE-ASSETS', 'NOTICE', 'FONT-LICENSE.txt'];
+
+/**
  * The two shells package the engine differently, and a single check cannot
  * cover both.
  *
@@ -74,6 +89,13 @@ function verify(label, file, listing, installedKb) {
       check(`ships ${want}`, listing.some(l => l.endsWith(want)));
     }
   }
+
+  // Unlike the engine, these ship as real files in both shells — Tauri embeds
+  // only frontendDist, and resources stay on disk — so one check covers both.
+  const missing = LICENCES.filter(
+    name => !listing.some(l => l.split('/').pop() === name));
+  check('ships every licence file', missing.length === 0,
+    missing.length ? `missing ${missing.join(', ')} — not distributable` : LICENCES.join(', '));
 
   check('no source maps', !listing.some(l => l.endsWith('.map')));
   check('no tarballs', !listing.some(l => l.endsWith('.tar.gz')));

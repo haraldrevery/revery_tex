@@ -2,7 +2,7 @@
 name    = "revery-tex"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 
 # A deliberately small filesystem surface (Phase C): open a folder, list it,
 # read, write atomically, crash backups. Revery Notebook's main.rs is ~40

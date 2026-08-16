@@ -232,6 +232,28 @@ button.primary { color:var(--text); border-color:var(--accent) }
 }
 .statusline.ok { color:var(--ok) } .statusline.err { color:var(--err) } .statusline.warn { color:var(--warn) }
 
+/* The brand mark, and the menu carrying Legal, About and the source offer.
+   First in the bar because #topbar clips from the right: see the comment on the
+   element itself in index.html.
+
+   The base `button` rule above gives every control a border, uppercase padding
+   and a letterspaced label. None of that suits a glyph, so this clears them —
+   and because the focus ring in that rule is drawn on the border being removed,
+   :focus-visible is restated here as an outline instead. */
+#logo {
+  flex:none; display:flex; align-items:center;
+  background:none; border:none; padding:0;
+  opacity:.55; transition:opacity .15s;
+}
+#logo:hover { opacity:1 }
+#logo:focus-visible { outline:2px solid var(--accent); outline-offset:3px; opacity:1 }
+#logo svg {
+  /* rem, so the mark scales with the UI size setting like every label does. */
+  height:1.2rem; width:auto; display:block;
+  /* Theme-monochrome: the mark follows all four themes without four rules. */
+  fill:currentColor;
+}
+
 /* Where the work is stored, when that is not the obvious answer. Persistent
    rather than a toast: it is a standing property of the session, not an event. */
 #notice {
@@ -381,6 +403,74 @@ button.primary { color:var(--text); border-color:var(--accent) }
 }
 .picker-thumb .katex-display { margin:0 }
 .picker-thumb .katex { max-width:100%; color:var(--text) }
+
+/* ── legal page ─────────────────────────────────────────────────────── */
+/* Prose, unlike everything else in this app, which is controls. So: a wider
+   panel, a measure that does not run to 90 characters, and normal sentence case
+   for the headings — the uppercase micro-labels used elsewhere are for naming a
+   control, and they read as shouting over three screens of licence text.
+
+   The scroll lives on .legal-scroll rather than on .dlg so the footer's Close
+   button stays put instead of scrolling away above the fold. See legal.js. */
+.dlg.legal-dlg { min-width:min(44rem, 94vw); max-width:min(52rem, 96vw); overflow:hidden }
+.legal-scroll {
+  max-height:min(64vh, 40rem); overflow-y:auto; overscroll-behavior:contain;
+  padding-right:.6rem; font-size:var(--fs-md); line-height:1.62; color:var(--text-muted);
+}
+.legal-section { margin:0 0 1.35rem 0 }
+.legal-section + .legal-section { border-top:1px solid var(--border); padding-top:1.15rem }
+.legal-h {
+  margin:0 0 .5rem 0; font-family:var(--font-brand); font-size:1rem; font-weight:400;
+  letter-spacing:var(--tracking-body); color:var(--text);
+}
+.legal-sub {
+  margin:.9rem 0 .3rem 0; font-size:var(--fs-xs); letter-spacing:var(--tracking-wide);
+  text-transform:uppercase; color:var(--text-dim);
+}
+.legal-p { margin:0 0 .6rem 0; max-width:62ch }
+.legal-ul { margin:0 0 .7rem 0; padding-left:1.05rem; max-width:62ch }
+.legal-ul li { margin:0 0 .32rem 0 }
+.legal-link { color:var(--text); text-decoration:underline; text-underline-offset:2px }
+.legal-link:hover { color:var(--accent) }
+
+/* The AGPL section 13 offer. Given weight because it is the one thing on this
+   page a reader may have come to find. */
+.legal-source {
+  padding:.5rem .65rem; background:var(--bg); border:1px solid var(--border-md);
+  border-radius:2px; font-family:var(--font-mono); font-size:var(--fs-sm);
+  overflow-wrap:anywhere;
+}
+.legal-build { display:block; margin-top:.3rem; color:var(--text-dim) }
+
+/* The address and its Copy button travel together, and the pair must not break
+   across a line mid-URL. `anywhere` on the anchor lets a long address wrap
+   inside itself instead of widening the dialog. */
+.legal-url { display:inline-flex; align-items:baseline; gap:.4rem; max-width:100%; }
+.legal-url .legal-link { overflow-wrap:anywhere }
+.legal-copy {
+  flex:none; padding:.1rem .35rem .02rem .35rem; font-size:var(--fs-xs);
+  letter-spacing:var(--tracking-wide);
+}
+
+.legal-libs { display:flex; flex-direction:column; gap:.55rem; margin-top:.7rem }
+.legal-lib {
+  padding:.55rem .7rem; background:var(--bg); border:1px solid var(--border);
+  border-radius:2px;
+}
+.legal-lib-head { margin:0 0 .2rem 0; color:var(--text) }
+.legal-lib-licence {
+  font-family:var(--font-mono); font-size:var(--fs-xs); color:var(--text-dim);
+  letter-spacing:var(--tracking-body);
+}
+.legal-lib-meta {
+  margin:.25rem 0 0 0; font-family:var(--font-mono); font-size:var(--fs-xs);
+  color:var(--text-dim); overflow-wrap:anywhere;
+}
+/* Licence text is quoted material: smaller, dimmer, and clearly not our prose. */
+.legal-lib-text {
+  margin:.3rem 0 0 0; font-size:var(--fs-sm); line-height:1.5; color:var(--text-muted);
+  white-space:pre-wrap;
+}
 
 /* ── pickers ────────────────────────────────────────────────────────── */
 /* A wrapping grid of cards. Wider than a form, because the point is to compare

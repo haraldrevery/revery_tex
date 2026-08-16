@@ -74,6 +74,37 @@ undiagnosable.
 - `www/jvscrpt_and_css_extra/codemirror-bundle.js` → edit `build_tools/cm_entry_tex.js`
 - `www/engine/dist/**` → `node build_tools/build_slim_texmf.js`
 - `www/jvscrpt_and_css_extra/texlyre_busytex.js` → copied from `vendor/`
+- `www/jvscrpt_and_css_extra/build_info.js` → `node build_tools/sync_version.js`
+- `www/jvscrpt_and_css_extra/{katex,pdfjs}/**` → `node build_tools/vendor_assets.js`
+
+## The licence is AGPL, and that is load-bearing
+
+`texlyre_busytex.js` is AGPL-3.0-or-later and is `import`ed directly, so the whole
+application is AGPL-3.0-or-later — not Apache, whatever older comments say. Two
+things follow that are easy to break by accident:
+
+- **The logo menu is not decoration, and it belongs at the far left.** AGPL §13
+  obliges a hosted copy to offer its source to every user, and `Source code` is
+  the first row of that menu for exactly that reason. `#topbar` clips from the
+  right rather than wrapping, so its last item is the first one lost — Settings
+  and Toolbox already vanish below ~1130px. First in the bar is the only
+  position that survives every width down to the 640px `minWidth`, and
+  `test/run_ui.js` asserts it at three widths. Do not move it rightwards to
+  tidy the toolbar.
+- **`Source code` copies rather than opens.** Neither desktop shell will open a
+  browser — `electron/main.js` denies every window open and blocks off-origin
+  navigation, and the Tauri build ships no opener plugin. A menu row or link
+  that navigated would be silently dead on the desktop and fine in every browser
+  test, which is how it went unnoticed once already. The Legal page spells every
+  URL out as text for the same reason. `test/run_electron.js` checks this in the
+  shell where it actually matters.
+- **The arm's-length boundary in `tex_engine_wasm.js` is a licence boundary too.**
+  The GPL TeX engines stay outside the licence calculation only because they are
+  separate programs across a Worker message boundary. Linking them differently
+  would change what the project may be distributed as.
+
+Replacing the wrapper with an MIT one over `busytex_pipeline.js` would return the
+project to Apache-2.0. Until someone does, assume AGPL. See README § Licensing.
 
 ## Dangerous commands
 

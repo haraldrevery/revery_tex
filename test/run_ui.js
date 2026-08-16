@@ -110,6 +110,22 @@ async function pressChord(cdp, key, code) {
   await sleep(150);
 }
 
+/**
+ * Escape, as a bare key.
+ *
+ * Not pressChord: that one holds Ctrl and derives its keycode from the first
+ * letter of the name, which is right for "Ctrl+S" and nonsense for "Escape".
+ * Dialogs listen for Escape in the capture phase, so the keycode has to be the
+ * real one or CodeMirror sees the event first.
+ */
+async function pressEscape(cdp) {
+  for (const type of ['keyDown', 'keyUp']) {
+    await cdp.send('Input.dispatchKeyEvent',
+      { type, key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  }
+  await sleep(150);
+}
+
 /** A missing dev server otherwise reads as "the app failed to boot". */
 async function requireServer() {
   const ok = await fetch(BASE, { signal: AbortSignal.timeout(2000) })
@@ -2925,6 +2941,146 @@ async function main() {
     check('and the bibliography then builds',
       /✓/.test(backendFix.status) && backendFix.noticeHidden,
       `${offered.issues} → ${backendFix.issues} · ${backendFix.status}`);
+
+    /* ── the Legal page ─────────────────────────────────────────────── */
+    // Not cosmetic. This application links an AGPL-3.0 component, so a hosted
+    // copy must offer its corresponding source to everyone who loads it, and
+    // that offer has to name the running build rather than gesture at a repo.
+    // The checks below are the compliance surface, which is why they assert the
+    // build stamp and the repository link rather than only that a box appeared.
+    console.log('\n── legal ───────────────────────────────────────────────────────');
+
+    // The logo must survive every width the app supports. #topbar clips from the
+    // right rather than wrapping, so its last item is the first one lost —
+    // Settings and Toolbox already vanish below ~1130px. Putting the logo first
+    // is what keeps Legal, About and the source offer reachable at 640px, which
+    // is the minWidth tauri.conf.json sets. This loop is the check that earns
+    // that placement; without it the button drifts rightwards one tidy-up later.
+    const widths = [1280, 900, 640];
+    const clipped = [];
+    for (const w of widths) {
+      await cdp.send('Emulation.setDeviceMetricsOverride',
+        { width: w, height: 800, deviceScaleFactor: 1, mobile: false });
+      await sleep(150);
+      const ok = await cdp.evaluate(`(() => {
+        const bar = document.getElementById('topbar').getBoundingClientRect();
+        const b = document.getElementById('logo');
+        if (!b) return false;
+        const r = b.getBoundingClientRect();
+        return r.width > 0 && r.left >= bar.left - 0.5 && r.right <= bar.right + 0.5;
+      })()`);
+      if (!ok) clipped.push(w);
+    }
+    check('the logo is reachable at every supported width',
+      clipped.length === 0,
+      clipped.length ? `clipped at ${clipped.join(', ')}px` : widths.join('px, ') + 'px');
+
+    check('and it renders the brand mark, theme-coloured',
+      await cdp.evaluate(`(() => {
+        const svg = document.querySelector('#logo svg');
+        return !!svg && svg.querySelectorAll('path').length === 4 &&
+          getComputedStyle(svg).fill !== 'none';
+      })()`));
+
+    await cdp.send('Emulation.setDeviceMetricsOverride',
+      { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+    await sleep(200);
+
+    // The menu, and that the source offer leads it.
+    // Scoped to the open panel. Every menu in the app keeps its container in the
+    // document and merely sets `hidden`, so an unscoped `.menu-container`
+    // selector collects the project and engine dropdowns opened earlier in this
+    // run as well.
+    await realClick(cdp, `document.getElementById('logo')`);
+    const menu = await cdp.evaluate(`(() => {
+      const items = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .map(x => x.textContent.trim());
+      return { items, expanded: document.getElementById('logo').getAttribute('aria-expanded') };
+    })()`);
+    check('the logo opens a menu', menu.expanded === 'true');
+    check('carrying Source code, Legal and About',
+      menu.items.join('|') === 'Source code|Legal|About', menu.items.join(' | '));
+
+    // Copying is how the offer works at all on desktop, where neither shell will
+    // open a browser. Read it back rather than trusting the call not to throw.
+    await cdp.send('Browser.grantPermissions',
+      { permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
+    await cdp.evaluate(`[...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+      .find(x => x.textContent.trim() === 'Source code').click()`);
+    await sleep(250);
+    const copied = await cdp.evaluate(`navigator.clipboard.readText()`);
+    check('Source code puts the address on the clipboard',
+      /github\.com\/haraldrevery\/revery_tex/.test(copied || ''), copied);
+
+    await realClick(cdp, `document.getElementById('logo')`);
+    await cdp.evaluate(`[...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+      .find(x => x.textContent.trim() === 'Legal').click()`);
+    await sleep(200);
+    const legal = await cdp.evaluate(`(() => {
+      const dlg = document.querySelector('.legal-dlg');
+      if (!dlg) return { open: false };
+      const scroll = dlg.querySelector('.legal-scroll');
+      const foot = dlg.querySelector('.dlg-foot');
+      const footTop = foot.getBoundingClientRect().top;
+      scroll.scrollTop = scroll.scrollHeight;
+      return {
+        open: true,
+        sections: dlg.querySelectorAll('.legal-section').length,
+        libs: dlg.querySelectorAll('.legal-lib').length,
+        stamp: dlg.querySelector('.legal-source')?.textContent.trim() || '',
+        scrolled: scroll.scrollTop > 0,
+        // The overflow is on .legal-scroll rather than on .dlg so that Close
+        // does not scroll away above the fold on a three-screen document.
+        footStayed: Math.abs(foot.getBoundingClientRect().top - footTop) < 1
+      };
+    })()`);
+    check('Source opens the Legal page', legal.open);
+    check('it carries every section', legal.sections === 7, `${legal.sections} sections`);
+    // One card per third-party component in the shipped bundle. A dependency
+    // added without a row here is an attribution the distribution owes and
+    // does not make.
+    check('every bundled component is attributed', legal.libs === 7, `${legal.libs} components`);
+    check('the source offer names the running build',
+      /github\.com\/haraldrevery\/revery_tex/.test(legal.stamp) &&
+      /version \d+\.\d+\.\d+/.test(legal.stamp), legal.stamp);
+    check('long licence text scrolls', legal.scrolled);
+    check('and Close stays put while it does', legal.footStayed);
+
+    await pressEscape(cdp);
+    const dismissed = await cdp.evaluate(`(() => ({
+      closed: !document.querySelector('.legal-dlg'),
+      focus: document.activeElement?.id
+    }))()`);
+    check('Escape dismisses it', dismissed.closed);
+    check('and focus returns to the button that opened it',
+      dismissed.focus === 'logo', `focus: "${dismissed.focus}"`);
+
+    // About. Its safety claims are checked against the backends by hand, not
+    // here; what this asserts is that the page exists, opens, and names the
+    // build — a version that silently went missing would be the failure.
+    await realClick(cdp, `document.getElementById('logo')`);
+    await cdp.evaluate(`[...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+      .find(x => x.textContent.trim() === 'About').click()`);
+    await sleep(200);
+    const about = await cdp.evaluate(`(() => {
+      const dlg = document.querySelector('.legal-dlg');
+      if (!dlg) return { open: false };
+      return {
+        open: true,
+        head: dlg.querySelector('.dlg-head')?.textContent,
+        sections: dlg.querySelectorAll('.legal-section').length,
+        stamp: dlg.querySelector('.legal-source')?.textContent.trim() || ''
+      };
+    })()`);
+    check('About opens from the same menu', about.open && about.head === 'About');
+    check('with all four sections', about.sections === 4, `${about.sections} sections`);
+    check('and names the running build',
+      /version \d+\.\d+\.\d+/.test(about.stamp), about.stamp);
+    await pressEscape(cdp);
+    check('About dismisses too',
+      await cdp.evaluate(`!document.querySelector('.legal-dlg')`));
+
+    await cdp.send('Emulation.clearDeviceMetricsOverride');
 
     const expected = /favicon|\/api\/projects/i;
     const real = pageErrors.filter(e => !expected.test(e));

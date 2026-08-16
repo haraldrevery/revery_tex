@@ -4,15 +4,33 @@ https://haraldrevery.com
 
 This product includes software developed by Harald Mark Thirslund.
 
-The source code of this project is licensed under the Apache License,
-Version 2.0 (see the LICENSE file).
+The application as distributed is licensed under the GNU Affero General
+Public License, version 3 or later (see the LICENSE file). The source files
+written by Harald Mark Thirslund are additionally available under the Apache
+License, Version 2.0 (see LICENSE-APACHE).
+
+Source code: https://github.com/haraldrevery/revery_tex
+
+────────────────────────────────────────────────────────────────────────
+WHY AGPL
+────────────────────────────────────────────────────────────────────────
+
+The browser TeX engine wrapper (item 3 below) is AGPL-3.0-or-later and is
+imported directly into the application bundle. The combined work therefore
+carries that licence. Apache-2.0 permits this direction of combination, so
+the copyright holder's own files keep their Apache grant as well.
+
+If you host this application on a network, AGPL section 13 requires you to
+offer its complete corresponding source to your users. The deployment at
+haraldrevery.com does so through the Legal page and a Source link in the
+application's toolbar.
 
 ────────────────────────────────────────────────────────────────────────
 BUNDLED THIRD-PARTY COMPONENTS
 ────────────────────────────────────────────────────────────────────────
 
 This application ships a complete TeX Live distribution compiled to
-WebAssembly. Those binaries are NOT covered by the Apache License.
+WebAssembly. Those binaries are NOT covered by the licences above.
 
 1. TeX Live engines — www/engine/dist/busytex.wasm
    Contains pdfTeX, XeTeX, LuaHBTeX, bibtex8, makeindex and xdvipdfmx.
@@ -25,6 +43,13 @@ WebAssembly. Those binaries are NOT covered by the Apache License.
    message boundary — the same relationship a LaTeX editor has to a TeX
    installation on the system PATH.
 
+   The exact upstream artefacts this build derives from:
+     texlive     https://github.com/TeX-Live/texlive-source/archive/refs/heads/tags/texlive-2026.0.tar.gz
+                 https://mirror.ctan.org/systems/texlive/Images/texlive2026.iso
+     expat       https://github.com/libexpat/libexpat/releases/download/R_2_5_0/expat-2.5.0.tar.gz
+     fontconfig  https://www.freedesktop.org/software/fontconfig/release/fontconfig-2.13.96.tar.gz
+     emscripten  5.0.4
+
 2. TeX Live macro and font tree — www/engine/dist/texlive-slim-*.data
    A subset of the TeX Live texmf tree. Individual packages carry their
    own licences: LPPL, GPL, the Knuth licence, SIL OFL and others. See
@@ -33,13 +58,12 @@ WebAssembly. Those binaries are NOT covered by the Apache License.
 3. texlyre-busytex — www/jvscrpt_and_css_extra/texlyre_busytex.js
    Copyright Fares Abawi. Licensed AGPL-3.0-or-later.
    Source: https://github.com/TeXlyre/texlyre-busytex
-   A copy of the unmodified upstream distribution is kept in vendor/.
+   A copy of the unmodified upstream distribution, with its licence text,
+   is kept in vendor/texlyre-busytex/.
 
-   NOTE: unlike the TeX binaries above, this component's JavaScript is
-   imported directly into the application bundle. Redistributors should
-   satisfy themselves that their use complies with the AGPL-3.0, and be
-   aware that a strict reading may require the combined work to be
-   licensed AGPL-3.0.
+   Unlike the TeX binaries above, this component's JavaScript is imported
+   directly into the application bundle. This is the component that makes
+   the combined work AGPL-3.0-or-later, as explained under WHY AGPL.
 
 4. BusyTeX — the build the WASM binaries derive from
    Copyright Vadim Kantorov. MIT.
@@ -48,29 +72,53 @@ WebAssembly. Those binaries are NOT covered by the Apache License.
 5. pdf.js — www/jvscrpt_and_css_extra/pdfjs/
    Copyright Mozilla Foundation. Apache-2.0.
    Source: https://github.com/mozilla/pdf.js
+   Licence text: www/jvscrpt_and_css_extra/pdfjs/LICENSE
+
+   Ships with two data sets under separate terms, each carrying its own
+   licence file:
+     - cmaps/ — CJK character maps, Adobe. See cmaps/LICENSE.
+     - standard_fonts/ — substitutes for the 14 base PDF fonts: the
+       Liberation fonts (see standard_fonts/LICENSE_LIBERATION) and fonts
+       contributed by Foxit (see standard_fonts/LICENSE_FOXIT).
 
 6. CodeMirror 6 — www/jvscrpt_and_css_extra/codemirror-bundle.js
    Copyright Marijn Haverbeke and others. MIT.
    Source: https://github.com/codemirror
    Includes @codemirror/legacy-modes (stex mode) under the same licence.
 
-7. MiniLZ4 — extracted at build time by build_tools/lz4_codec.js
+7. KaTeX — www/jvscrpt_and_css_extra/katex/
+   Copyright 2013-2020 Khan Academy and other contributors. MIT.
+   Source: https://github.com/KaTeX/KaTeX
+   Licence text: www/jvscrpt_and_css_extra/katex/LICENSE
+   Used for the inline maths preview (www/jvscrpt_and_css_extra/math_preview.js).
+   Ships with its own web fonts, under the same licence.
+
+8. MiniLZ4 — extracted at build time by build_tools/lz4_codec.js
    Based on node-lz4, Copyright 2012 Pierre Curto. MIT.
 
+Full licence texts for every component above are reproduced on the Legal
+page inside the application.
+
 ────────────────────────────────────────────────────────────────────────
-BRAND ASSETS — NOT COVERED BY THE APACHE LICENSE
+BRAND ASSETS — NOT COVERED BY THE LICENCES ABOVE
 ────────────────────────────────────────────────────────────────────────
 
 The Harald Revery typefaces (font/, www/fonts/), the Revery logo, the
 application icons (tauri/icons/) and the background photographs
-(www/image_assets/) are proprietary. See font/FONT-LICENSE.txt.
+(www/image_assets/) are proprietary. See the LICENSE-ASSETS file.
 
-The photographs are the same brand assets Revery Notebook ships under its
-LICENSE-ASSETS, which permits use only within that software. They are here
-with the copyright holder's intent, and are not covered by the Apache
-License. Both installers ship them: they are part of www/, which every
-shell loads whole.
+These are the same brand assets Revery Notebook ships, and they are here
+with the copyright holder's intent. They are separate works, aggregated
+with the software: both installers ship them because they are part of www/,
+which every shell loads whole.
 
-You may keep and use all of the above unmodified, in place, solely to build,
-run and distribute this software. Extracting them for other work, or shipping
-a fork under this branding, is not permitted.
+LICENSE-ASSETS grants every recipient permission to keep and use them,
+unmodified and in place, to build, run, distribute and fork this software.
+Extracting them for other work, or shipping a fork under this branding, is
+not permitted. That is a declining of trademark rights of the kind AGPL
+section 7(e) allows, and it restricts nothing the AGPL grants you over the
+code.
+
+The fonts inside the TeX Live tree — Computer Modern, Latin Modern, the TeX
+Gyre family and others — are third-party material under their own licences,
+not brand assets.

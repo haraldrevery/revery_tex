@@ -59,7 +59,12 @@ const JOBS = [
     // it was until this script did.
     files: [
       { src: 'build/pdf.min.mjs', dst: 'pdf.mjs' },
-      { src: 'build/pdf.worker.min.mjs', dst: 'pdf.worker.mjs' }
+      { src: 'build/pdf.worker.min.mjs', dst: 'pdf.worker.mjs' },
+      // Apache-2.0 section 4(a): the licence has to travel with the copy. The
+      // minified builds carry only an @licstart comment, which is a pointer,
+      // not the text -- so without this line the shipped pdf.js had no licence
+      // at all. KaTeX above was already right; this was the asymmetry.
+      { src: 'LICENSE', dst: 'LICENSE' }
     ],
     // cmaps decode CJK encodings; standard_fonts substitute the 14 base fonts
     // a PDF may reference without embedding. Both are loaded on demand by

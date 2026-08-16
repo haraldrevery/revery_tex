@@ -37,9 +37,17 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "../LICENSE": "LICENSE",
+      "../LICENSE-APACHE": "LICENSE-APACHE",
+      "../LICENSE-ASSETS": "LICENSE-ASSETS",
+      "../NOTICE": "NOTICE",
+      "../font/FONT-LICENSE.txt": "FONT-LICENSE.txt"
+    },
     "publisher": "Harald Revery",
     "homepage": "https://haraldrevery.com",
-    "license": "Apache-2.0",
+    "license": "AGPL-3.0-or-later",
+    "licenseFile": "../LICENSE",
     "category": "Productivity",
     "shortDescription": "Local-first LaTeX editor",
     "longDescription": "Edit, compile and preview LaTeX entirely on your own machine. Bundles TeX Live 2026 compiled to WebAssembly, so there is no server, no account and no network.",

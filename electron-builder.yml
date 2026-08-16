@@ -27,8 +27,15 @@ asar: false
 # grew sevenfold is the failure being prevented here.
 files:
   - package.json
+  # AGPL section 6 requires the licence and the written source offer to travel
+  # with the binary, and Apache section 4(d) requires NOTICE. FONT-LICENSE.txt
+  # is listed by hand because font/ is otherwise entirely outside this
+  # whitelist -- only www/fonts/ ships, and that carries no terms.
   - LICENSE
+  - LICENSE-APACHE
+  - LICENSE-ASSETS
   - NOTICE
+  - font/FONT-LICENSE.txt
   - electron/**/*
   - www/**/*
   - "!www/engine/busytex${/*}"
