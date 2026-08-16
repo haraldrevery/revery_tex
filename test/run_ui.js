@@ -3057,6 +3057,54 @@ async function main() {
       /✓/.test(backendFix.status) && backendFix.noticeHidden,
       `${offered.issues} → ${backendFix.issues} · ${backendFix.status}`);
 
+    /* ── Clear empties both tabs ────────────────────────────────────── */
+    // Placed here because the compile above has just filled both of them with a
+    // real log and real diagnostics — clearing an already-empty panel would
+    // pass whatever the button did.
+    const beforeClear = await cdp.evaluate(`(() => ({
+      raw: document.getElementById('raw').children.length,
+      issues: document.querySelectorAll('#issues .issue').length,
+      meta: document.getElementById('logmeta').textContent,
+      count: document.getElementById('issuecount').textContent
+    }))()`, true);
+    await realClick(cdp, `document.getElementById('clearlog')`);
+    await sleep(80);
+    const afterClear = await cdp.evaluate(`(() => ({
+      raw: document.getElementById('raw').children.length,
+      issues: document.querySelectorAll('#issues .issue').length,
+      empty: !!document.querySelector('#issues .empty'),
+      meta: document.getElementById('logmeta').textContent,
+      count: document.getElementById('issuecount').textContent
+    }))()`, true);
+
+    check('there was something to clear', beforeClear.raw > 0,
+      `${beforeClear.raw} log lines, ${beforeClear.issues} issues`);
+    check('Clear empties the raw log', afterClear.raw === 0,
+      `${beforeClear.raw} → ${afterClear.raw}`);
+    // Both tabs, not the one in front: a count still claiming issues over an
+    // empty body is exactly the disagreement one button has to avoid.
+    check('and the Issues tab with it, counts included',
+      afterClear.issues === 0 && afterClear.empty &&
+      afterClear.meta === '' && afterClear.count === '',
+      `issues ${beforeClear.issues} → ${afterClear.issues}, ` +
+      `meta "${afterClear.meta}", count "${afterClear.count}"`);
+
+    // The panel head has no overflow rule, so a fourth button beside a long
+    // "20001 lines" is what would push Hide off the end.
+    const narrow = await cdp.evaluate(`(() => {
+      document.getElementById('logmeta').textContent = '20001 lines';
+      const head = document.querySelector('.panelhead').getBoundingClientRect();
+      const hide = document.getElementById('togglepanel').getBoundingClientRect();
+      const clear = document.getElementById('clearlog').getBoundingClientRect();
+      document.getElementById('logmeta').textContent = '';
+      return { headRight: head.right, hideRight: hide.right, clearRight: clear.right,
+               hideWidth: hide.width };
+    })()`, true);
+    check('Clear and Hide stay inside the panel head at a long line count',
+      narrow.hideRight <= narrow.headRight + 1 && narrow.hideWidth > 0 &&
+      narrow.clearRight <= narrow.headRight + 1,
+      `hide ends ${narrow.hideRight.toFixed(0)} of ${narrow.headRight.toFixed(0)}`);
+
     /* ── the Legal page ─────────────────────────────────────────────── */
     // Not cosmetic. This application links an AGPL-3.0 component, so a hosted
     // copy must offer its corresponding source to everyone who loads it, and

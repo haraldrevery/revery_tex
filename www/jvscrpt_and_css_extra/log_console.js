@@ -235,6 +235,15 @@ export function initLogConsole({ onGotoLine } = {}) {
   $('togglepanel').onclick = () => togglePanel();
   $('copylog').onclick = () => navigator.clipboard?.writeText(logText());
   $('savelog').onclick = () => download(new Blob([logText()], { type: 'text/plain' }), 'compile.log');
+  // Both tabs, never just the one in front. They are two views of the same
+  // compile, and clearing only the visible one would leave the other tab's count
+  // insisting on issues its body no longer shows.
+  //
+  // No confirm(): unlike deleting a file, none of this is the user's own work —
+  // a recompile reproduces all of it. And not disabled when empty, matching Copy
+  // and Download beside it; knowing when it is empty would cost a DOM write per
+  // logged line, which is the one thing rawLog() is careful about.
+  $('clearlog').onclick = () => { clearLog(); setIssues([]); };
   // Clicking the status line goes where the news is.
   $('status').onclick = () => showTab(hasErrors() ? 'issues' : 'raw');
 

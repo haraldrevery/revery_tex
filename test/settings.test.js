@@ -51,6 +51,23 @@ test('defaults apply when nothing is stored', async () => {
   assert.equal(dom.attrs.get('data-pdf-theme'), 'off');
 });
 
+test('renaming the PDF render labels did not move the stored values', async () => {
+  // The row is now "PDF render — Original" where it used to say "PDF preview —
+  // Off", but only the display strings changed. If the value had been renamed
+  // with the label, every stored 'off' would fall back to the default on load —
+  // silent, and invisible until someone with a saved preference updated.
+  const { mod, dom } = await load({ pdfTheme: 'off' });
+  mod.applyAll();
+  assert.equal(mod.settings.pdfTheme, 'off', 'a stored "off" must survive the relabel');
+  assert.equal(dom.attrs.get('data-pdf-theme'), 'off');
+  // And the same for a non-default one, which is the case that would actually
+  // be noticed.
+  const dark = await load({ pdfTheme: 'dark' });
+  dark.mod.applyAll();
+  assert.equal(dark.mod.settings.pdfTheme, 'dark');
+  assert.equal(dark.dom.attrs.get('data-pdf-theme'), 'dark');
+});
+
 test('the PDF preview mode reaches the attribute the stylesheet keys off', async () => {
   // The whole feature is one CSS selector on [data-pdf-theme]; if the attribute
   // does not arrive, nothing else about it is observable.

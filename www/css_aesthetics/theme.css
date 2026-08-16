@@ -665,8 +665,9 @@ body.dragging * { user-select:none !important }
 /* The one variable-length item in a pane head gives way first, the same way
    .docname does in the topbar. Without it a long path pushes the editor pane's
    − / + buttons out of the row — .panehead does not clip, so they would leave
-   the pane rather than being cut off. */
-#editortitle { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+   the pane rather than being cut off. #logmeta is the same case in the log
+   panel: "20001 lines" beside four buttons is what pushes Hide off the end. */
+#editortitle, #logmeta { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
 
 /* ── file tree ──────────────────────────────────────────────────────── */
 #filetree { flex:1; overflow:auto; padding:4px 0 }

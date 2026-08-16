@@ -167,16 +167,25 @@ export const SCHEMA = [
     // The value is an identifier and the filter lives in the stylesheet, the
     // same rule the font stacks and the backgrounds follow.
     //
-    // Off by default: inverting a photograph turns it into a negative, and that
-    // is not something to do to someone's figures uninvited.
+    // Original by default: inverting a photograph turns it into a negative, and
+    // that is not something to do to someone's figures uninvited.
     // Grayscale belongs on this list rather than beside it as a toggle of its
     // own. It answers "how will this print", and the answer is a white page
     // with black ink — so composing it with the dark inversion would show
     // something no printer produces. One list means no combination to define,
     // and no second attribute for the stylesheet to resolve against this one.
-    key: 'pdfTheme', label: 'PDF preview', def: 'off', ui: 'submenu', group: 'preview',
+    //
+    // "PDF render", not "PDF preview", and "Original", not "Off". This setting
+    // is how the page is displayed, but the old pair read as "PDF preview —
+    // Off", which sounds like the preview itself is switched off. Both are
+    // display strings only: the key stays `pdfTheme` and the value stays `off`,
+    // because a stored value that is not among the declared options is discarded
+    // on load — renaming it would silently reset every existing user, the trap
+    // spelled out on `engineSource` below. `data-pdf-theme="off"` and the
+    // stylesheet rules keyed off it are untouched for the same reason.
+    key: 'pdfTheme', label: 'PDF render', def: 'off', ui: 'submenu', group: 'preview',
     options: [
-      { label: 'Off', value: 'off' },
+      { label: 'Original', value: 'off' },
       { label: 'Dark', value: 'dark' },
       { label: 'Follow theme', value: 'auto' },
       { label: 'Grayscale', value: 'gray' }

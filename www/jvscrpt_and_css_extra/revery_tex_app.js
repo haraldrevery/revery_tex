@@ -232,7 +232,9 @@ function settingsMenuSpec() {
   rows.push({ type: 'divider' });
   rows.push({
     type: 'note',
-    label: 'The preview is a rendered PDF, so its typography comes from the document, not from here.'
+    // "Rendered PDF", to agree with the PDF render row above it: the menu should
+    // not call one thing two names in adjacent rows.
+    label: 'The rendered PDF takes its typography from the document, not from here.'
   });
   if (NativeTexEngine.available(NativeAPI)) {
     rows.push({
