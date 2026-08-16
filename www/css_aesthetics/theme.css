@@ -22,7 +22,7 @@
  * tree, the gutter's line numbers, the log's tab labels, a submenu's current
  * value, and every .menu-note, which is prose at the smallest size in the file.
  * --text-muted failed outright in paper and forest.
- *
+ *oragnge
  * They are now solved to >= 7:1 (muted) and >= 4.5:1 (dim) against every resting
  * background that theme uses — --bg, --bg-panel and --menu-bg — keeping each
  * theme's own hue. The 7-vs-4.5 gap is what preserves the hierarchy: dim is
@@ -100,9 +100,9 @@
   /* muted 7.0-7.5:1 · dim 4.5-4.7:1 */
   --text:#2f2820; --text-muted:rgba(55,38,18,.82); --text-dim:rgba(55,38,18,.67);
   --accent:rgba(176,95,51,.55); --scrollbar:rgba(110,80,40,.14); --menu-bg:#ece5d6;
-  --ok:#4a7a3a; --warn:#8a6d1f; --err:#a33a2a;
+  --ok:#4a7a3a; --warn:#6f5613; --err:#a33a2a;
   --sel:rgba(110,80,40,.22);
-  --tex-command:#8a5a2a; --tex-env:#7a4a6a; --tex-math:#9a6a1a; --tex-arg:#4a6a3a;
+  --tex-command:#975b11; --tex-env:#7a4a6a; --tex-math:#9f6200; --tex-arg:#4a6a3a;
 }
 [data-theme="forest"] {
   --bg:#0e1a11; --bg-panel:#152019; --bg-hover:#1d2d22;

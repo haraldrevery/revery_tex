@@ -132,6 +132,43 @@ test('references use the right command per kind', async () => {
   assert.equal(reference('table', 'tab:a', 0).insert, '\\ref{tab:a}');
 });
 
+test('cleveref replaces the command, but never for a citation', async () => {
+  const { reference } = await mod();
+  assert.equal(reference('figure', 'fig:a', 0, { cref: 'cref' }).insert, '\\cref{fig:a}');
+  assert.equal(reference('table', 'tab:a', 0, { cref: 'Cref' }).insert, '\\Cref{tab:a}');
+  // \eqref gives up to \cref: both number the same way, and \cref adds the "eq."
+  assert.equal(reference('equation', 'eq:x', 0, { cref: 'cref' }).insert, '\\cref{eq:x}');
+  // cleveref is for labelled elements. \cite is not one, and a \cref{smith2020}
+  // would compile to a broken reference rather than to a citation.
+  assert.equal(reference('citation', 'smith2020', 0, { cref: 'Cref' }).insert, '\\cite{smith2020}');
+  // No opts at all must behave exactly as before.
+  assert.equal(reference('figure', 'fig:a', 0).insert, '\\ref{fig:a}');
+});
+
+test('the cursor decides \\cref from \\Cref', async () => {
+  const { startsSentence } = await mod();
+  // Sentence starts.
+  assert.equal(startsSentence(''), true, 'start of document');
+  assert.equal(startsSentence('   \n  '), true, 'nothing but whitespace');
+  assert.equal(startsSentence('The result holds. '), true, 'after a full stop');
+  assert.equal(startsSentence('Does it? '), true);
+  assert.equal(startsSentence('It does! '), true);
+  assert.equal(startsSentence('End of para.\n\n'), true, 'paragraph break');
+  assert.equal(startsSentence('No stop here\n\n  '), true, 'blank line is enough on its own');
+  // A sentence can end inside a closing delimiter.
+  assert.equal(startsSentence('(as shown there.) '), true);
+  assert.equal(startsSentence('the value is $x$. '), true);
+  // Mid-sentence.
+  assert.equal(startsSentence('as shown in '), false);
+  assert.equal(startsSentence('see the plot in\n'), false, 'a single newline is not a break');
+  assert.equal(startsSentence('compare with, '), false);
+  assert.equal(startsSentence('in \\emph{fig} '), false);
+  // The documented false positive: an abbreviation reads as a sentence end. It
+  // costs one keystroke, and is pinned here so it is a known cost rather than a
+  // surprise.
+  assert.equal(startsSentence('see e.g. '), true, 'known heuristic limit');
+});
+
 /* ── escaping ────────────────────────────────────────────────────────── */
 
 test('a caption escapes what is always an error in text', async () => {

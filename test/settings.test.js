@@ -104,6 +104,14 @@ test('the log panel sits under the editor by default', async () => {
   assert.equal(mod.settings.panelPlacement, 'window');
 });
 
+test('cleveref references are on by default', async () => {
+  const { mod } = await load(undefined);
+  assert.equal(mod.settings.crefReferences, true);
+  assert.equal(mod.set('crefReferences', false), true);
+  assert.equal(mod.set('crefReferences', 'yes'), false, 'undeclared values must be refused');
+  assert.equal(mod.settings.crefReferences, false);
+});
+
 test('the outline scale is applied as its own property', async () => {
   // Scoped to #outline in the stylesheet: the file tree uses the same .node
   // class, and scaling it too is the failure this setting is one selector away

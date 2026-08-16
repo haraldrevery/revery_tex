@@ -204,9 +204,43 @@ export function switchBiblatexBackend(text) {
   return edit(at, at, '[backend=bibtex]');
 }
 
-/** `\ref{…}` / `\eqref{…}` / `\cite{…}` at the cursor. */
-export function reference(kind, key, at) {
-  const cmd = { equation: 'eqref', citation: 'cite' }[kind] || 'ref';
+/**
+ * Whether an insertion at the end of `before` begins a sentence.
+ *
+ * Decides `\Cref` ("Figure 1 shows…") from `\cref` ("…see fig. 1"), which is the
+ * one thing cleveref cannot work out for itself. True at the start of the
+ * document, after a paragraph break, and after `.` `!` `?` — looking back past
+ * whitespace, and past the `}` `)` `$` that a sentence can legitimately end
+ * inside before its full stop.
+ *
+ * A heuristic, deliberately. "e.g." and "Fig. 1." read as sentence ends and will
+ * produce a capital that is wrong; that costs one keystroke, where the reverse
+ * default costs one at every real sentence start. Nothing here can produce a
+ * command that fails to compile, which is what keeps it worth guessing at all.
+ */
+export function startsSentence(before) {
+  const s = String(before ?? '');
+  // A comment runs to the end of its line, so what precedes the cursor on a
+  // commented line is not prose the sentence continues from.
+  const tail = s.replace(/\s+$/, '');
+  if (!tail) return true;                                  // start of document
+  // A blank line between them is a paragraph break, whatever ended the last one.
+  if (/\n[^\S\n]*\n\s*$/.test(s)) return true;
+  return /[.!?][)\]}$'"]*$/.test(tail);
+}
+
+/**
+ * `\ref{…}` / `\eqref{…}` / `\cite{…}` at the cursor, or cleveref's `\cref`.
+ *
+ * `opts.cref` is `'cref'`, `'Cref'` or null, and is decided by the caller: only
+ * it knows whether the document loads cleveref, and where in a sentence the
+ * cursor sits. A citation is never a `\cref` — cleveref handles labelled
+ * elements, and `\cite` is not one of them.
+ */
+export function reference(kind, key, at, opts = {}) {
+  const cmd = opts.cref && kind !== 'citation'
+    ? opts.cref
+    : ({ equation: 'eqref', citation: 'cite' }[kind] || 'ref');
   const insert = `\\${cmd}{${key}}`;
   return { from: at, to: at, insert, cursor: at + insert.length };
 }

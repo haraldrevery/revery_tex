@@ -713,6 +713,95 @@ async function main() {
       await cdp.evaluate(`!document.body.classList.contains('dragging') &&
                           document.body.style.cursor === ''`, true));
 
+    /* ── undo cannot leave the file it belongs to ───────────────────── */
+    //
+    // This was a data-loss bug, not a cosmetic one. There used to be a single
+    // EditorState created with an empty document, and openFile() replaced its
+    // text with an ordinary dispatch — so every file open pushed a "replace
+    // everything" change onto one shared undo stack. Holding Ctrl+Z walked back
+    // through it into the *previous* file's text and finally into the original
+    // empty document, all under the current file's name, while the update
+    // listener wrote each step into project.files and marked the file modified.
+    // Ctrl+S then saved an empty file over the user's document.
+    //
+    // Undo is the one key people press without looking, so this is asserted
+    // rather than left to a comment: each file gets its own state, and undo can
+    // only reach that file's own oldest edit.
+    const undoWalk = await cdp.evaluate(`(async () => {
+      const T = window.__reveryTexTest;
+      const rows = () => [...document.querySelectorAll('#filetree .node[data-path]')];
+      const open = (frag) => {
+        const r = rows().find(n => n.dataset.path.includes(frag));
+        r.click();
+        return r.dataset.path;
+      };
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+      const a = open('cv_teknisk_fysik_en');
+      await sleep(60);
+      const aFirst = T.view().state.doc.line(1).text;
+      T.view().dispatch({ changes: { from: 0, insert: '%% MARKER-A\\n' } });
+      await sleep(600);                       // past CodeMirror's grouping window
+
+      const b = open('personligt_brev_sv');
+      await sleep(60);
+      const bFirst = T.view().state.doc.line(1).text;
+      T.view().dispatch({ changes: { from: 0, insert: '%% MARKER-B\\n' } });
+      await sleep(600);
+
+      // Hold Ctrl+Z well past the point that used to empty the document.
+      for (let i = 0; i < 15; i++) window.CM.undo(T.view());
+
+      const doc = T.view().state.doc.toString();
+      return {
+        a, b, aFirst, bFirst,
+        empty: doc.length === 0,
+        first: T.view().state.doc.line(1).text,
+        sawOtherFile: doc.includes('MARKER-A'),
+        stillHasOwnEdit: doc.includes('MARKER-B'),
+        title: document.getElementById('editortitle').textContent,
+        dirty: rows().filter(n => n.classList.contains('dirty')).map(n => n.dataset.path)
+      };
+    })()`, true);
+
+    check('undo never empties the document', !undoWalk.empty);
+    check('undo stops at the open file’s own oldest edit',
+      undoWalk.first === undoWalk.bFirst,
+      `first line ${JSON.stringify(undoWalk.first)} vs ${JSON.stringify(undoWalk.bFirst)}`);
+    check('undo cannot pull another file’s text into this one',
+      !undoWalk.sawOtherFile);
+    check('and it did undo this file’s own edit', !undoWalk.stillHasOwnEdit);
+    check('the title still names the file that is shown',
+      undoWalk.title === undoWalk.b, `${undoWalk.title} vs ${undoWalk.b}`);
+    // The consequence that made this data loss: a file nobody typed in must not
+    // come back modified, because Save writes every file that is.
+    check('no file is left modified that was not edited',
+      undoWalk.dirty.every(p => p === undoWalk.a || p === undoWalk.b),
+      `dirty: ${undoWalk.dirty.join(', ') || 'none'}`);
+
+    // Per-file history is the other half: coming back must not have lost it.
+    const undoReturn = await cdp.evaluate(`(async () => {
+      const T = window.__reveryTexTest;
+      const open = (frag) => [...document.querySelectorAll('#filetree .node[data-path]')]
+        .find(n => n.dataset.path.includes(frag)).click();
+      open('cv_teknisk_fysik_en');
+      await new Promise(r => setTimeout(r, 60));
+      const before = T.view().state.doc.toString().includes('MARKER-A');
+      window.CM.undo(T.view());
+      const after = T.view().state.doc.toString().includes('MARKER-A');
+      // Put the main document back in the editor: everything below this point
+      // works on whatever file is open, starting with the table builder.
+      open('cv_harald_thirslund_sv');
+      await new Promise(r => setTimeout(r, 60));
+      return { before, after,
+               restored: document.getElementById('editortitle').textContent };
+    })()`, true);
+    check('switching away and back keeps that file’s undo history',
+      undoReturn.before && !undoReturn.after,
+      `marker present ${undoReturn.before}, undone ${!undoReturn.after}`);
+    check('and the main document is back in the editor for what follows',
+      /cv_harald_thirslund_sv/.test(undoReturn.restored), undoReturn.restored);
+
     /* ── the table builder ──────────────────────────────────────────── */
     // Before the formatting block, which replaces the whole cv document with a
     // test sentence — the compile below needs a real document.
@@ -1727,9 +1816,31 @@ async function main() {
     check('growing a card re-fits the maths inside it',
       refEq.refit?.hadOne && refEq.refit.after > refEq.refit.before,
       `scale ${refEq.refit?.before} → ${refEq.refit?.after}`);
-    // amsmath is in this document's preamble, so \eqref exists. Without it the
-    // menu must fall back to \ref, which is defined everywhere.
-    check('picking one inserts an \\eqref', /\\eqref\{[^}]+\}$/.test(refEq.tail || ''), refEq.tail);
+    // This document loads cleveref (main.tex, after hyperref), so \cref wins:
+    // it numbers as \eqref does and supplies the "eq." the author would type.
+    check('picking one inserts a \\cref on a cleveref document',
+      /\\[cC]ref\{[^}]+\}$/.test(refEq.tail || ''), refEq.tail);
+
+    // With the setting off, the same row must fall back to the command the
+    // preamble actually justifies — \eqref here, because amsmath is loaded, and
+    // \ref in a document without it. This is the gate that stops the menu
+    // emitting a command the document cannot compile.
+    const refEqPlain = await cdp.evaluate(`(async () => {
+      const s = await import('./jvscrpt_and_css_extra/settings.js');
+      s.set('crefReferences', false);
+      const view = window.__reveryTexTest.view();
+      view.dispatch({ selection: { anchor: view.state.doc.length } });
+      document.getElementById('toolbox').click();
+      [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /reference an equation/i.test(b.textContent)).click();
+      await new Promise(r => setTimeout(r, 500));
+      document.querySelector('.dlg.picker .picker-card')?.click();
+      await new Promise(r => setTimeout(r, 100));
+      s.set('crefReferences', true);
+      return view.state.doc.toString().slice(-24);
+    })()`, true);
+    check('turning the setting off restores \\eqref',
+      /\\eqref\{[^}]+\}$/.test(refEqPlain || ''), refEqPlain);
 
     /* ── the file tree, and changing it ─────────────────────────────── */
     // On the fixtures, which are read-only: the operations run in memory, and

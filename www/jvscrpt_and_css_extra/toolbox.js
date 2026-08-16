@@ -16,6 +16,19 @@ import { slug, uniqueLabel, figureBlock, equationBlock } from './latex_snippets.
 import { openDialog } from './dialog.js';
 import { openPicker } from './picker.js';
 import { renderMath, mathSource, shrinkToFit } from './math_preview.js';
+import * as settings from './settings.js';
+
+/**
+ * Whether references should be inserted as cleveref's `\cref`.
+ *
+ * Both halves have to hold: the setting is on, *and* the document actually loads
+ * cleveref. Emitting `\cref` into a document without the package is a reference
+ * that does not compile, which is the failure the booktabs and `\eqref` gates
+ * already exist to prevent. The capitalisation is not decided here — that needs
+ * the cursor, which is editor_actions.js's business.
+ */
+const crefFor = (packages) =>
+  settings.settings.crefReferences !== false && packages.includes('cleveref');
 
 /** One line of an environment's source, for the tooltip on a reference row. */
 function snippet(env, lines = 3) {
@@ -70,6 +83,7 @@ function insertTableDialog(view, project) {
 function tableReferenceRow(view, project) {
   const tables = environmentsOfKind(project(), 'table');
   const labelled = tables.filter(t => t.label);
+  const cref = crefFor(projectIndex(project()).packages);
 
   if (!tables.length) return { type: 'note', label: 'no tables to reference yet' };
   if (!labelled.length) {
@@ -85,7 +99,7 @@ function tableReferenceRow(view, project) {
     actions: labelled.map(t => ({
       label: tableRowLabel(t),
       title: `${t.label} — ${t.file}:${t.startLine}\n\n${snippet(t)}`,
-      run: () => insertReference(view(), 'table', t.label)
+      run: () => insertReference(view(), 'table', t.label, cref)
     }))
   };
 }
@@ -163,6 +177,7 @@ function insertFigurePicker(view, project) {
 function referenceFigurePicker(view, project) {
   const p = project();
   const figures = environmentsOfKind(p, 'figure').filter(f => f.label);
+  const cref = crefFor(projectIndex(p).packages);
 
   openPicker({
     title: 'Reference a figure',
@@ -175,7 +190,7 @@ function referenceFigurePicker(view, project) {
       paintThumb(p, path, mount, blobUrl);
     },
     empty: 'no labelled figures to reference',
-    onPick: (f) => insertReference(view(), 'figure', f.label)
+    onPick: (f) => insertReference(view(), 'figure', f.label, cref)
   });
 }
 
@@ -221,6 +236,9 @@ function referenceEquationPicker(view, project) {
   const all = environmentsOfKind(p, 'equation');
   const labelled = all.filter(e => e.label);
   const kind = refKindForEquations(ix.packages);
+  // cleveref wins over \eqref where both are available: it numbers the same way
+  // and adds the "eq." the author would otherwise type.
+  const cref = crefFor(ix.packages);
 
   openPicker({
     title: 'Reference an equation',
@@ -237,7 +255,7 @@ function referenceEquationPicker(view, project) {
     empty: all.length
       ? `${all.length} equation(s), none labelled — add a \\label to reference one`
       : 'no equations to reference yet',
-    onPick: (e) => insertReference(view(), kind, e.label)
+    onPick: (e) => insertReference(view(), kind, e.label, cref)
   });
 }
 
@@ -423,6 +441,24 @@ export function insertRows({ view, project }) {
 }
 
 /**
+ * Which command the reference rows above will actually insert.
+ *
+ * Said out loud because it differs per document: the same row emits `\cref` in a
+ * document that loads cleveref and `\ref` in one that does not, and a menu whose
+ * behaviour changes silently underneath you is worse than one that explains.
+ */
+function referenceNote(project) {
+  const p = project();
+  if (!p) return null;
+  return {
+    type: 'note',
+    label: crefFor(projectIndex(p).packages)
+      ? 'References use \\cref — cleveref supplies the "Figure" or "Table" prefix.'
+      : 'This document does not load cleveref, so references are inserted as \\ref.'
+  };
+}
+
+/**
  * The Toolbox button's menu: inserting first, since that is why it is there.
  *
  * Commenting is here as well as in the right-click menu, not instead of it. The
@@ -432,6 +468,7 @@ export function insertRows({ view, project }) {
 export function toolboxRows(ctx) {
   return [
     ...insertRows(ctx),
+    ...[referenceNote(ctx.project)].filter(Boolean),
     { type: 'divider' },
     { type: 'note', label: 'Formatting applies to the selection.' },
     ...formattingRows(ctx.view),

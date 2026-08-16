@@ -66,11 +66,24 @@ let lastPdf = null;
 let preview = null;
 let backupTimer = null;
 const syncTex = new SyncTex();
-// Set while openFile() replaces the document. Without it, loading a file marks
-// it modified — the update listener cannot tell a programmatic replacement from
-// typing — which would enable Save and schedule a crash backup for a file the
-// user never touched.
-let loadingDoc = false;
+
+/**
+ * One EditorState per file, so undo cannot leave the file it belongs to.
+ *
+ * There used to be a single state, created once with an empty document, and
+ * openFile() replaced its text with an ordinary dispatch. Every file open
+ * therefore pushed a "replace everything" change onto one shared undo stack, and
+ * Ctrl+Z walked back through it: first into the *previous file's* text, and
+ * finally into the original empty document — all of it under the current file's
+ * name. The update listener could not tell that from typing, so it wrote what
+ * landed there into project.files and marked the file modified. Ctrl+S then
+ * saved an empty file over the user's document. That is the whole reason this
+ * map exists; it is not an optimisation.
+ *
+ * Keeping the states rather than rebuilding them also keeps each file's cursor
+ * and scroll position, which the old whole-document replace threw away.
+ */
+const docStates = new Map();
 
 // Settings live in settings.js as one declarative table; this file only reads
 // values. Every control that writes one is elsewhere — the menu is built from
@@ -293,10 +306,17 @@ function gotoLine(n) {
 }
 
 // ── editor ─────────────────────────────────────────────────────────────
-function makeEditor() {
-  const state = CM.EditorState.create({
-    doc: '',
-    extensions: [
+
+/**
+ * The editor's extensions, rebuilt per document.
+ *
+ * A function rather than a shared array because each file gets its own
+ * EditorState — see docStates. Everything the closures below read (`project`,
+ * `currentPath`, `syncTex`, `preview`) is module-level and read when the event
+ * fires, so a per-file state behaves exactly as the single shared one did.
+ */
+function editorExtensions() {
+  return [
       CM.lineNumbers(),
       CM.highlightActiveLine(),
       CM.highlightActiveLineGutter(),
@@ -357,8 +377,12 @@ function makeEditor() {
           return true;
         }
       }),
+      // No `loadingDoc` guard any more, and none is needed: openFile() swaps
+      // documents with view.setState(), which builds no transaction and never
+      // reaches an updateListener. Loading a file cannot look like typing
+      // because it is no longer an edit at all.
       CM.EditorView.updateListener.of(u => {
-        if (u.docChanged && !loadingDoc && currentPath && project) {
+        if (u.docChanged && currentPath && project) {
           const f = project.files.get(currentPath);
           f.content = u.state.doc.toString();
           f.dirty = true;
@@ -370,24 +394,52 @@ function makeEditor() {
         // down does not rebuild the index once per character.
         if (u.docChanged || u.selectionSet) scheduleOutline();
       })
-    ]
+  ];
+}
+
+function makeEditor() {
+  return new CM.EditorView({
+    state: CM.EditorState.create({ doc: '', extensions: editorExtensions() }),
+    parent: $('editor')
   });
-  return new CM.EditorView({ state, parent: $('editor') });
 }
 
 function openFile(path) {
   if (!project) return;
   const f = project.files.get(path);
   if (!f || f.binary) return;
+
+  // Keep the state we are leaving, not the one this file was opened with.
+  // Transactions produce new state objects, so the entry stored at open time is
+  // the document *before* any editing — putting it back would lose the edits
+  // and, because it no longer matches project.files, silently defeat the cache
+  // check below and rebuild with no history at all.
+  if (currentPath && view) docStates.set(currentPath, view.state);
+
   currentPath = path;
   $('editortitle').textContent = path;
   refreshDirty();
-  loadingDoc = true;
-  try {
-    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: f.content } });
-  } finally {
-    loadingDoc = false;
+
+  let st = docStates.get(path);
+  // Rebuilt whenever the buffer moved underneath us — a save that reverted it, a
+  // crash-backup restore, setBuffer from the driver, the biber backend rewrite.
+  // Comparing the text is what makes a stale entry impossible rather than merely
+  // unlikely: there are four separate writers to project.files today and a fifth
+  // would not think to invalidate a cache. It costs one string compare, against
+  // a full-document replace on every open before.
+  if (!st || st.doc.toString() !== f.content) {
+    st = CM.EditorState.create({ doc: f.content, extensions: editorExtensions() });
   }
+  // setState, never dispatch. A dispatch would enter this file's undo history as
+  // an edit; setState replaces the state wholesale, so undo starts from the file
+  // as it was opened.
+  view.setState(st);
+  docStates.set(path, st);
+  // The new state carries its own fields, so the gutter is empty until the
+  // diagnostics are pushed into it again. They were never per-file before —
+  // switching files left the previous file's markers in the gutter.
+  pushDiagnosticsToGutter();
+
   for (const n of document.querySelectorAll('.node')) n.classList.toggle('active', n.dataset.path === path);
   refreshOutline();
 }
@@ -1033,6 +1085,11 @@ async function moveOne(from, to) {
   f.stamp = null;
   project.files.delete(from);
   project.files.set(to, f);
+  // The editor state goes with the file, so renaming does not cost the undo
+  // history of a file whose text has not changed.
+  const st = docStates.get(from);
+  docStates.delete(from);
+  if (st) docStates.set(to, st);
   if (project.main === from) project.main = to;
   if (currentPath === from) { currentPath = to; $('editortitle').textContent = to; }
 }
@@ -1139,6 +1196,7 @@ async function deleteEntry(path, isDir) {
     for (const p of doomed) {
       if (canWriteDisk() && NativeAPI.deleteFile) await NativeAPI.deleteFile(p);
       project.files.delete(p);
+      docStates.delete(p);          // nothing left for its undo history to be about
       if (p === currentPath) { currentPath = null; $('editortitle').textContent = 'no file'; }
     }
     if (isDir && canWriteDisk() && NativeAPI.deleteFile) {
@@ -1462,6 +1520,10 @@ async function loadFromDisk(root) {
     setStatus(`✗ ${err.message}`, 'err');
     return;
   }
+  // Cached states belong to the project that was open. Two projects can both
+  // have a main.tex, and reusing one's state for the other would hand over its
+  // undo history along with it.
+  docStates.clear();
 
   $('docname').textContent = project.main;
   projectSel.setOptions([{ label: project.key, value: project.key }]);
@@ -1481,6 +1543,7 @@ async function loadProject(key) {
   setStatus('loading project…', 'warn');
   const { project: loaded, patchLog } = await readProjectFromFixture(key);
   project = loaded;
+  docStates.clear();                // as in loadFromDisk, and for the same reason
 
   $('docname').textContent = project.main;
   refreshDirty();

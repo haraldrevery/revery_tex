@@ -252,6 +252,22 @@ export const SCHEMA = [
     // costs spellcheck suggestions, clipboard access and Look Up — real things,
     // and not obviously worth trading for a menu that also sits in the topbar.
     // Off by default means nobody loses them without choosing to.
+    // cleveref's \cref supplies the "Figure" / "Table" / "Eq." prefix itself, so
+    // the reference reads correctly without the author typing the word — and
+    // stays correct when a figure becomes a table. On by default, because in a
+    // document that loads cleveref a bare \ref is nearly always the wrong
+    // command.
+    //
+    // Honoured only where the document actually loads cleveref; elsewhere the
+    // pickers insert \ref exactly as before and say so. The menu never emits a
+    // command that would need a \usepackage line it cannot see — the same rule
+    // that gates booktabs rules and \eqref.
+    key: 'crefReferences', label: 'Cross-references', def: true, appliedBy: 'app',
+    ui: 'toggle', on: true, toggleLabel: 'Use \\cref where cleveref is loaded',
+    group: 'behaviour',
+    options: [{ label: 'On', value: true }, { label: 'Off', value: false }]
+  },
+  {
     key: 'contextToolbox', label: 'Right-click menu', def: 'browser', appliedBy: 'app',
     ui: 'toggle', on: 'toolbox', toggleLabel: 'Toolbox on right-click',
     group: 'behaviour',

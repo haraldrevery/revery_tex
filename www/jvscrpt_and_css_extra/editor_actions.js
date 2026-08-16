@@ -5,7 +5,7 @@
 // CodeMirror view and puts the cursor where the transform asked. Keeping the
 // two apart is what lets the interesting logic be tested without a browser.
 
-import { WRAPS, wrapSelection, insertBlock, reference } from './latex_snippets.js';
+import { WRAPS, wrapSelection, insertBlock, reference, startsSentence } from './latex_snippets.js';
 
 /** Apply a `{from, to, insert, cursor}` from latex_snippets to a view. */
 export function applyEdit(view, edit) {
@@ -43,14 +43,24 @@ export function insertBlockAtCursor(view, block) {
 }
 
 /**
- * `\ref` / `\eqref` / `\cite` at the cursor.
+ * `\ref` / `\eqref` / `\cite` at the cursor, or cleveref's `\cref` / `\Cref`.
  * Any selection is replaced: picking a reference with text selected means
  * "put it here instead", the same as typing would.
+ *
+ * `useCref` comes from the caller, which owns the project index and so knows
+ * whether cleveref is loaded. The *capitalisation* is decided here, because it
+ * depends on the cursor, and the view is this file's business — the same split
+ * that keeps `refKindForEquations` in toolbox.js. Only the last 200 characters
+ * are read: a sentence boundary is never further back than that, and a 500 kB
+ * document should not be turned into a string to place one reference.
  */
-export function insertReference(view, kind, key) {
+export function insertReference(view, kind, key, useCref = false) {
   if (!view) return false;
   const { from, to } = view.state.selection.main;
-  return applyEdit(view, { ...reference(kind, key, from), to });
+  const cref = useCref
+    ? (startsSentence(view.state.sliceDoc(Math.max(0, from - 200), from)) ? 'Cref' : 'cref')
+    : null;
+  return applyEdit(view, { ...reference(kind, key, from, { cref }), to });
 }
 
 /* ── clipboard ───────────────────────────────────────────────────────── */
