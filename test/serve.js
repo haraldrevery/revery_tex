@@ -214,6 +214,36 @@ const PROJECTS = {
     ]
   }
 ,
+  // The browser-safe rewrites of the two templates above. The point of these
+  // two rows is the *absence* of a `patches` array: `homework` only reaches a
+  // PDF because serve.js rewrites its fonts and logo in flight, and `book` only
+  // builds a bibliography because the app is told which backend to run. These
+  // compile as they sit on disk.
+  //
+  // Not added to ALL in run_phase0.js — the gate's contract is the five
+  // documents it already names. Run them by name:
+  //     npm run gate homework-new book-v3
+  'homework-new': {
+    dir: 'homework_template_new',
+    main: 'main.tex',
+    engine: 'xetex',
+    // 26 on a desktop TeX Live with TeX Gyre Termes, matching the parent's
+    // committed build. Left unpinned here until the browser number is known;
+    // the assertions that matter for this pair are in the log, not the count.
+    expectPages: null,
+    rerun: true,
+    note: 'homework_template with no patches: TeX Gyre instead of system fonts, PNG logo.'
+  },
+  'book-v3': {
+    dir: 'hrldrvry_book_templt_v3',
+    main: 'main.tex',
+    engine: 'xetex',
+    expectPages: null,
+    rerun: true,
+    makeindex: true,
+    bibtex: 'bibtex',
+    note: 'hrldrvry_book_templt_v2 with backend=bibtex, so bibtex8 builds the .bbl.'
+  },
   // Synthetic, and the one nothing covered: classic BibTeX, end to end.
   //
   // bibtex8 is compiled into busytex.wasm and wired into all three drivers, but
