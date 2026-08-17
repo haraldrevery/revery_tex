@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::Serialize;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 // Running the user's own TeX installation. Kept in its own module because it is
@@ -565,7 +565,40 @@ fn discard_backup(app: tauri::AppHandle, path: String, state: State<'_, RootPath
     Ok(())
 }
 
-/* ── entry point ─────────────────────────────────────────────────────── */
+/* ── closing the window ──────────────────────────────────────────────── */
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Close for real, after the frontend has decided it is safe to.
+///
+/// The `CloseRequested` handler below cancels a close and asks the webview
+/// instead; this is how the answer comes back. `AGREED_CLOSE` is what stops that
+/// from being a loop — the handler lets a close through when the flag is set,
+/// which is only ever set here.
+static AGREED_CLOSE: AtomicBool = AtomicBool::new(false);
+
+/// Whether the frontend has said it is listening for the close question.
+///
+/// **A close is only ever cancelled once this is set.** The failure being
+/// designed against is a window that cannot be closed at all: if the listener is
+/// never registered — a boot failure, a renderer that threw before it got that
+/// far, a future build without the global Tauri API — then cancelling every close
+/// would trap the user inside the app with no way out, which is a great deal
+/// worse than the missing warning this exists to add. Unarmed, the window closes
+/// exactly as it did before any of this.
+static GUARD_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// The frontend has registered its listener and will answer the close question.
+#[tauri::command]
+fn arm_close_guard() {
+    GUARD_ARMED.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn close_window(window: tauri::Window) -> Result<(), String> {
+    AGREED_CLOSE.store(true, Ordering::SeqCst);
+    window.close().map_err(|e| e.to_string())
+}
 
 /* ── system TeX ──────────────────────────────────────────────────────── */
 
@@ -626,7 +659,34 @@ fn main() {
             discard_backup,
             detect_tex,
             run_tex,
+            arm_close_guard,
+            close_window,
         ])
+        // `beforeunload` does not run when a native window is closed — the
+        // webview is torn down rather than navigated — so the unsaved-changes
+        // warning the browser build has was doing nothing at all here. Closing
+        // the window discarded every dirty buffer without a word.
+        //
+        // Every close is cancelled and handed to the frontend, which already
+        // knows what is unsaved and already has the wording (`unsavedWarning`).
+        // It asks, and calls `close_window` if the answer is yes. Asking in the
+        // webview rather than with a native dialog also keeps the capability
+        // manifest as it is: `dialog:allow-open` is granted for the folder
+        // picker, and a message dialog would mean widening it.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Both conditions fail open: an agreed close goes through, and so
+                // does one arriving before the frontend armed the guard.
+                if AGREED_CLOSE.load(Ordering::SeqCst) || !GUARD_ARMED.load(Ordering::SeqCst) {
+                    return;
+                }
+                api.prevent_close();
+                if window.emit("revery-tex://close-requested", ()).is_err() {
+                    AGREED_CLOSE.store(true, Ordering::SeqCst);
+                    let _ = window.close();
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running Revery TeX");
 }

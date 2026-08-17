@@ -75,6 +75,7 @@ rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-t
 │    dialog.js                    modal shell + form with a live preview       │
 │    picker.js                    lazy card strip: figures, by thumbnail       │
 │    file_tree.js                 paths → a nested tree; pure, no DOM          │
+│    tree_history.js              the Files panel's undo stack; pure, no DOM   │
 │    background_image.js          your own picture, resized into a data URL   │
 │  image_assets/                  background photographs — proprietary        │
 │    math_preview.js              KaTeX, loaded on first use                   │
@@ -167,6 +168,143 @@ source, because those paths are the author's text and come in several
 spellings. `referencesTo()` in `document_model.js` answers the question from the
 same include graph the outline is built from, so "what the document reads" and
 "what a move would break" cannot disagree.
+
+**Ctrl+Z undoes what can be undone, and nothing else.** Moves, renames, new
+folders and new files are recorded on a stack in `tree_history.js`; Ctrl+Y or
+Ctrl+Shift+Z replays them. Deletes and imports are **not**, and they clear the
+stack instead.
+
+That asymmetry is the design, not a gap. This panel writes to disk at the moment
+of the action rather than at Save, so an undo is a second real filesystem
+operation, and only some of them have an inverse that cannot lose anything. A
+move inverts to a move back — through `moveEntries()` itself, so an undo faces
+the main-document refusal, the collision checks and the `\include` warning
+exactly as a drag does, and cannot do something you could not have done by hand.
+`deleteFile` has no inverse on any of the five backends: there is no trash, and
+the bytes are gone. An "undo" that restored a delete by writing the copy still
+in memory would be a *new write* wearing the word undo, so the confirm goes on
+saying deletes cannot be undone, and means it.
+
+Clearing the stack rather than skipping the entry is the other half. An entry
+recorded before a delete describes files the delete may have taken, so leaving
+it reachable would let one more Ctrl+Z step straight past the delete and move
+paths that are no longer there.
+
+Every entry is checked against the project before it is applied and again
+afterwards, and is only consumed if the operation actually landed — so an
+inverse that gets refused can be retried, and one whose world has moved on
+refuses and clears the history rather than acting on a stale path. The single
+deletion undo performs is of a file it has confirmed is still empty *and* still
+carries the stamp it was written with: a buffer emptied after a save reads as
+unchanged by content alone, and removing it would take the saved copy too. The
+stack is session-only and cleared on project switch, because every check it
+makes compares against this session's reading of the folder.
+
+The shortcut is bound on `#sidebar` rather than globally. CodeMirror already
+binds Ctrl+Z at `Prec.high`, and requiring focus inside the panel means the
+event never reaches the tree's handler while the editor has it — the two cannot
+contend at all. `#sidebar` and not `#filetree` because the `+` button lives in
+the panel header, outside the tree. The tree's right-click menu carries Undo and
+Redo rows too, since a shortcut is neither discoverable nor reachable with a
+mouse.
+
+**Every operation puts focus back in the panel.** A menu row is a button inside a
+transient menu, and dismissing that menu removes the element focus is sitting on
+— so "New folder…" used to end with focus on `<body>`. That made the undo above
+*unreachable*: the shortcut is scoped to `#sidebar` on purpose, so it returned
+without acting and without saying anything, at exactly the moment someone reaches
+for it. `focusTreeRow()` is called after each recorded operation, and a UI check
+asserts focus lands in the panel with nothing focusing a row on the test's
+behalf. That last part is the point — the earlier version of the check called
+`.focus()` first and passed against the broken build.
+
+### Losing work, and the guards that stop it
+
+Most of these guards existed and did not fire. They are worth stating plainly,
+because a guard that reads as though it protects you is worse than none.
+
+**A bad import cannot take the project with it.** On the `web-zip` backend the
+IndexedDB store *is* the project — no folder behind it, no versioning, nothing to
+restore from — and `importZip` clears it. The `.tex` requirement lived in
+`readProjectFromDisk`, which runs *afterwards*, so importing the wrong archive
+erased the project and then failed to open the replacement. Every refusal now
+happens before `files.clear()`. The replace warning also lost its `if (project &&
+…)` guard: that skipped the question in exactly the state where it mattered, a
+project that failed to load leaving its files in storage while `project` was null.
+
+**A remembered main document belongs to one project.** `project.key` is the
+folder's *name* (`root.split('/').pop()`), so two folders called `thesis` share
+`mainByProject` — and that value decides what gets compiled, plus the engine,
+bibliography backend and `\makeindex` re-derived from it. Existence is not
+identity: every project has a `main.tex`. Entries now carry the root they were
+chosen for and are ignored when it does not match. Browser crash backups had the
+same disease and the same cure: they are keyed on a stable id resolved through
+`isSameEntry()` rather than the folder's name, so one project's unsaved text can
+no longer be offered as recovery for another's same-named file. The desktop
+shells were always safe here — they hash the absolute path.
+
+**A save conflict has a third answer.** Both original choices destroyed a version
+of the file, and being a modal, Escape silently meant *reload* — which discards
+the editor's text along with that file's undo history. "Leave it" now skips that
+one file, keeps the buffer dirty, and lets the rest of the save finish; it is
+what dismissal maps to. Aborting the whole save on one conflict, which is what
+used to happen, punished every other unsaved file for it.
+
+**Crash recovery is per file, and never discards on a dismissal.** One Cancel
+used to delete every backup at once, unpreviewed — and a backup whose file had
+since been deleted was thrown away rather than restored, which is precisely the
+case it existed for.
+
+**Nothing calls `window.confirm`.** Every yes/no question goes through `ask()` in
+`dialog.js`, which draws the app's own modal. This is the most serious of the
+three: on the Tauri desktop build a native `confirm()` is routed to the dialog
+plugin, whose `confirm` command the capability manifest does not grant. No prompt
+appeared, the raw log filled with `dialog.confirm not allowed. Command not
+found`, and the call yielded a Promise that never settles — **a Promise is
+truthy, so every `if (confirm(…))` in the app read as `if (true)`**. The delete
+prompt, the discard-unsaved-work prompt and the save-conflict prompt were all
+auto-accepted whatever the user did, and the conflict one chose *overwrite the
+file on disk* every time. `dialog:allow-confirm` does not rescue it — it is a
+deprecated alias registering no such command — and awaiting the native call
+instead would hang the shell forever. Drawing the dialog in the page fixes it
+everywhere at once, matches the reason the menus and pickers are not native
+either, and makes all three shells behave the same. `ask()` returns a promise, so
+**every caller must `await` it**, and Escape or the backdrop resolve `false` so a
+dismissed question keeps the work.
+
+**A native window close does not raise `beforeunload`.** The webview is torn
+down, not navigated, so the unsaved-changes warning the browser build has did
+nothing at all on the Tauri desktop build — closing the window discarded every
+dirty buffer without a word. `main.rs` now cancels every `CloseRequested`, asks
+the frontend, and closes only when it calls back through `close_window`. The
+question is asked *in the webview* rather than with a native dialog for two
+reasons: the wording is then the same sentence in all three shells, and
+`tauri/capabilities/default.json` grants `dialog:allow-open` for the folder
+picker only — a message dialog would mean widening it. The methods live on
+`native_api.js` and exist **only** on the Tauri backend; a shell that intercepts
+its own close does not get a method implying it needs telling.
+
+**The crash net covers every dirty file, not the one on screen.** It used to read
+`currentPath` inside its own two-second timer, which was wrong twice: no other
+edited file was ever backed up, and switching files inside that window meant the
+timer fired against the new file and the one just left was never written either.
+A crash took everything except whatever you happened to be sitting in, idle, at
+the time — and nothing said so.
+
+**A partial failure is never reported as success.** `deleteEntries`, `moveEntries`
+and `saveAll` each caught an error, said so, and were then overwritten by a green
+line on the way out, leaving the truth only in the log console. Each now reports
+what actually happened — `saveAll` names the file it stopped at and how many were
+written, and does its `refreshDirty()` in a `finally` so the dirty marks match
+the disk on both paths.
+
+**A folder that could not be removed is not called deleted.** Every backend's
+directory delete is non-recursive on purpose — `remove_dir`, `rmdirSync`,
+`removeEntry` without `recursive` — so a folder delete *cannot* destroy files the
+app never loaded. But that refusal was swallowed, and since the tree is drawn
+from `project.files` the row vanished anyway: the folder was reported deleted and
+was still there, holding whatever the walk skips (dotfiles, symlinks,
+`node_modules`). The row now stays and the status names it.
 
 ### Settings are a table, not a variable each
 

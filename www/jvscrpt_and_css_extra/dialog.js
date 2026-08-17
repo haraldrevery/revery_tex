@@ -30,6 +30,94 @@ export function dialogIsOpen() {
 }
 
 /**
+ * Ask a yes/no question, drawn by the app.
+ *
+ * **Nothing in this app calls `window.confirm`.** Two reasons, and the first is
+ * not a preference:
+ *
+ * On the Tauri desktop build a native `confirm()` is routed to the dialog
+ * plugin, whose `confirm` command the capability manifest does not grant — the
+ * raw log fills with "dialog.confirm not allowed. Command not found", no prompt
+ * ever appears, and the call yields a Promise that never settles. A Promise is
+ * truthy, so every `if (confirm(…))` in the app read as `if (true)` there: the
+ * delete prompt, the discard-unsaved-work prompt and the save-conflict prompt
+ * were all auto-accepted whatever the user clicked, and the conflict one chose
+ * "overwrite the file on disk" every time. `dialog:allow-confirm` does not
+ * rescue it either — that is a deprecated alias registering no such command.
+ *
+ * The second reason is the one the rest of this file already acts on: a native
+ * dialog arrives in the operating system's fonts and colours, in an app where
+ * every other control is themed.
+ *
+ * Drawing it here answers both, and makes the three shells behave identically
+ * instead of one of them silently agreeing to everything.
+ *
+ * Always `await` it.
+ */
+export async function ask(message) {
+  return askInPage(message);
+}
+
+/**
+ * A question with more than two answers.
+ *
+ * Some choices genuinely have three, and forcing them into OK/Cancel is how a
+ * dialog ends up with no safe exit — the save-conflict prompt was "overwrite the
+ * file on disk" or "throw away my edits", with Escape silently meaning the
+ * second. Every real question there has a third answer: leave it alone and let
+ * me look.
+ *
+ * @param {string} message
+ * @param {Array<{value: *, label: string, primary?: boolean}>} choices
+ * @param {*} dismissed  what Escape, the backdrop and the close button mean.
+ *   Always the answer that changes nothing.
+ */
+export function askChoice(message, choices, dismissed) {
+  return new Promise((resolve) => {
+    let answered = false;
+    const settle = (v) => { if (!answered) { answered = true; resolve(v); } };
+
+    const modal = openModal({ title: 'Revery TeX', onClose: () => settle(dismissed) });
+
+    const text = document.createElement('p');
+    text.className = 'dlg-ask';
+    text.textContent = message;          // textContent: the message carries paths
+    modal.body.appendChild(text);
+
+    const buttons = choices.map((c) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      if (c.primary) b.className = 'primary';
+      b.textContent = c.label;
+      b.onclick = () => { settle(c.value); modal.close(); };
+      return b;
+    });
+    modal.foot.append(...buttons);
+    modal.panel.appendChild(modal.foot);
+
+    // Focus whichever choice means "change nothing", so Enter on a dialog nobody
+    // read is never the destructive one. Falls back to the first button.
+    const safe = choices.findIndex(c => c.value === dismissed);
+    (buttons[safe >= 0 ? safe : 0])?.focus();
+  });
+}
+
+/**
+ * The modal `ask` is built from.
+ *
+ * Cancel is the default and the safe answer: Escape, the backdrop and the close
+ * path all resolve `false`, so a question about discarding work that is
+ * dismissed rather than answered keeps the work — which is the opposite of what
+ * the broken native path did.
+ */
+function askInPage(message) {
+  return askChoice(message, [
+    { value: false, label: 'Cancel' },
+    { value: true, label: 'OK', primary: true }
+  ], false);
+}
+
+/**
  * The modal shell: backdrop, title, Escape, focus trap, focus restored on close.
  *
  * Everything modal in the app goes through this — the table form below and the

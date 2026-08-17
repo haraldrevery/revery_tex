@@ -213,6 +213,15 @@ button:focus-visible { border-color:var(--accent); color:var(--text);
   box-shadow:0 0 0 2px var(--bg), 0 0 0 3px var(--accent) }
 button:disabled { opacity:.35; cursor:default }
 button.primary { color:var(--text); border-color:var(--accent) }
+/* The outline toggle says it is on by filling. The label used to grow a ✓,
+   which changed its width as it changed state, and #topbar clips from the
+   right. The fill is accent-tinted rather than the neutral --bg-hover that
+   :hover above already paints, so an off button under the pointer does not
+   read as an on one; the border is deliberately left alone, so hovering an on
+   button still visibly responds. */
+#outlinetoggle[aria-pressed="true"] {
+  background:color-mix(in srgb, var(--accent) 22%, var(--bg-hover)); color:var(--text);
+}
 
 #topbar {
   height:2.4rem; flex:none; display:flex; align-items:center; gap:.55rem;
@@ -366,6 +375,13 @@ button.primary { color:var(--text); border-color:var(--accent) }
   color:var(--text-dim);
 }
 .dlg-body { padding:.5rem .9rem .3rem .9rem; display:flex; flex-direction:column; gap:.3rem }
+/* The question `ask()` draws. `pre-wrap` is load-bearing: every message is
+   composed with blank lines between the statement and the question, and
+   collapsing them runs a warning and its consequences into one paragraph. */
+.dlg-ask {
+  margin:0; padding:.2rem 0 .4rem 0; max-width:44ch;
+  white-space:pre-wrap; line-height:1.45; color:var(--text);
+}
 .dlg-row { display:flex; align-items:center; gap:.6rem; min-height:1.8rem }
 .dlg-label {
   flex:none; width:6.5rem; font-size:var(--fs-xs); color:var(--text-dim);
@@ -717,6 +733,23 @@ body.dragging * { user-select:none !important }
    The focus ring is deliberately kept for that reason. */
 .node.binary, .node.dim-note { color:var(--text-dim); cursor:default }
 .node.binary:hover { background:none; color:var(--text-dim) }
+
+/* A selection is a set an operation will act on; .active is the one file the
+   editor is showing. They coincide constantly and must still be told apart, so
+   selection fills and the open file keeps its inset bar — a row that is both
+   shows both. Accent-tinted rather than --bg-hover, which is what plain hover
+   already paints.
+
+   Below the directory and binary rules on purpose, not by accident. Every one
+   of these is a single-class selector, so the cascade is decided by order
+   alone: written above them, `.node.dir`'s dim colour and `.node.binary:hover`'s
+   `background:none` both took the highlight straight back off — and a folder
+   and an image are exactly what a selection is most often made of. It stays
+   above the drag rules for the same reason in reverse: a drag in progress is
+   the more urgent thing to show. */
+.node.selected { background:color-mix(in srgb, var(--accent) 18%, transparent); color:var(--text) }
+.node.selected:hover { background:color-mix(in srgb, var(--accent) 26%, transparent) }
+
 /* Drag and drop. The row being carried dims; the folder it would land in is
    outlined rather than filled, because the fill is already what hover means and
    the two happen at once. */

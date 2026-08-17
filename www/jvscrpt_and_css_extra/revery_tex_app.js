@@ -25,7 +25,7 @@ import { writeZip } from './zip_core.js';
 import * as settings from './settings.js';
 import { attachMenu, openMenuAt, SelectMenu } from './menus.js';
 import { toolboxRows, contextRows } from './toolbox.js';
-import { openDialog, dialogIsOpen } from './dialog.js';
+import { openDialog, dialogIsOpen, ask, askChoice } from './dialog.js';
 import { openLegal, copySourceLink } from './legal.js';
 import { openAbout } from './about.js';
 import {
@@ -37,7 +37,8 @@ import {
 } from './custom_font.js';
 import { initOutline, refreshOutline, scheduleOutline, applyOutlineVisibility } from './outline.js';
 import { initPaneSizeButtons } from './pane_size.js';
-import { buildTree, flattenTree, normalizePath } from './file_tree.js';
+import { buildTree, flattenTree, directoryPaths, normalizePath } from './file_tree.js';
+import { createHistory } from './tree_history.js';
 import { referencesTo } from './document_model.js';
 import { $, download } from './dom.js';
 import {
@@ -502,7 +503,12 @@ function openFile(path) {
   // switching files left the previous file's markers in the gutter.
   pushDiagnosticsToGutter();
 
-  for (const n of document.querySelectorAll('.node')) n.classList.toggle('active', n.dataset.path === path);
+  // Scoped to the panel that owns these rows. Document-wide, this also swept the
+  // outline's rows, which share the .node class — harmless while `active` was
+  // the only state a row could be in, and a trap the moment `selected` existed.
+  for (const n of $('filetree').querySelectorAll('.node')) {
+    n.classList.toggle('active', n.dataset.path === path);
+  }
   refreshOutline();
 }
 
@@ -562,9 +568,16 @@ async function saveAll() {
   // "saved 3 file(s)" over a run that discarded one of them.
   let written = 0;
   let reloaded = 0;
+  let skipped = 0;
+  // Which file the run died on. A save that stops partway has written some of
+  // the batch and not the rest, and "✗ save failed" alone said neither how far
+  // it got nor where to look — so there was no way to tell a total failure from
+  // one that had already put nine of ten files safely on disk.
+  let failedAt = null;
   try {
     for (const [path, f] of pending) {
       let stamp;
+      failedAt = path;
       try {
         stamp = await NativeAPI.writeFile(path, f.content, f.stamp || null);
       } catch (err) {
@@ -573,7 +586,16 @@ async function saveAll() {
         // Someone else changed this file since we opened it. Never silently
         // pick a winner — the other copy may be the one that matters.
         const choice = await resolveConflict(path, msg);
-        if (choice === 'cancel') { setStatus('save cancelled', 'warn'); return; }
+        if (choice === 'cancel') {
+          // Leave this one alone and carry on with the rest. Aborting the whole
+          // save here was the old behaviour and it punished the wrong files:
+          // one conflicted document stopped every other unsaved file from
+          // reaching disk. The buffer stays dirty, so nothing is lost and the
+          // Save button still shows there is work outstanding.
+          rawLog('wrn', `left ${path} alone — it changed on disk and was not saved`);
+          skipped++;
+          continue;
+        }
         if (choice === 'reload') {
           const r = await NativeAPI.readTextFile(path);
           f.content = r.content; f.stamp = r.stamp; f.dirty = false;
@@ -592,15 +614,22 @@ async function saveAll() {
       // the file is on disk it is noise, and would otherwise be offered for
       // recovery forever.
       await NativeAPI.discardBackup?.(path).catch(() => {});
+      failedAt = null;
     }
-    refreshDirty();
     setStatus(
-      `saved ${written} file(s)${reloaded ? `, ${reloaded} reloaded from disk` : ''}`,
-      reloaded ? 'warn' : 'ok');
+      `saved ${written} file(s)` +
+      `${reloaded ? `, ${reloaded} reloaded from disk` : ''}` +
+      `${skipped ? `, ${skipped} left unsaved — changed on disk` : ''}`,
+      (reloaded || skipped) ? 'warn' : 'ok');
     if (settings.settings.autoCompile) await compile();
   } catch (err) {
-    setStatus(`✗ save failed: ${err}`, 'err');
-    rawLog('err', `save failed: ${err}`);
+    setStatus(`✗ saved ${written} of ${pending.length} — ${failedAt} failed: ${err}`, 'err');
+    rawLog('err', `save stopped at ${failedAt} after ${written} file(s): ${err}`);
+  } finally {
+    // In `finally`, not after the loop: on the error path this never ran, so the
+    // Save button went on offering the pre-save count and the tree kept its
+    // dirty dots on files that were already written.
+    refreshDirty();
   }
 }
 
@@ -608,57 +637,135 @@ async function saveAll() {
  * A conflict is a genuine choice, so it gets a real prompt rather than a toast.
  * Defaulting either way loses somebody's work silently, which is the whole
  * thing this check exists to prevent.
+ *
+ * Three answers, not two. Both of the original pair destroyed a version of the
+ * file — and being a two-button prompt, Escape and the backdrop silently meant
+ * *reload*, which throws away the edits in the editor along with that file's
+ * undo history (`openFile` rebuilds the state when the content changes under
+ * it). The honest third answer is to leave the file alone: the save skips it,
+ * the buffer stays dirty, and the person can go and look at both versions
+ * before deciding. That is the one dismissal maps to.
  */
 async function resolveConflict(path, msg) {
   const detail = msg.split('CONFLICT:').pop();
   rawLog('err', `conflict: ${detail}`);
   showTab('raw');
-  const overwrite = confirm(
+  return askChoice(
     `"${path}" changed on disk since you opened it.\n\n${detail}\n\n` +
-    `OK  — overwrite the file with your version\n` +
-    `Cancel — keep the version on disk and reload it (your edits are lost)`
+    `Overwrite — write your version over the file\n` +
+    `Reload — take the file on disk (your edits are lost)\n` +
+    `Leave it — save nothing for this file and decide later`,
+    [
+      { value: 'cancel', label: 'Leave it' },
+      { value: 'reload', label: 'Reload' },
+      { value: 'overwrite', label: 'Overwrite', primary: true }
+    ],
+    'cancel'
   );
-  return overwrite ? 'overwrite' : 'reload';
 }
 
-// Debounced, and only for the file being edited: this is a crash net, not a
-// save. It writes outside the project so recovery files never pollute git or
-// get swept into a compile.
+// Debounced: this is a crash net, not a save. It writes outside the project so
+// recovery files never pollute git or get swept into a compile.
+//
+// Every dirty buffer, not just the one on screen. It used to read `currentPath`
+// *inside* the timer, which was wrong twice over: no other edited file was ever
+// backed up at all, and switching files inside the two-second window meant the
+// timer fired against the new file and the one just left was never written
+// either. A crash then took every edit except those in whichever file happened
+// to have been sat in, idle, when it happened. Nothing said so — the feature
+// looked like it covered the session.
+//
+// `saveAll` discards a file's backup as it writes it, so this set is the
+// unsaved work and stays small.
 function scheduleBackup() {
   if (!project?.onDisk || !NativeAPI.writeBackup) return;
   clearTimeout(backupTimer);
   backupTimer = setTimeout(async () => {
-    const f = currentPath && project.files.get(currentPath);
-    if (!f || !f.dirty) return;
-    try { await NativeAPI.writeBackup(currentPath, f.content); } catch { /* best effort */ }
+    if (!project) return;
+    for (const [path, f] of project.files) {
+      // Binaries are not backed up: they are written at drop time and never
+      // edited here, so there is no unsaved version of one to lose.
+      if (!f.dirty || f.binary || typeof f.content !== 'string') continue;
+      try { await NativeAPI.writeBackup(path, f.content); } catch { /* best effort */ }
+    }
   }, 2000);
 }
 
+/**
+ * Offer back what a crash took.
+ *
+ * Three rules, each of them the fix for a way this lost work:
+ *
+ *   - **Nothing is deleted on a dismissal.** One Cancel used to discard every
+ *     backup at once, unpreviewed and unrecoverable, and being a modal it was
+ *     what Escape did too. Now only an explicit Discard removes anything, and
+ *     the default answer is to keep them for next time.
+ *   - **Each file is asked about separately**, with its size and age, because
+ *     "restore all or lose all" is not a choice anyone can make about a list of
+ *     filenames.
+ *   - **A backup whose file has since gone is restored, not thrown away.** The
+ *     old `if (ok && f)` sent that case to the discard branch — so the backup
+ *     was destroyed in exactly the situation it existed for, where the file
+ *     itself is missing and the copy in here is the only one left.
+ */
 async function offerRecovery() {
   if (!project?.onDisk || !NativeAPI.listStaleBackups) return;
   let stale = [];
   try { stale = await NativeAPI.listStaleBackups(); } catch { return; }
   if (!stale.length) return;
 
-  const names = stale.map(b => b.path).join(', ');
-  const ok = confirm(
-    `Unsaved changes from a previous session were found in:\n\n${names}\n\n` +
-    `Restore them into the editor? (Choosing Cancel discards them.)`
-  );
+  let restored = 0;
   for (const b of stale) {
-    const f = project.files.get(b.path);
-    if (ok && f) {
-      f.content = b.content;
-      f.dirty = true;
-    } else {
-      await NativeAPI.discardBackup(b.path).catch(() => {});
+    const age = b.saved ? `, saved ${describeAge(b.saved)}` : '';
+    const size = `${(b.content || '').length} characters`;
+    const gone = !project.files.get(b.path);
+    const answer = await askChoice(
+      `Unsaved changes from a previous session were found in:\n\n` +
+      `  ${b.path}  (${size}${age})\n\n` +
+      (gone ? `That file is no longer in the project, so this backup is the only copy.\n\n` : '') +
+      `Restore it into the editor?`,
+      [
+        { value: 'keep', label: 'Not now' },
+        { value: 'discard', label: 'Discard' },
+        { value: 'restore', label: 'Restore', primary: true }
+      ],
+      'keep'          // dismissal keeps the backup and changes nothing
+    );
+
+    if (answer === 'discard') { await NativeAPI.discardBackup(b.path).catch(() => {}); continue; }
+    if (answer !== 'restore') continue;          // 'keep': offered again next time
+
+    let f = project.files.get(b.path);
+    if (!f) {
+      // The file went away while the backup survived. Put it back rather than
+      // asking the user to recreate a path they cannot see any more.
+      project.files.set(b.path, { content: '', binary: false, dirty: true, stamp: null });
+      f = project.files.get(b.path);
+      rawLog('wrn', `${b.path} was missing — recreated from its backup`);
     }
+    f.content = b.content;
+    f.dirty = true;
+    restored++;
   }
-  if (ok) {
-    rawLog('wrn', `restored ${stale.length} file(s) from crash backup — unsaved`);
+
+  if (restored) {
+    rawLog('wrn', `restored ${restored} file(s) from crash backup — unsaved`);
+    renderTree();                 // a recreated file needs a row
     if (currentPath) openFile(currentPath);
+    setStatus(`restored ${restored} file(s) from a previous session — not yet saved`, 'warn');
   }
   refreshDirty();
+}
+
+/** Rough, human wording for a timestamp. Precision here would be false comfort. */
+function describeAge(ms) {
+  const mins = Math.max(0, Math.round((Date.now() - ms) / 60000));
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'} ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? '' : 's'} ago`;
 }
 
 // ── file tree ──────────────────────────────────────────────────────────
@@ -675,8 +782,151 @@ function rememberCollapsed() {
 /** Directories a project has, whether or not they hold a file yet. */
 const emptyDirs = new Set();
 
+/**
+ * Remember them, per project.
+ *
+ * Unlike `collapsedDirs` above, this cannot be a single global set. Folding a
+ * directory another project does not have is a no-op, which is why that one
+ * gets away with it — but *creating* one draws a row, so a shared set would
+ * leak project A's empty folders into project B's tree. Keyed by `project.key`
+ * as an undeclared settings key, the arrangement `mainByProject` already uses.
+ *
+ * Before this they were session-only, so a folder made from the tree was gone
+ * on reload with nothing said about it.
+ */
+function rememberEmptyDirs() {
+  if (!project?.key) return;
+  const store = settings.settings.emptyDirsByProject ?? {};
+  store[project.key] = [...emptyDirs];
+  settings.settings.emptyDirsByProject = store;
+  settings.save();
+}
+
+/** The remembered folders for this project, minus any a real file now creates. */
+function applyRememberedEmptyDirs() {
+  emptyDirs.clear();
+  const stored = settings.settings.emptyDirsByProject?.[project?.key] || [];
+  const real = new Set([...project.files.keys()].map(dirOf).filter(Boolean));
+  for (const d of stored) if (!real.has(d)) emptyDirs.add(d);
+}
+
+// ── undo, for structural changes only ──────────────────────────────────
+//
+// Deliberately *not* persisted, and cleared whenever the project changes. Every
+// check an undo makes before it acts compares the entry against `project.files`,
+// which describes this session's reading of the folder — so a stack that
+// outlived a reload would be checked against a model that had never seen
+// whatever happened to the directory in between. See `tree_history.js` for why
+// entries are only consumed once the operation has actually landed.
+const history = createHistory();
+
+// ── selection ──────────────────────────────────────────────────────────
+//
+// `.active` and `.selected` are two different things and have to stay that way:
+// active is the one file the editor is showing, selected is a set an operation
+// will act on. They coincide constantly — which is exactly why conflating them
+// would be invisible until a bulk delete took the wrong rows.
+
+/** Paths an operation will act on. Files and folders alike. */
+const selected = new Set();
+/** Where a Shift range measures from. */
+let selectAnchor = null;
+/** The last flattenTree() output — a Shift range needs *display* order. */
+let lastRows = [];
+
+/** Nothing selected, nothing anchored. Called whenever the project changes. */
+function clearSelection() {
+  selected.clear();
+  selectAnchor = null;
+}
+
+/** True if `path` names a directory rather than a file. */
+const isDirPath = (path) =>
+  emptyDirs.has(path) || [...project.files.keys()].some(p => p.startsWith(`${path}/`));
+
+/**
+ * What an operation aimed at `node` acts on.
+ *
+ * A right-click or a drag *inside* a multi-selection takes the whole selection;
+ * one aimed anywhere else takes just that row. That second half matters as much
+ * as the first — it is what stops a selection the user has forgotten about from
+ * silently widening a delete they aimed at one file.
+ *
+ * With nothing selected this returns the aimed-at row, so every gesture behaves
+ * exactly as it did before selection existed.
+ */
+function actOn(node) {
+  if (!node) return [];
+  if (selected.has(node.path) && selected.size > 1) return [...selected];
+  return [node.path];
+}
+
+/**
+ * A click on a row, with the modifier keys read.
+ *
+ * Ctrl/Cmd toggles one row, Shift takes a range, and a plain click is the
+ * gesture that has always been here — open the file, or fold the directory.
+ *
+ * On macOS Ctrl+click raises `contextmenu` rather than a usable click, so Cmd
+ * is the modifier there; `metaKey` covers it and the context menu keeps working
+ * as it did.
+ */
+function onRowClick(node, e) {
+  if (e.ctrlKey || e.metaKey) {
+    selected.has(node.path) ? selected.delete(node.path) : selected.add(node.path);
+    selectAnchor = node.path;
+    renderTree();
+    return;
+  }
+  if (e.shiftKey && selectAnchor) {
+    // Display order, not tree order: a range is what the user can see between
+    // the two rows, so a collapsed directory's hidden contents are not in it.
+    const order = lastRows.map(r => r.path);
+    const a = order.indexOf(selectAnchor);
+    const b = order.indexOf(node.path);
+    if (a >= 0 && b >= 0) {
+      selected.clear();
+      for (const p of order.slice(Math.min(a, b), Math.max(a, b) + 1)) selected.add(p);
+    }
+    renderTree();
+    return;
+  }
+
+  const had = selected.size;
+  clearSelection();
+  selectAnchor = node.path;
+  if (node.type === 'dir') {
+    collapsedDirs.has(node.path) ? collapsedDirs.delete(node.path) : collapsedDirs.add(node.path);
+    rememberCollapsed();
+    renderTree();
+    return;
+  }
+  if (!node.binary) openFile(node.path);
+  // openFile re-marks `.active` in place and never rebuilds the tree, so the
+  // rows this click just deselected would keep their highlight — a selection
+  // that is gone from the state and still lit on screen. A binary opens
+  // nothing, so it always needs the redraw the click itself implies.
+  if (had || node.binary) renderTree();
+}
+
 function renderTree() {
   const tree = $('filetree');
+
+  // Every row is replaced below, so anything the browser was holding on to —
+  // the focused element and the scroll offset — is about to be discarded.
+  // Folding a directory from the keyboard used to drop focus to <body>, which
+  // meant tabbing started again from the top of the page.
+  //
+  // The activeElement test is load-bearing, not a micro-optimisation:
+  // renderTree also runs on compiles, saves and imports, and refocusing
+  // unconditionally would yank the caret out of the editor mid-keystroke.
+  const hadFocus = tree.contains(document.activeElement);
+  const focusPath = hadFocus
+    ? (document.activeElement.dataset.path ?? document.activeElement.dataset.dir)
+    : null;
+  const focusIndex = hadFocus ? [...tree.children].indexOf(document.activeElement) : -1;
+  const scrollTop = tree.scrollTop;
+
   tree.textContent = '';
   // The document menu lists `.tex` files, so it changes whenever the tree does —
   // a new file, an import, a rename, a delete. Refreshed here rather than at
@@ -694,6 +944,22 @@ function renderTree() {
   for (const dir of emptyDirs) entries.push({ path: dir, dir: true });
 
   const rows = flattenTree(buildTree(entries), collapsedDirs);
+  // Kept for the Shift range above, which needs the order the rows are *drawn*
+  // in rather than the nesting they are built from.
+  lastRows = rows;
+
+  // Selection is a set of strings and strings do not follow a file that has been
+  // renamed or deleted. Every such site prunes it, and this is the backstop for
+  // the one that is added later and does not think to.
+  //
+  // Tested against what the project *holds*, never against `rows` — those are
+  // only the visible ones, so folding a directory would silently drop the
+  // selection inside it.
+  if (selected.size) {
+    for (const p of [...selected]) {
+      if (!project.files.has(p) && !isDirPath(p)) selected.delete(p);
+    }
+  }
 
   let shown = 0;
   for (const node of rows) {
@@ -716,45 +982,92 @@ function renderTree() {
     // inset, so nothing said what contained what.
     n.style.paddingLeft = `calc(0.55rem + ${node.depth * 0.8}rem)`;
 
+    const picked = selected.has(node.path) ? ' selected' : '';
+
     if (node.type === 'dir') {
       const folded = collapsedDirs.has(node.path);
-      n.className = 'node dir' + (folded ? ' folded' : '');
+      n.className = 'node dir' + (folded ? ' folded' : '') + picked;
       n.dataset.dir = node.path;
       n.setAttribute('aria-expanded', String(!folded));
-      n.onclick = () => {
-        folded ? collapsedDirs.delete(node.path) : collapsedDirs.add(node.path);
-        rememberCollapsed();
-        renderTree();
-      };
+      n.onclick = (e) => onRowClick(node, e);
     } else {
       const f = project.files.get(node.path);
       n.className = 'node'
         + (node.path === project.main ? ' main' : '')
         + (node.binary ? ' binary' : '')
         + (node.path === currentPath ? ' active' : '')
-        + (f && f.dirty ? ' dirty' : '');
+        + (f && f.dirty ? ' dirty' : '')
+        + picked;
       n.dataset.path = node.path;
       // Binaries stay visible and stay unopenable: the editor would show bytes.
       // aria-disabled, never the `disabled` property — a disabled button
       // receives no mouse events at all, which would take right-click Rename
-      // and Delete away from exactly the files most likely to need them. It
-      // stays focusable and announced as unavailable; only opening is refused.
+      // and Delete away from exactly the files most likely to need them, and
+      // now the click that selects one as well. It stays focusable and
+      // announced as unavailable; only *opening* is refused, which is why the
+      // handler below is attached to every row rather than to text files alone.
+      // A figure has to be selectable — sorting imported images into a folder
+      // is half of what selection is for.
       if (node.binary) n.setAttribute('aria-disabled', 'true');
-      else n.onclick = () => openFile(node.path);
+      n.onclick = (e) => onRowClick(node, e);
       shown++;
     }
     makeRowDraggable(n, node);
     tree.appendChild(n);
   }
 
-  $('filecount').textContent = `${shown} file${shown === 1 ? '' : 's'}`;
+  // The count doubles as the only thing on screen that says a selection exists,
+  // which is what a modifier-key gesture otherwise leaves undiscoverable.
+  $('filecount').textContent = selected.size
+    ? `${selected.size} of ${shown} selected`
+    : `${shown} file${shown === 1 ? '' : 's'}`;
+
+  // Put focus and scroll back where the rebuild found them.
+  tree.scrollTop = scrollTop;
+  if (hadFocus) {
+    const same = focusPath
+      && tree.querySelector(`.node[data-path="${CSS.escape(focusPath)}"], ` +
+                            `.node[data-dir="${CSS.escape(focusPath)}"]`);
+    // The row may be gone — deleted, or folded away inside its parent. The one
+    // at the same index is where the eye already is; failing that, leave focus
+    // alone rather than sending it somewhere arbitrary.
+    (same || tree.children[Math.min(focusIndex, tree.children.length - 1)])?.focus();
+  }
+}
+
+/**
+ * Put focus back in the panel after an operation that came from it.
+ *
+ * A menu row is a button inside a transient menu, and dismissing that menu
+ * removes the element focus is sitting on — so every operation reached through
+ * the tree's context menu or the + button ends with focus on `<body>`. That is
+ * the same defect `renderTree` already guards against for folding a directory,
+ * and for the same reason: it makes Tab restart from the top of the page.
+ *
+ * It is also what decides whether Ctrl+Z can be reached. The shortcut is bound
+ * on `#sidebar` precisely so it can never contend with the editor's own undo,
+ * which means focus has to actually be in there — and after "New folder…" it
+ * was not, so the one keystroke someone reaches for immediately after creating
+ * a folder in the wrong place did nothing at all, silently.
+ *
+ * Falls back through the first row to the + button, which is in the panel
+ * header and so still inside `#sidebar`.
+ */
+function focusTreeRow(path) {
+  const tree = $('filetree');
+  // Already somewhere in the panel — a drag leaves focus on the row it moved,
+  // and stealing it back to a different row would be worse than leaving it.
+  if ($('sidebar')?.contains(document.activeElement)) return;
+  const row = path && tree.querySelector(
+    `.node[data-path="${CSS.escape(path)}"], .node[data-dir="${CSS.escape(path)}"]`);
+  (row || tree.querySelector('.node') || $('newfile'))?.focus();
 }
 
 // ── drag and drop in the tree ──────────────────────────────────────────
 //
 // Two different drags land here and they are not the same thing:
 //
-//   - a row dragged from this tree, which *moves* it (dragOrigin is set)
+//   - rows dragged from this tree, which *move* them (dragOrigins is non-empty)
 //   - a file dragged in from the desktop, which *adds* it
 //
 // `dataTransfer.types` is the only thing readable during dragover — the actual
@@ -763,8 +1076,14 @@ function renderTree() {
 
 const DRAG_MIME = 'application/x-revery-tex-path';
 
-/** The row being dragged. dataTransfer cannot be read during dragover. */
-let dragOrigin = null;
+/**
+ * The rows being dragged. dataTransfer cannot be read during dragover.
+ *
+ * A list rather than one row, because a drag that starts inside a selection
+ * carries all of it. Empty means no internal drag is in progress — the check
+ * every consumer below makes.
+ */
+let dragOrigins = [];
 
 // Two node shapes reach here and they mark a directory differently: the render
 // loop passes `flattenTree` nodes, which carry `type: 'dir'`, while the
@@ -793,11 +1112,11 @@ const isInternalDrag = (e) => [...(e.dataTransfer?.types || [])].includes(DRAG_M
  *   - a successful move calls `renderTree()`, which replaces every row
  *     including the one being dragged. `dragend` fires on a node that is no
  *     longer in the document, so nothing listening on the tree hears it and
- *     `dragOrigin` stayed set — after which the next hover behaved as though a
+ *     `dragOrigins` stayed set — after which the next hover behaved as though a
  *     drag were still in progress.
  */
 function endDrag() {
-  dragOrigin = null;
+  dragOrigins = [];
   clearHighlights();
   for (const n of document.querySelectorAll('.node.dragging')) n.classList.remove('dragging');
 }
@@ -830,7 +1149,7 @@ function refuseDrop(e) {
 // The phases are not interchangeable. `dragend` may capture — by then the drag
 // is over and nothing left to run reads its state. `drop` must **bubble**: in
 // the capture phase this fires before the row's own handler, and clearing
-// `dragOrigin` first left that handler with nothing to move. Every drop
+// `dragOrigins` first left that handler with nothing to move. Every drop
 // silently did nothing.
 document.addEventListener('dragend', endDrag, true);
 document.addEventListener('drop', endDrag);
@@ -843,13 +1162,24 @@ function makeRowDraggable(el, node) {
   el.draggable = !(!isDir && path === project.main);
 
   el.addEventListener('dragstart', (e) => {
-    dragOrigin = { path, isDir };
+    // Dragging a row inside a multi-selection carries the whole selection;
+    // dragging one outside it carries just that row. Same rule as the context
+    // menu, and the same reason — see actOn.
+    const paths = actOn({ path });
+    dragOrigins = paths.map(p => ({ path: p, isDir: p === path ? isDir : isDirPath(p) }));
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData(DRAG_MIME, path);
     // Plain text too, so dragging a path into the editor inserts it — free,
     // and the obvious thing to expect.
-    e.dataTransfer.setData('text/plain', path);
-    el.classList.add('dragging');
+    e.dataTransfer.setData('text/plain', paths.join('\n'));
+    // Every row that is coming along dims, not just the one under the pointer.
+    // The browser only paints the grabbed row as the drag image, so this is the
+    // only thing that says how much is moving.
+    for (const p of paths) {
+      const row = $('filetree').querySelector(
+        `.node[data-path="${CSS.escape(p)}"], .node[data-dir="${CSS.escape(p)}"]`);
+      row?.classList.add('dragging');
+    }
   });
   el.addEventListener('dragend', endDrag);
 
@@ -880,14 +1210,18 @@ function makeRowDraggable(el, node) {
 
 function canAcceptDrop(node) {
   if (!project) return false;
-  if (!dragOrigin) return true;                 // an import can land anywhere
+  if (!dragOrigins.length) return true;         // an import can land anywhere
   const to = dropTargetOf(node);
-  // Already there — nothing to do, so nothing lights up.
-  if (dirOf(dragOrigin.path) === to) return false;
-  if (dragOrigin.isDir && (to === dragOrigin.path || to.startsWith(`${dragOrigin.path}/`))) {
-    return false;                               // into itself
+  // A folder cannot go inside itself, and one in the set poisons the whole
+  // drop: the rest would move while that one silently did not.
+  if (dragOrigins.some(o => o.isDir && (to === o.path || to.startsWith(`${o.path}/`)))) {
+    return false;
   }
-  return true;
+  // Accepted if *any* of them would actually move. A mixed selection dragged
+  // onto a folder will usually contain rows already in it, and refusing the
+  // whole gesture for those would make the common case undroppable;
+  // moveEntries filters them out on arrival.
+  return dragOrigins.some(o => dirOf(o.path) !== to);
 }
 
 /**
@@ -917,15 +1251,21 @@ function highlightDrop(el) {
  * in several spellings, and silently editing files the user has not opened to
  * fix a drag is a larger liberty than the drag itself.
  *
+ * Asked about the whole batch at once. One dialog listing every reference a
+ * multi-file move would break beats one dialog per file, which is unreadable
+ * and trains people to click through it.
+ *
+ * @param {string[]} moving   every file being moved, folders already expanded
+ * @param {string[]} targets  where each of them lands, in the same order
  * @returns {boolean} whether to go ahead
  */
-function confirmBreaksIncludes(from, isDir, to) {
-  const moving = isDir ? filesUnder(from) : [from];
+async function confirmBreaksIncludes(moving, targets) {
   const broken = [];
   for (const path of moving) {
     for (const by of referencesTo(project, path)) {
-      // A folder moving wholesale keeps its internal references intact, so a
-      // reference from inside the moved set is not broken by the move.
+      // A folder moving wholesale keeps its internal references intact, and so
+      // does a selection moved together: a reference from inside the moved set
+      // is not broken by the move.
       if (!moving.includes(by)) broken.push({ path, by });
     }
   }
@@ -935,9 +1275,10 @@ function confirmBreaksIncludes(from, isDir, to) {
     .map(b => `  ${b.by} → \\input/\\include of ${b.path}`)
     .join('\n');
   const more = broken.length > 8 ? `\n  …and ${broken.length - 8} more` : '';
-  const dest = isDir ? to : (dirOf(to) || 'the project root');
-  return confirm(
-    `Moving "${from}" to ${dest} will break ${broken.length} ` +
+  const what = moving.length > 1 ? `these ${moving.length} files` : `"${moving[0]}"`;
+  const dest = dirOf(targets[0]) || 'the project root';
+  return ask(
+    `Moving ${what} to ${dest} will break ${broken.length} ` +
     `reference${broken.length > 1 ? 's' : ''}:\n\n${lines}${more}\n\n` +
     `LaTeX only warns about a missing \\include, so the document will still ` +
     `compile — just without that content.\n\nMove anyway?`
@@ -950,14 +1291,16 @@ async function handleDrop(e, parent) {
   // below re-renders the tree — the highlight belongs to rows that are about to
   // stop existing, and this is the last moment they can be found.
   const files = e.dataTransfer?.files;
-  const origin = dragOrigin;
+  const origins = dragOrigins;
   endDrag();
 
   if (files && files.length) { await importDroppedFiles(files, parent); return; }
-  if (!origin) return;
-  const name = origin.path.split('/').pop();
-  const to = normalizePath(name, parent);
-  await moveEntry(origin.path, to, origin.isDir);
+  if (!origins.length) return;
+  // One call for the whole drag, so a multi-row move gets one \include warning
+  // and one status line rather than one of each per file.
+  await moveEntries(origins.map(o => ({
+    from: o.path, to: normalizePath(o.path.split('/').pop(), parent), isDir: o.isDir
+  })));
 }
 
 /** Bigger than any figure, and small enough that the zip backend survives it. */
@@ -1073,7 +1416,7 @@ async function importDroppedFiles(fileList, parent) {
           }
         }
       }
-      emptyDirs.delete(dirOf(path));
+      if (emptyDirs.delete(dirOf(path))) rememberEmptyDirs();
       added.push(path);
     } catch (err) {
       project.files.delete(path);
@@ -1084,6 +1427,15 @@ async function importDroppedFiles(fileList, parent) {
   }
 
   if (added.length) {
+    // Files arrive here from outside the project and are written as they are
+    // read, so there is nothing to invert — and undoing an import would mean
+    // deleting files whose only copy may now be the one just added. Same
+    // reasoning as the barrier in `deleteEntries`. Inside this branch rather
+    // than before the loop, so a drop that was refused in full does not cost
+    // the history: every iteration above catches its own failure, so nothing
+    // reaches here having written a file without recording it in `added`.
+    history.barrier();
+
     renderTree();
     refreshDirty();
     scheduleOutline();
@@ -1153,6 +1505,47 @@ function askName({ title, label, def, submitLabel = 'Create' }, onOk) {
   });
 }
 
+/**
+ * Put an empty file at `path`, in memory and on disk.
+ *
+ * Split out of `createFile` so that redoing one is the same code rather than a
+ * second copy of it — a copy that forgot the `emptyDirs` line below would leave
+ * a folder drawn twice, and one that forgot the rollback would leave a phantom
+ * file in the tree after a failed write.
+ *
+ * The caller has already validated the path and checked for collisions.
+ *
+ * @returns {{emptied: string|null, stamp: object|null}}
+ *   `emptied` is the folder this file just made real, if any — the one thing an
+ *   undo cannot work out for itself afterwards, because by then the directory
+ *   holds a file and no longer looks empty. `stamp` is what the file was
+ *   written as, which is how an undo later recognises it as untouched.
+ */
+async function addEmptyFile(path) {
+  project.files.set(path, { content: '', binary: false, dirty: true, stamp: null });
+  // Written immediately where there is a disk, so the tree matches what is
+  // actually there rather than promising a file that only exists if you
+  // remember to save.
+  if (canWriteDisk() && NativeAPI.writeFile) {
+    try {
+      const stamp = await NativeAPI.writeFile(path, '', null);
+      Object.assign(project.files.get(path), { stamp, dirty: false });
+    } catch (err) {
+      project.files.delete(path);
+      setStatus(`✗ ${err.message || err}`, 'err');
+      renderTree();
+      throw err;
+    }
+  }
+  // A folder that only existed in the tree now holds something.
+  const emptied = emptyDirs.delete(dirOf(path)) ? dirOf(path) : null;
+  if (emptied) rememberEmptyDirs();
+  renderTree();
+  openFile(path);
+  refreshDirty();
+  return { emptied, stamp: project.files.get(path).stamp };
+}
+
 async function createFile(parent = '') {
   askName({ title: 'New file', label: 'Name', def: '' }, async (raw) => {
     const path = normalizePath(raw, parent);
@@ -1163,40 +1556,43 @@ async function createFile(parent = '') {
     const clash = nameCollision(path, await pathsOnDisk());
     if (clash) { setStatus(`✗ ${clash}`, 'err'); return; }
 
-    project.files.set(path, { content: '', binary: false, dirty: true, stamp: null });
-    // Written immediately where there is a disk, so the tree matches what is
-    // actually there rather than promising a file that only exists if you
-    // remember to save.
-    if (canWriteDisk() && NativeAPI.writeFile) {
-      try {
-        const stamp = await NativeAPI.writeFile(path, '', null);
-        Object.assign(project.files.get(path), { stamp, dirty: false });
-      } catch (err) {
-        project.files.delete(path);
-        setStatus(`✗ ${err.message || err}`, 'err');
-        renderTree();
-        return;
-      }
-    }
-    // A folder that only existed in the tree now holds something.
-    emptyDirs.delete(dirOf(path));
-    renderTree();
-    openFile(path);
-    refreshDirty();
+    let made;
+    try { made = await addEmptyFile(path); }
+    catch { return; }                      // addEmptyFile has already said why
+    // Recorded only once the write has succeeded: the rollback above leaves no
+    // file, so an entry pointing at one would be stale the moment it was made.
+    //
+    // A gerund, here and in every other entry, because one string has to read
+    // correctly in two frames: "undid creating x.tex" in the status bar, and
+    // "Undo creating x.tex" as a menu row. It also keeps the row from reading
+    // as a *second* "New file…" sitting directly above the real one.
+    history.push({ kind: 'file', path, ...made, label: `creating ${path}` });
+    // The dialog that asked for the name has taken focus with it; without this
+    // Ctrl+Z is unreachable exactly when it is most wanted. See focusTreeRow.
+    focusTreeRow(path);
     setStatus(`created ${path}`, 'ok');
   });
+}
+
+/** Draw a folder that holds nothing yet. Nothing here reaches the disk. */
+function addFolder(path) {
+  emptyDirs.add(path);
+  rememberEmptyDirs();
+  renderTree();
 }
 
 function createFolder(parent = '') {
   askName({ title: 'New folder', label: 'Name', def: '' }, (raw) => {
     const path = normalizePath(raw, parent);
     if (!path) { setStatus('✗ that is not a usable folder name', 'err'); return; }
-    emptyDirs.add(path);
-    renderTree();
+    addFolder(path);
+    history.push({ kind: 'folder', path, label: `creating ${path}/` });
+    focusTreeRow(path);
     // No mkdir anywhere in NativeAPI, and none is needed: every backend's write
-    // creates missing parents. Saying so beats a folder that silently is not
-    // there the next time the project is opened.
-    setStatus(`${path} — created when the first file in it is saved`, 'warn');
+    // creates missing parents. The folder is remembered for this project, so it
+    // is still here on reload — it just does not exist on disk until something
+    // is saved into it, and saying so beats implying otherwise.
+    setStatus(`${path} — created on disk when the first file in it is saved`, 'warn');
   });
 }
 
@@ -1221,78 +1617,339 @@ async function moveOne(from, to) {
   if (st) docStates.set(to, st);
   if (project.main === from) project.main = to;
   if (currentPath === from) { currentPath = to; $('editortitle').textContent = to; }
+  // The selection is a set of paths, and this file's path just changed. Same
+  // reason the editor state above is carried over rather than dropped.
+  if (selected.delete(from)) selected.add(to);
+  if (selectAnchor === from) selectAnchor = to;
 }
 
 /**
- * Move a file or a whole folder from one path to another.
+ * Move any number of files and folders in one operation.
  *
- * The single place the guards live, because rename and drag-and-drop are the
- * same operation reached two ways. Two copies of these checks is how a drop
- * ends up able to move the main file that rename refuses to touch.
+ * The single place the guards live, because rename, drag-and-drop and the
+ * Move-to-folder menu are the same operation reached three ways. Two copies of
+ * these checks is how a drop ends up able to move the main file that rename
+ * refuses to touch — so this went plural rather than growing a `moveMany`
+ * beside it with the checks written out again.
  *
+ * Everything is checked across the whole set *before* anything moves. A batch
+ * is refused whole rather than half-applied, and the \include warning is one
+ * dialog rather than one per file.
+ *
+ * @param {Array<{from: string, to: string, isDir: boolean}>} moves
+ * @param {boolean} [record] whether to note this on the undo stack. Only undo
+ *   and redo pass false: they move the entry between stacks themselves, and an
+ *   inverse that recorded itself would become its own redo.
  * @returns {Promise<boolean>} whether anything moved
  */
-async function moveEntry(from, to, isDir) {
-  if (!to || to === from) return false;
+async function moveEntries(moves, record = true) {
+  // A folder in the set already carries its own contents, so a file listed
+  // beside its moving ancestor would be moved twice — the second time from a
+  // path that no longer holds it. Only possible since a selection could hold
+  // both, which is why this guard is newer than the others.
+  const dirs = moves.filter(m => m.isDir).map(m => m.from);
+  let batch = moves.filter(m => !dirs.some(d => d !== m.from && m.from.startsWith(`${d}/`)));
 
-  const moving = isDir ? filesUnder(from) : [from];
+  // Nothing to do rather than something wrong: a mixed selection dragged onto a
+  // folder will always contain rows that are already in it, and one of them must
+  // not sink the whole gesture.
+  batch = batch.filter(m => m.to && m.to !== m.from);
+  batch = batch.filter(m => !(m.isDir && (m.to === m.from || m.to.startsWith(`${m.from}/`))));
+  if (!batch.length) return false;
 
-  if (!isDir && from === project.main) {
-    setStatus('✗ that is the main document — pick a different one first', 'err');
+  const plan = batch.map(m => {
+    const moving = m.isDir ? filesUnder(m.from) : [m.from];
+    return { ...m, moving, targets: moving.map(p => (m.isDir ? m.to + p.slice(m.from.length) : m.to)) };
+  });
+  const allMoving = plan.flatMap(p => p.moving);
+  const allTargets = plan.flatMap(p => p.targets);
+
+  // Refusals first, across the union, so nothing has moved when one fires.
+  const holdsMain = plan.find(p => p.moving.includes(project.main));
+  if (holdsMain) {
+    setStatus(holdsMain.isDir
+      ? '✗ that folder holds the main document — pick a different one first'
+      : '✗ that is the main document — pick a different one first', 'err');
     return false;
   }
-  if (isDir && moving.includes(project.main)) {
-    setStatus('✗ that folder holds the main document — pick a different one first', 'err');
-    return false;
-  }
-  // A folder cannot go inside itself: every path being moved is also a path
-  // being moved *into*, so the loop below would rewrite each file forever and
-  // the subtree would be gone from the tree with no way back.
-  if (isDir && (to === from || to.startsWith(`${from}/`))) {
-    setStatus('✗ a folder cannot be moved into itself', 'err');
-    return false;
-  }
-
-  const targets = moving.map(p => (isDir ? to + p.slice(from.length) : to));
-  const clash = targets.find(t => project.files.has(t));
+  const clash = allTargets.find(t => project.files.has(t) && !allMoving.includes(t));
   if (clash) { setStatus(`✗ ${clash} already exists`, 'err'); return false; }
+  // Two rows of the same name landing in one folder collide with each other
+  // rather than with anything already there, and the check above cannot see it.
+  const dupe = allTargets.find((t, i) => allTargets.indexOf(t) !== i);
+  if (dupe) { setStatus(`✗ two of those are named ${dupe.split('/').pop()}`, 'err'); return false; }
 
-  // Here rather than in the drop handler, so a rename is warned about too: both
-  // reach this function precisely so a check cannot exist on one path only.
-  if (!confirmBreaksIncludes(from, isDir, to)) return false;
+  // Here rather than in the drop handler, so a rename is warned about too: every
+  // caller reaches this function precisely so a check cannot exist on one path
+  // only. One dialog for the batch — a reference from inside the moving set is
+  // not broken by the move, which is why the whole set is passed at once.
+  if (!await confirmBreaksIncludes(allMoving, allTargets)) return false;
 
   let moved = 0;
+  let complete = true;
   try {
-    for (let i = 0; i < moving.length; i++) { await moveOne(moving[i], targets[i]); moved++; }
+    for (const p of plan) {
+      for (let i = 0; i < p.moving.length; i++) { await moveOne(p.moving[i], p.targets[i]); moved++; }
+    }
   } catch (err) {
-    // Partway through a folder move: say so rather than pretending it worked.
+    // Partway through: say so rather than pretending it worked.
+    complete = false;
     setStatus(`✗ ${err.message || err}`, 'err');
-    rawLog('err', `move stopped partway — ${moved} of ${moving.length} files: ${err.message || err}`);
+    rawLog('err', `move stopped partway — ${moved} of ${allMoving.length} files: ${err.message || err}`);
   }
 
-  if (isDir) {
-    emptyDirs.delete(from);
+  let foldersMoved = false;
+  for (const p of plan) {
+    if (!p.isDir) continue;
+    foldersMoved = true;
+    if (emptyDirs.delete(p.from)) emptyDirs.add(p.to);
     // The folded state is keyed by path, so without this the folder reopens
     // under its new name and a fold survives under a path that no longer
-    // exists — invisible, and it accumulates.
-    for (const d of [...collapsedDirs]) {
-      if (d === from || d.startsWith(`${from}/`)) {
-        collapsedDirs.delete(d);
-        collapsedDirs.add(to + d.slice(from.length));
+    // exists — invisible, and it accumulates. The selection is keyed by path
+    // too, and moveOne only carries the files.
+    for (const set of [collapsedDirs, selected]) {
+      for (const d of [...set]) {
+        if (d === p.from || d.startsWith(`${p.from}/`)) {
+          set.delete(d);
+          set.add(p.to + d.slice(p.from.length));
+        }
       }
     }
-    rememberCollapsed();
   }
+  if (foldersMoved) { rememberCollapsed(); rememberEmptyDirs(); }
+
   renderTree();
   refreshDirty();
   scheduleOutline();
   // Every refusal above says so; a move that worked said nothing at all, which
   // left reading the tree as the only way to find out what a drag had done.
-  if (moved) {
-    setStatus(isDir ? `moved ${from}/ → ${to}/` : `moved ${from} → ${to}`, 'ok');
+  const one = plan[0];
+  const what = plan.length > 1
+    ? `${plan.length} items → ${dirOf(one.to) || 'the project root'}`
+    : (one.isDir ? `${one.from}/ → ${one.to}/` : `${one.from} → ${one.to}`);
+  // Only when the whole batch landed. A move that stopped partway has already
+  // said so in the catch above, and overwriting that with a green "moved 12
+  // items" left the failure visible nowhere but the log console.
+  if (moved && complete) setStatus(`moved ${what}`, 'ok');
+
+  if (record) {
+    // A batch that stopped partway has no clean inverse — some files are at
+    // their targets and some are not, and moving the whole set back would be a
+    // second half-applied operation on top of the first. The history goes
+    // instead, so nothing below it can be replayed against the mess.
+    if (!complete) history.barrier();
+    // `plan`, not `moves`: the filters above dropped no-ops and files nested
+    // under a moving ancestor, so the argument is not what actually happened.
+    // Recorded even when `moved` is 0, because an empty folder moves entirely
+    // through `emptyDirs` above without any file changing hands.
+    else history.push({ kind: 'move', label: `moving ${what}`,
+                        moves: plan.map(({ from, to, isDir }) => ({ from, to, isDir })) });
+    // A drag already leaves focus on the row it moved and focusTreeRow will
+    // leave that alone; this is for the rename dialog and the Move-to-folder
+    // menu, which do not.
+    focusTreeRow(one.to);
   }
   return moved > 0;
 }
+
+/** One entry, by the same rules. Rename and a single-row drag both arrive here. */
+const moveEntry = (from, to, isDir) => moveEntries([{ from, to, isDir }]);
+
+/* ── undoing one of those ─────────────────────────────────────────────────
+ *
+ * Three rules hold this together, and none of them may be relaxed:
+ *
+ *   1. **An inverse goes through the same function the forward operation did.**
+ *      Undoing a move calls `moveEntries`, so it faces the main-document
+ *      refusal, the collision checks and the \include warning exactly as a drag
+ *      would. An undo therefore cannot do anything a user could not have done
+ *      by hand, and the guards cannot drift apart — which is the same reason
+ *      rename and drag were merged into one function to begin with.
+ *
+ *   2. **The world is checked before, and again after.** `settled()` asks
+ *      whether the project still looks the way the operation left it. If it
+ *      does not, the entry is stale and the whole history goes: an entry below
+ *      a stale one rests on the same assumptions. Checking again afterwards is
+ *      what decides whether the entry is consumed, so an inverse that was
+ *      refused — including the user answering No to the \include warning —
+ *      leaves the stack exactly as it was and can be retried.
+ *
+ *   3. **Nothing with content in it is ever removed.** The only deletion undo
+ *      performs is of a file it has just confirmed is still empty and unsaved.
+ */
+
+/** Does `path` name something the project currently holds? */
+const entryExists = (path, isDir) => (isDir ? isDirPath(path) : project.files.has(path));
+
+/**
+ * Is the project in the state this entry describes the *result* of?
+ *
+ * @param {object} entry
+ * @param {boolean} done  true to ask "has the operation happened?", false for
+ *   "has it been taken back?" — the same question either way round, which is
+ *   why undo and redo share one predicate rather than each having its own.
+ */
+function settled(entry, done) {
+  if (entry.kind === 'move') {
+    // Every destination holds the entry and no origin does, or the reverse.
+    return entry.moves.every(m => done
+      ? (entryExists(m.to, m.isDir) && !entryExists(m.from, m.isDir))
+      : (entryExists(m.from, m.isDir) && !entryExists(m.to, m.isDir)));
+  }
+  if (entry.kind === 'folder') return emptyDirs.has(entry.path) === done;
+  if (entry.kind === 'file') {
+    if (!done) return !project.files.has(entry.path);
+    // Present, still empty, and never written since. A file someone has typed
+    // into is not the file that was created, and undo must not remove it —
+    // this is the single check standing between Ctrl+Z and somebody's work.
+    const f = project.files.get(entry.path);
+    if (!f || f.binary || f.content !== '') return false;
+    // Stamp identity, not `dirty`. `dirty` only means "not yet written", which
+    // is the permanent state of every file in a project with no disk behind it
+    // — testing it would refuse every undo in the browser-only backend. The
+    // stamp is a fresh object per write, so comparing the reference asks the
+    // question that actually matters: has this file been saved since it was
+    // made? A buffer emptied *after* a save reads as unchanged by content
+    // alone, and deleting it would take the saved copy with it.
+    return f.stamp === entry.stamp;
+  }
+  return false;
+}
+
+/** Take an entry's operation back. Returns whether the project actually moved. */
+async function applyInverse(entry) {
+  if (entry.kind === 'move') {
+    await moveEntries(entry.moves.map(m => ({ from: m.to, to: m.from, isDir: m.isDir })), false);
+  } else if (entry.kind === 'folder') {
+    emptyDirs.delete(entry.path);
+    rememberEmptyDirs();
+    renderTree();
+  } else if (entry.kind === 'file') {
+    if (!await removeEmptyFile(entry.path)) return false;
+    // The folder this file made real goes back to being one the tree draws on
+    // its own — otherwise undoing the file quietly takes the folder with it.
+    if (entry.emptied) addFolder(entry.emptied);
+  }
+  return settled(entry, false);
+}
+
+/** Do it again. */
+async function applyForward(entry) {
+  if (entry.kind === 'move') {
+    await moveEntries(entry.moves, false);
+  } else if (entry.kind === 'folder') {
+    addFolder(entry.path);
+  } else if (entry.kind === 'file') {
+    // Something may have taken the name back since the undo — the same check
+    // `createFile` makes, for the same reason: this writes with no stamp, so a
+    // collision here is a file truncated to nothing.
+    const clash = nameCollision(entry.path, await pathsOnDisk());
+    if (clash) { setStatus(`✗ ${clash}`, 'err'); return false; }
+    try {
+      // The rewrite produces a new stamp, so the entry adopts it — otherwise
+      // the next Ctrl+Z would compare against the stamp of a write two
+      // operations ago and refuse a file it had just made itself.
+      Object.assign(entry, await addEmptyFile(entry.path));
+    } catch { return false; }
+  }
+  return settled(entry, true);
+}
+
+/**
+ * Delete the empty file `path`, on disk as well as in the model.
+ *
+ * Only ever reached from `applyInverse`, and only after `settled()` has
+ * confirmed the file is still empty. Deliberately not shared with
+ * `deleteEntries`: that one is about files with contents and asks first, and a
+ * single function serving both would be one condition away from skipping the
+ * question.
+ */
+async function removeEmptyFile(path) {
+  try {
+    if (canWriteDisk() && NativeAPI.deleteFile) await NativeAPI.deleteFile(path);
+  } catch (err) {
+    setStatus(`✗ ${err.message || err}`, 'err');
+    return false;
+  }
+  project.files.delete(path);
+  docStates.delete(path);
+  selected.delete(path);
+  if (path === currentPath) {
+    currentPath = null;
+    $('editortitle').textContent = 'no file';
+    if (project.files.has(project.main)) openFile(project.main);
+  }
+  renderTree();
+  refreshDirty();
+  scheduleOutline();
+  return true;
+}
+
+/**
+ * True while an undo or redo is in flight.
+ *
+ * `moveEntries` awaits the backend, and the shortcut can arrive again long
+ * before it returns. Two inverses interleaved would each check `settled()`
+ * against a project the other was halfway through changing.
+ */
+let historyBusy = false;
+
+/**
+ * One step in either direction.
+ *
+ * @param {boolean} back  true for undo, false for redo
+ */
+async function stepHistory(back) {
+  if (historyBusy || !project) return;
+  const entry = back ? history.peekUndo() : history.peekRedo();
+  if (!entry) { setStatus(back ? 'nothing to undo' : 'nothing to redo'); return; }
+
+  // The state the entry expects to find: after the operation if we are about to
+  // undo it, before it if we are about to put it back.
+  if (!settled(entry, back)) {
+    history.clear();
+    setStatus(`✗ ${entry.label} — the project has changed since; undo history cleared`, 'err');
+    rawLog('wrn', `undo refused: the project no longer matches "${entry.label}"`);
+    return;
+  }
+
+  historyBusy = true;
+  // What the status bar said before the inverse ran, so a refusal that explained
+  // itself is not talked over. `moveEntries` names the actual reason — the main
+  // document, a collision — and replacing that with a generic "could not undo"
+  // takes away the only sentence that says what to do about it.
+  const saidBefore = $('status').textContent;
+  try {
+    const ok = back ? await applyInverse(entry) : await applyForward(entry);
+    // Consumed only on success. A refusal — a collision, the main document, or
+    // the \include warning answered No — leaves the entry where it was.
+    if (!ok) {
+      if ($('status').textContent === saidBefore) {
+        setStatus(`✗ could not ${back ? 'undo' : 'redo'} ${entry.label}`, 'err');
+      }
+      return;
+    }
+    // By identity: applying the inverse awaited the backend, and a drag that
+    // finished in that gap has pushed an entry of its own. Committing blind
+    // would file that one away as undone.
+    const moved = back ? history.commitUndo(entry) : history.commitRedo(entry);
+    if (!moved) {
+      history.clear();
+      setStatus(`✗ the project changed while undoing ${entry.label}; undo history cleared`, 'err');
+      rawLog('wrn', `undo raced another change to the tree — history cleared`);
+      return;
+    }
+    setStatus(`${back ? 'undid' : 'redid'} ${entry.label}`, 'ok');
+    // So a second Ctrl+Z lands: the redraw above may have removed the row focus
+    // was on, and undo is the one action people repeat without looking.
+    focusTreeRow(entry.kind === 'move' ? entry.moves[0]?.from : entry.path);
+  } finally {
+    historyBusy = false;
+  }
+}
+
+const undoTree = () => stepHistory(true);
+const redoTree = () => stepHistory(false);
 
 async function renameEntry(path, isDir) {
   if (!isDir && path === project.main) {
@@ -1305,41 +1962,105 @@ async function renameEntry(path, isDir) {
   });
 }
 
-async function deleteEntry(path, isDir) {
-  const doomed = isDir ? filesUnder(path) : [path];
+/**
+ * Delete any number of files and folders.
+ *
+ * Plural for the same reason `moveEntries` is: the main-document guard must not
+ * exist in two places. One confirm for the batch — a dialog per file is how a
+ * bulk delete gets clicked through without being read.
+ *
+ * @param {Array<{path: string, isDir: boolean}>} entries
+ */
+async function deleteEntries(entries) {
+  // A folder already takes its contents, so a file listed beside its doomed
+  // ancestor would be deleted twice and counted twice in the prompt.
+  const dirs = entries.filter(e => e.isDir).map(e => e.path);
+  const batch = entries.filter(e => !dirs.some(d => d !== e.path && e.path.startsWith(`${d}/`)));
+
+  const doomed = [...new Set(batch.flatMap(e => (e.isDir ? filesUnder(e.path) : [e.path])))];
   if (doomed.includes(project.main)) {
     setStatus('✗ that is the main document — pick a different one first', 'err');
     return;
   }
-  if (!isDir && !project.files.has(path)) return;
+  if (!batch.some(e => e.isDir || project.files.has(e.path))) return;
 
-  const what = isDir
-    ? `${path}/ and the ${doomed.length} file(s) in it`
-    : path;
-  if (!confirm(`Delete ${what}?\n\nThis cannot be undone from inside the app.`)) return;
+  const what = batch.length > 1
+    ? `${batch.length} items and the ${doomed.length} file(s) in them`
+    : (batch[0].isDir ? `${batch[0].path}/ and the ${doomed.length} file(s) in it` : batch[0].path);
+  // The paths, not just a tally. "Delete 7 items and the 23 file(s) in them?"
+  // names nothing a person can check, and the whole reason to ask before an
+  // irreversible delete is so they can notice the one row they did not mean to
+  // have selected. Capped, because a dialog nobody can read is the same problem
+  // in the other direction.
+  const listed = doomed.length ? doomed : batch.map(e => `${e.path}/`);
+  const preview = listed.slice(0, 8).map(p => `  ${p}`).join('\n')
+    + (listed.length > 8 ? `\n  …and ${listed.length - 8} more` : '');
+  if (!await ask(
+    `Delete ${what}?\n\n${preview}\n\nThis cannot be undone from inside the app.`
+  )) return;
 
+  // The message above is the literal truth and stays that way. `deleteFile` is a
+  // real delete on all five backends — no trash, nothing to move back — so this
+  // does not get an approximate undo entry. It ends the history instead, because
+  // an entry recorded *before* a delete describes files the delete may have
+  // taken, and one more Ctrl+Z would otherwise step straight past it and move
+  // paths that are no longer there.
+  history.barrier();
+
+  let complete = true;
+  // Folders the backend refused to remove because something it cannot see is
+  // still inside. Their rows stay, so the tree keeps matching the disk.
+  const kept = [];
   try {
-    // One call per file, then the directory itself. No backend here can remove
-    // a tree, which is deliberate: there is no single call that could point at
-    // the wrong one.
+    // One call per file, then the directories themselves. No backend here can
+    // remove a tree, which is deliberate: there is no single call that could
+    // point at the wrong one.
     for (const p of doomed) {
       if (canWriteDisk() && NativeAPI.deleteFile) await NativeAPI.deleteFile(p);
       project.files.delete(p);
       docStates.delete(p);          // nothing left for its undo history to be about
+      selected.delete(p);           // nor for it to be selected for
       if (p === currentPath) { currentPath = null; $('editortitle').textContent = 'no file'; }
     }
-    if (isDir && canWriteDisk() && NativeAPI.deleteFile) {
-      await NativeAPI.deleteFile(path).catch(() => {});   // gone with its files on some backends
+    for (const e of batch) {
+      if (e.isDir && canWriteDisk() && NativeAPI.deleteFile) {
+        // A non-empty directory is refused by every backend on purpose, and it
+        // is refused precisely when the folder still holds something this
+        // project never loaded — a dotfile, a symlink, a nested subdirectory,
+        // node_modules. Swallowing that told the user the folder was gone while
+        // it sat there on disk, because the tree is drawn from project.files
+        // and the row had already stopped being backed by anything.
+        await NativeAPI.deleteFile(e.path).catch(() => { kept.push(e.path); });
+      }
     }
   } catch (err) {
+    complete = false;
     setStatus(`✗ ${err.message || err}`, 'err');
     rawLog('err', `delete stopped partway: ${err.message || err}`);
   }
-  emptyDirs.delete(path);
+  let hadEmpty = false;
+  for (const e of batch) {
+    selected.delete(e.path);
+    // A folder that is still on disk is still a folder. Keeping it in emptyDirs
+    // is what draws the row that says so.
+    if (kept.includes(e.path)) continue;
+    if (emptyDirs.delete(e.path)) hadEmpty = true;
+  }
+  for (const p of kept) emptyDirs.add(p);
+  if (hadEmpty || kept.length) rememberEmptyDirs();
   if (!currentPath && project.files.has(project.main)) openFile(project.main);
   renderTree();
   refreshDirty();
   scheduleOutline();
+  if (!complete) return;            // the catch above has already said what went wrong
+  if (kept.length) {
+    // Never "deleted x/ … kept x/" in one breath. The files inside really did
+    // go; the folder did not, and saying so plainly is the whole point.
+    setStatus(`removed ${doomed.length} file(s), but kept ${kept.join(', ')} — ` +
+              `still holding files this project does not manage`, 'warn');
+    for (const p of kept) rawLog('wrn', `${p} was not removed: it is not empty on disk`);
+    return;
+  }
   setStatus(`deleted ${what}`, 'ok');
 }
 
@@ -1367,9 +2088,53 @@ function importFilesInto(parent) {
   input.click();
 }
 
+/**
+ * The folders a set of paths could be moved into, as submenu rows.
+ *
+ * Not every folder qualifies: one that is itself moving, or that lives inside
+ * one that is, would be a move into itself — `moveEntries` refuses those, and
+ * offering them anyway is an invitation to an error message.
+ */
+function moveTargetRows(paths) {
+  const entries = [...project.files.keys()].map(p => ({ path: p }));
+  for (const dir of emptyDirs) entries.push({ path: dir, dir: true });
+  const dirs = [...new Set([...directoryPaths(buildTree(entries)), ...emptyDirs])].sort();
+
+  const moving = paths.filter(isDirPath);
+  const parents = new Set(paths.map(dirOf));
+
+  return ['', ...dirs]
+    .filter(d => !moving.some(m => d === m || d.startsWith(`${m}/`)))
+    // Somewhere every one of them already is, is not a move.
+    .filter(d => !(parents.size === 1 && parents.has(d)))
+    .map(d => ({
+      label: d ? `${d}/` : '⌐ project root',
+      run: () => moveEntries(paths.map(p => ({
+        from: p, to: normalizePath(p.split('/').pop(), d), isDir: isDirPath(p)
+      })))
+    }));
+}
+
 function treeMenuRows(node) {
   const parent = node ? (node.dir ? node.path : dirOf(node.path)) : '';
-  const rows = [
+  const acting = actOn(node);
+  const rows = [];
+
+  // Ctrl+Z is not discoverable and does not work from a pointer, and this is a
+  // panel people use with the mouse. The rows appear only when there is
+  // something to act on, which also makes the menu say whether an operation was
+  // recorded at all — a delete leaves neither row, which is the honest answer.
+  const undoable = history.peekUndo();
+  const redoable = history.peekRedo();
+  if (undoable) {
+    rows.push({ type: 'action', label: `Undo ${undoable.label}`, title: 'Ctrl+Z', run: undoTree });
+  }
+  if (redoable) {
+    rows.push({ type: 'action', label: `Redo ${redoable.label}`, title: 'Ctrl+Y', run: redoTree });
+  }
+  if (rows.length) rows.push({ type: 'divider' });
+
+  rows.push(
     { type: 'action', label: 'New file…', run: () => createFile(parent) },
     { type: 'action', label: 'New folder…', run: () => createFolder(parent) },
     // Lands wherever the menu was opened — the right-clicked folder, or the
@@ -1379,11 +2144,30 @@ function treeMenuRows(node) {
       title: 'Add files from your computer — or drag them onto this panel',
       run: () => importFilesInto(parent)
     }
-  ];
+  );
   if (node) {
     rows.push({ type: 'divider' });
-    rows.push({ type: 'action', label: 'Rename…', run: () => renameEntry(node.path, node.dir) });
-    rows.push({ type: 'action', label: 'Delete…', run: () => deleteEntry(node.path, node.dir) });
+    // Aimed at a row inside a multi-selection, everything below acts on the
+    // whole selection; aimed anywhere else, on that row alone. See actOn.
+    const many = acting.length > 1;
+    const targets = moveTargetRows(acting);
+    if (targets.length) {
+      rows.push({
+        type: 'submenu',
+        label: many ? `Move ${acting.length} items to…` : 'Move to folder…',
+        hint: '',
+        actions: targets
+      });
+    }
+    // Renaming is about one path, so it stays singular even inside a selection.
+    if (!many) {
+      rows.push({ type: 'action', label: 'Rename…', run: () => renameEntry(node.path, node.dir) });
+    }
+    rows.push({
+      type: 'action',
+      label: many ? `Delete ${acting.length} items…` : 'Delete…',
+      run: () => deleteEntries(acting.map(p => ({ path: p, isDir: isDirPath(p) })))
+    });
   }
   if (project && !project.onDisk) {
     rows.push({ type: 'divider' });
@@ -1399,6 +2183,13 @@ $('filetree').addEventListener('contextmenu', (e) => {
   const node = !el ? null
     : el.dataset.dir !== undefined ? { path: el.dataset.dir, dir: true }
     : { path: el.dataset.path, dir: false };
+  // A right-click away from the selection drops it, so what the menu is about
+  // to act on is what is highlighted. Leaving a stale selection lit while the
+  // menu spoke about a different row is how a bulk action hits the wrong files.
+  if (selected.size && (!node || !selected.has(node.path))) {
+    clearSelection();
+    renderTree();
+  }
   openMenuAt(e.clientX, e.clientY, () => treeMenuRows(node));
 });
 
@@ -1482,17 +2273,48 @@ function syncMainSelect() {
 function rememberMainFile() {
   if (!project?.key) return;
   const store = settings.settings.mainByProject ?? {};
-  store[project.key] = project.main;
+  // `{root, main}`, not a bare path. `project.key` is only the folder's *name*
+  // (project_store.js derives it with `.split('/').pop()`), so two projects
+  // called `thesis` share this entry — and the value decides which file gets
+  // compiled. Recording the root is what lets the reader tell them apart.
+  store[project.key] = { root: project.root ?? null, main: project.main };
   settings.settings.mainByProject = store;
   settings.save();
 }
 
-/** The remembered choice for this project, if it still names a file. */
+/**
+ * The remembered choice for this project, if it still names a file *and* was
+ * made about this project.
+ *
+ * Existence alone is not identity. Every LaTeX project has a `main.tex` and most
+ * have a `chapters/intro.tex`, so a remembered path from a different folder of
+ * the same name will usually still resolve here — and then silently overrule the
+ * inference, taking the engine, the bibliography backend and `\makeindex` with
+ * it through `redescribeProject`. The result is a PDF of the wrong document with
+ * no error anywhere.
+ *
+ * Entries written before this carried a bare string and so have no provenance;
+ * they are ignored rather than trusted, which costs at most one re-pick of the
+ * main file and is written back correctly the moment it is chosen.
+ */
 function applyRememberedMain() {
-  const want = settings.settings.mainByProject?.[project.key];
+  const saved = settings.settings.mainByProject?.[project.key];
+  // A string is the old shape: no root, so no way to know whose it was.
+  const want = (saved && typeof saved === 'object') ? saved.main : null;
+  const from = (saved && typeof saved === 'object') ? saved.root : undefined;
   if (!want || want === project.main || !project.files.has(want)) return;
+  // `root` is absent on projects that have no folder (a fixture), where the key
+  // is the fixture's own name and cannot collide with a user's folder.
+  if (project.root != null && from !== project.root) {
+    rawLog('wrn', `ignored a remembered main document (${want}) — it was chosen for a different folder`);
+    return;
+  }
   project.main = want;
   if (project.onDisk) redescribeProject(project);
+  // Said out loud: a remembered choice outranking what the document itself
+  // implies is exactly the kind of thing that goes unnoticed until a compile
+  // comes back short.
+  rawLog('inf', `main document ${want} — remembered from a previous session, not inferred`);
 }
 
 /**
@@ -1553,8 +2375,8 @@ async function loadProjects() {
   }
 
   projectSel.setOptions(list.filter(p => !p.expectFailure).map(p => ({ label: p.key, value: p.key })));
-  projectSel.onchange = (v) => {
-    if (!confirmDiscard('Switch project')) { projectSel.value = project ? project.key : v; return; }
+  projectSel.onchange = async (v) => {
+    if (!await confirmDiscard('Switch project')) { projectSel.value = project ? project.key : v; return; }
     loadProject(v);
   };
   if (projectSel.value) await loadProject(projectSel.value);
@@ -1564,7 +2386,7 @@ async function loadProjects() {
 /** Open a real folder through NativeAPI. Desktop only for now. */
 async function openFolder() {
   if (!NativeAPI.openFolder) return;
-  if (!confirmDiscard('Open another folder')) return;
+  if (!await confirmDiscard('Open another folder')) return;
   let root;
   try {
     root = await NativeAPI.openFolder();
@@ -1663,11 +2485,29 @@ async function offerSystemTex() {
 
 async function importZip(file) {
   if (!file || !NativeAPI.importZip) return;
-  if (!confirmDiscard('Import a zip')) return;
-  if (project && !confirm(
-    `Importing replaces "${project.key}" — Revery TeX holds one project at a time.\n\n` +
-    `Export it first if you have not already. Continue?`
-  )) return;
+  if (!await confirmDiscard('Import a zip')) return;
+
+  // What is about to be replaced, asked of *storage* rather than of `project`.
+  //
+  // The guard here used to be `if (project && …)`, which skipped the warning in
+  // precisely the state where it matters most: a project that failed to open
+  // leaves `project` null while its files sit in storage untouched, so the next
+  // import wiped them with nothing said at all. On this backend there is no
+  // folder behind the store and no way back, so the question is asked whenever
+  // there is something to lose.
+  let held = 0;
+  if (NativeAPI.readDirectory) {
+    try { held = (await NativeAPI.readDirectory()).filter(e => e.type === 'file').length; }
+    catch { held = 0; }        // nothing stored yet — the one case with no risk
+  }
+  if (held) {
+    const whose = project ? `"${project.key}"` : 'the project already in storage';
+    if (!await ask(
+      `Importing ${file.name || 'that zip'} replaces ${whose} — ` +
+      `${held} file(s) — and Revery TeX holds one project at a time.\n\n` +
+      `This cannot be undone. Export it first if you have not already.\n\nContinue?`
+    )) return;
+  }
 
   setStatus('reading zip…', 'warn');
   let name;
@@ -1745,6 +2585,13 @@ async function loadFromDisk(root) {
   // Before anything reads project.main: the remembered choice overrules the
   // inference, and the tree, the outline and the editor all key off it.
   applyRememberedMain();
+  // A selection is about the project that was open, and its paths mean nothing
+  // in this one. The folders made from the tree, by contrast, are remembered.
+  clearSelection();
+  // And neither does an undo entry — every path in one names a file in the
+  // project that was open, and `figures/` exists in more projects than not.
+  history.clear();
+  applyRememberedEmptyDirs();
 
   syncMainSelect();
   projectSel.setOptions([{ label: project.key, value: project.key }]);
@@ -1770,6 +2617,9 @@ async function loadProject(key) {
   // No applyRememberedMain here: a fixture's main file is declared by the dev
   // server on purpose (book-legacy pins main_legacy.tex), and a remembered
   // override would silently compile something the gate did not ask for.
+  clearSelection();                 // as in loadFromDisk, and for the same reason
+  history.clear();                  // likewise
+  applyRememberedEmptyDirs();
   syncMainSelect();
   refreshDirty();
   chosenEngine = null;              // as in loadFromDisk, and for the same reason
@@ -2228,6 +3078,36 @@ document.addEventListener('keydown', (ev) => {
   ev.preventDefault();
   if (ev.key === 'Enter') compile(); else saveAll();
 });
+
+/**
+ * Ctrl+Z and Ctrl+Y for the Files panel.
+ *
+ * Scoped by *where the focus is*, not by excluding text-entry contexts as the
+ * handler above does. Ctrl+Z already means something everywhere else on the
+ * page — CodeMirror binds it at Prec.high — and a global handler that had to
+ * decide whether the editor wanted this keystroke would be wrong the first time
+ * someone added another editor. Requiring focus inside the sidebar means the
+ * event never reaches this listener while the editor has it, so the two cannot
+ * contend at all.
+ *
+ * `#sidebar` rather than `#filetree`: the + button that creates a folder lives
+ * in the panel header, outside the tree itself, so binding to the tree alone
+ * would leave the one shortcut unreachable straight after the one operation
+ * most likely to want it. The sidebar holds nothing else — no input, no editor.
+ *
+ * Ctrl+Y and Ctrl+Shift+Z both redo, because people arrive with both. Shift
+ * makes the event's `key` a capital Z.
+ */
+document.addEventListener('keydown', (ev) => {
+  if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return;
+  const z = ev.key === 'z' || ev.key === 'Z';
+  const y = ev.key === 'y' || ev.key === 'Y';
+  if (!z && !y) return;
+  if (dialogIsOpen()) return;
+  if (!ev.target?.closest?.('#sidebar')) return;
+  ev.preventDefault();
+  if (y || ev.shiftKey) redoTree(); else undoTree();
+});
 // Presence of the method is the signal, never a check on the environment name.
 // A shell that cannot open a folder does not get a button that implies it can.
 if (!NativeAPI.openFolder) $('open').style.display = 'none';
@@ -2368,11 +3248,31 @@ window.addEventListener('beforeunload', (e) => {
   return w;
 });
 
+// The same guard for a shell whose window close never reaches `beforeunload`.
+//
+// Presence of the method is the signal, as everywhere else: a backend that can
+// intercept its own close does not define these, and gets nothing here. Without
+// it the warning above was browser-only — the desktop build let a window close
+// take every unsaved buffer with it, which is the one place a user is least
+// likely to have another copy.
+if (NativeAPI.onCloseRequested && NativeAPI.closeWindow) {
+  NativeAPI.onCloseRequested(async () => {
+    const w = unsavedWarning();
+    // `await`, and it is load-bearing rather than tidiness: this shell replaces
+    // `window.confirm` with an asynchronous one returning a *Promise*, and a
+    // Promise is always truthy. Testing it directly closes the window every
+    // time, however the question is answered. See `ask()` in dialog.js.
+    if (!w || await ask(`${w}\n\nClose Revery TeX anyway? Your unsaved edits will be lost.`)) {
+      NativeAPI.closeWindow();
+    }
+  });
+}
+
 /** True if it is safe to discard the current buffers. */
-function confirmDiscard(action) {
+async function confirmDiscard(action) {
   const w = unsavedWarning();
   if (!w) return true;
-  return confirm(`${w}\n\n${action} anyway? Your unsaved edits will be lost.`);
+  return ask(`${w}\n\n${action} anyway? Your unsaved edits will be lost.`);
 }
 
 // ── global error surface ───────────────────────────────────────────────
@@ -2468,6 +3368,8 @@ window.__reveryTexTest = {
 // Headless driver hook, same contract as the Phase 0 harness.
 window.__reveryTexApp = {
   get ready() { return !!project; },
+  /** Which project is open. Per-project state is keyed by this. */
+  get projectKey() { return project?.key ?? null; },
   /**
    * Whether a compile is in flight.
    *
@@ -2516,6 +3418,21 @@ window.__reveryTexApp = {
       for (const r of preview.linksOnPage(p)) out.push({ page: p, ...r });
     }
     return out;
+  },
+  /**
+   * What the Files panel would undo or redo next.
+   *
+   * The labels rather than the entries: a driver needs to know that a delete
+   * left nothing undoable, and that a move recorded one operation and not one
+   * per file — neither of which is visible from the tree.
+   */
+  treeHistory() {
+    return {
+      depth: history.depth,
+      redoDepth: history.redoDepth,
+      undo: history.peekUndo()?.label ?? null,
+      redo: history.peekRedo()?.label ?? null
+    };
   },
   /** Follow the first link that resolves to a destination. Returns where it went. */
   async followFirstLink() {

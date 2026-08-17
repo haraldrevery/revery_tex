@@ -46,6 +46,45 @@ async function idbGet(key) {
   });
 }
 
+/* ── which folder this is ────────────────────────────────────────────── */
+//
+// A browser is never told the path of a folder someone picked — only its
+// *name*. That is not an identity: `~/work/thesis` and `~/archive/thesis` are
+// both `thesis`, and crash backups keyed on the name meant one project's
+// unsaved text was offered as recovery for the other's same-named file.
+// Accepting it wrote A's text into B's buffer, and because B's stamp was still
+// valid the next save raised no conflict and overwrote B's file.
+//
+// `isSameEntry()` is the API's own answer to "is this the same folder", so each
+// folder is registered once against a generated id and recognised by asking it.
+// The desktop backends get this for free by hashing the absolute path.
+
+const ID_KEY = 'roots';
+let rootId = null;
+
+/**
+ * The stable id for `handle`, creating one the first time it is seen.
+ *
+ * Falls back to the folder name if the registry cannot be read or `isSameEntry`
+ * is missing. That is the old, colliding behaviour — but a backup written under
+ * a weaker key is still better than no backup, and the failure is confined to
+ * this one feature rather than stopping the folder from opening.
+ */
+async function identify(handle) {
+  try {
+    const roots = (await idbGet(ID_KEY)) || [];
+    for (const entry of roots) {
+      if (entry && entry.handle && await handle.isSameEntry(entry.handle)) return entry.id;
+    }
+    const id = `${handle.name}-${Math.random().toString(36).slice(2, 10)}`;
+    roots.push({ id, handle });
+    await idbPut(ID_KEY, roots);
+    return id;
+  } catch {
+    return handle.name;
+  }
+}
+
 /* ── the backend ─────────────────────────────────────────────────────── */
 
 let rootHandle = null;
@@ -109,6 +148,24 @@ async function parentOf(path) {
   return { dir, name };
 }
 
+/**
+ * Does something already sit at `path` on disk?
+ *
+ * `getFileHandle` and `getDirectoryHandle` without `create` throw
+ * `NotFoundError` when nothing is there, which is the only way this API answers
+ * the question. Both are asked: a directory in the way is just as much a reason
+ * to refuse as a file.
+ */
+async function destinationExists(path) {
+  let dir, name;
+  try { ({ dir, name } = await parentOf(path)); }
+  catch { return false; }                    // no parent directory, so nothing there
+  for (const get of ['getFileHandle', 'getDirectoryHandle']) {
+    try { await dir[get](name); return true; } catch { /* not this kind */ }
+  }
+  return false;
+}
+
 /** Ask for read/write permission, prompting only if we do not already have it. */
 async function ensurePermission(handle) {
   const opts = { mode: 'readwrite' };
@@ -127,6 +184,7 @@ export const webFsImpl = {
     });
     if (!dir) return null;
     rootHandle = dir;
+    rootId = await identify(dir);
     handles.clear();
     await idbPut(HANDLE_KEY, dir).catch(() => {});
     return dir.name;
@@ -144,6 +202,7 @@ export const webFsImpl = {
     if (!saved) return null;
     if ((await saved.queryPermission({ mode: 'readwrite' })) !== 'granted') return null;
     rootHandle = saved;
+    rootId = await identify(saved);
     return saved.name;
   },
 
@@ -153,6 +212,7 @@ export const webFsImpl = {
     if (!saved) return null;
     if (!(await ensurePermission(saved))) return null;
     rootHandle = saved;
+    rootId = await identify(saved);
     handles.clear();
     return saved.name;
   },
@@ -229,7 +289,14 @@ export const webFsImpl = {
    */
   async renameFile(from, to) {
     const src = requireHandle(from);
-    if (handles.has(to)) throw new Error(`Cannot rename to ${to}: that already exists`);
+    // Asked of the disk, not of `handles`. That map is only filled by the
+    // directory walk at open time, so a file created in the folder since then
+    // was invisible to it — and `handleForCreate` below would then open the
+    // destination with `create: true` and truncate it. Both desktop backends
+    // ask the filesystem (`dest.exists()` / `fs.existsSync`); this now does too.
+    if (await destinationExists(to)) {
+      throw new Error(`Cannot rename to ${to}: that already exists`);
+    }
     const bytes = new Uint8Array(await (await src.getFile()).arrayBuffer());
 
     const dest = await handleForCreate(to);
@@ -245,15 +312,15 @@ export const webFsImpl = {
   /* Crash backups live in localStorage: small, synchronous, and survives a tab
      crash. Same shape as the desktop backups so the recovery UI is shared. */
   async writeBackup(path, content) {
-    const key = `revery_tex_backup:${rootHandle ? rootHandle.name : ''}:${path}`;
+    const key = `revery_tex_backup:${rootId || ''}:${path}`;
     try {
       localStorage.setItem(key, JSON.stringify({ path, saved: Date.now(), content }));
     } catch { /* quota — a backup is best effort, never fatal */ }
   },
 
   async listStaleBackups() {
-    if (!rootHandle) return [];
-    const prefix = `revery_tex_backup:${rootHandle.name}:`;
+    if (!rootHandle || !rootId) return [];
+    const prefix = `revery_tex_backup:${rootId}:`;
     const out = [];
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
@@ -268,7 +335,7 @@ export const webFsImpl = {
   },
 
   async discardBackup(path) {
-    localStorage.removeItem(`revery_tex_backup:${rootHandle ? rootHandle.name : ''}:${path}`);
+    localStorage.removeItem(`revery_tex_backup:${rootId || ''}:${path}`);
   }
 };
 

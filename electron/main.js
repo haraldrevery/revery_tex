@@ -100,6 +100,28 @@ function createWindow() {
     if (!url.startsWith(ORIGIN)) e.preventDefault();
   });
 
+  // The renderer's `beforeunload` returns a string when buffers are dirty. In a
+  // browser that produces the "leave site?" prompt; in Electron it **silently
+  // cancels the close** and shows nothing at all, so the window simply refused
+  // to shut with no explanation anywhere. This is the missing half: ask, and
+  // honour the answer.
+  //
+  // Cancel is the default button *and* the escape route, so a mistyped Enter or
+  // a dismissed dialog keeps the work rather than discarding it — the same rule
+  // the in-page `ask()` follows.
+  win.webContents.on('will-prevent-unload', (e) => {
+    const choice = dialog.showMessageBoxSync(win, {
+      type: 'warning',
+      buttons: ['Cancel', 'Close anyway'],
+      defaultId: 0,
+      cancelId: 0,
+      title: 'Unsaved changes',
+      message: 'This project has unsaved changes.',
+      detail: 'Close Revery TeX anyway? Your unsaved edits will be lost.'
+    });
+    if (choice === 1) e.preventDefault();   // preventDefault here *allows* the unload
+  });
+
   win.loadURL(`${ORIGIN}/index.html`);
   return win;
 }
