@@ -64,6 +64,32 @@ async function main() {
 
     await cdp.waitFor('!!window.__reveryTexApp', { what: 'app boot', timeoutMs: 60000 });
 
+    // The app draws its own confirm now (see ask() in dialog.js), so the CDP
+    // auto-accept above no longer covers it. Same policy for the in-page one:
+    // answer OK, and keep what it said so a check can assert on it. Without it
+    // every flow that asks — switching project, discarding edits, deleting —
+    // hangs on a modal nobody clicks, and the run looks like a timeout rather
+    // than an unanswered question.
+    //
+    // Installed for *every* document, not just this one: the suite reloads the
+    // page to check that settings persist, and an observer evaluated once is
+    // gone the moment it does.
+    const ANSWER_ASKS = `(() => {
+      window.__askLog = [];
+      const answer = () => {
+        const p = document.querySelector('.dlg-ask');
+        if (!p) return;
+        window.__askLog.push(p.textContent);
+        const ok = [...document.querySelectorAll('.dlg-foot button')]
+          .find(b => /^OK$/.test(b.textContent.trim()));
+        if (ok) ok.click();
+      };
+      new MutationObserver(answer).observe(document, { childList: true, subtree: true });
+      answer();
+    })()`;
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: ANSWER_ASKS });
+    await cdp.evaluate(ANSWER_ASKS);
+
     /* ── the shell chose the right backend and says what it is ──────── */
     const shell = await cdp.evaluate(`(() => ({
       backend: window.NativeAPI.env,
@@ -222,13 +248,78 @@ async function main() {
         stored: (await window.NativeAPI.readTextFile('notes_renamed.tex')).content
       };
     })()`, true);
+    // Conflicts are asked in the page now, not through window.confirm, so a
+    // native-dialog tally would pass without ever having been able to fail.
+    const conflictShown = await cdp.evaluate(
+      `(document.querySelector('.dlg-ask') || {}).textContent || ''`, true);
     const asked = dialogs.slice(dialogsBefore)
       .filter(d => /changed (on disk|in another tab)/i.test(d.message));
     check('a rename moves the file in the tree', renamed.moved, renamed.status);
     check('the first save after a rename raises no conflict',
-      asked.length === 0, asked.map(d => d.message).join(' | '));
+      asked.length === 0 && !/changed on disk/i.test(conflictShown),
+      conflictShown || asked.map(d => d.message).join(' | ') || 'nothing asked');
     check('and the edit reaches storage',
       renamed.stored === 'written after a rename\n', JSON.stringify(renamed.stored));
+
+    // A folder the backend refuses to remove must not be reported as deleted.
+    // This needs a project with real storage behind it — `canWriteDisk()` gates
+    // the whole disk branch, so on a dev-server fixture the delete never
+    // reaches a backend at all and the case cannot arise.
+    const kept = await cdp.evaluate(`(async () => {
+      const app = window.__reveryTexApp;
+      const api = (await import('./jvscrpt_and_css_extra/native_api.js')).NativeAPI;
+      const real = api.deleteFile;
+      // Refuse the directory exactly as a non-empty rmdir does. The files
+      // inside still delete normally, which is the situation being modelled:
+      // the folder holds something this project never loaded.
+      api.deleteFile = async (p) => {
+        if (p === 'kept_probe') throw new Error('Directory not empty');
+        return real(p);
+      };
+      try {
+        document.getElementById('newfile').click();
+        [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+          .find(b => /new folder/i.test(b.textContent)).click();
+        await new Promise(r => setTimeout(r, 80));
+        const i = document.querySelector('.dlg input[type="text"]');
+        if (!i) return { skipped: 'no dialog input' };
+        i.value = 'kept_probe';
+        i.dispatchEvent(new Event('input', { bubbles: true }));
+        [...document.querySelectorAll('.dlg-foot button')]
+          .find(b => !/cancel/i.test(b.textContent)).click();
+        await new Promise(r => setTimeout(r, 150));
+
+        const row = [...document.querySelectorAll('#filetree .node')]
+          .find(r => r.dataset.dir === 'kept_probe');
+        if (!row) return { skipped: 'probe folder not drawn' };
+        row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+        await new Promise(r => setTimeout(r, 80));
+        const del = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+          .find(b => /^Delete/.test(b.textContent.trim()));
+        if (!del) return { skipped: 'no Delete row' };
+        del.click();
+        await new Promise(r => setTimeout(r, 550));   // asked and auto-answered
+
+        const status = document.getElementById('status');
+        return {
+          text: status.textContent,
+          green: status.classList.contains('ok'),
+          stillDrawn: [...document.querySelectorAll('#filetree .node')]
+            .some(r => r.dataset.dir === 'kept_probe')
+        };
+      } finally {
+        api.deleteFile = real;
+      }
+    })()`, true);
+
+    if (kept.skipped) {
+      check('a folder that could not be removed is not called deleted', false, kept.skipped);
+    } else {
+      check('a folder that could not be removed is not called deleted',
+        !kept.green && /kept/.test(kept.text), `status: ${kept.text}`);
+      check('and its row stays, so the tree still matches storage',
+        kept.stillDrawn, JSON.stringify(kept));
+    }
 
     /* ── it actually compiles ───────────────────────────────────────── */
     const result = await cdp.evaluate(`window.__reveryTexApp.compile()`, true);

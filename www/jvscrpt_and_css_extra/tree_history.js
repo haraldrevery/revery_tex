@@ -66,19 +66,28 @@ export function createHistory({ limit = 50 } = {}) {
      * Called *after* the inverse has been applied and verified, never before —
      * see the note at the top of this file.
      *
-     * @returns {Entry|null} the entry that moved
+     * `expected` is the entry the caller checked and acted on, and the commit
+     * refuses unless it is still on top. Applying an inverse means awaiting the
+     * backend, and the app is not frozen while that happens: a drag completing
+     * in the gap pushes an entry of its own, and a commit that just popped
+     * whatever was on top would file *that* one away as undone. The caller can
+     * then treat the refusal as "something else moved the stack underneath me"
+     * rather than silently recording the wrong history.
+     *
+     * @param {Entry} expected  what `peekUndo()` returned before the work began
+     * @returns {Entry|null} the entry that moved, or null if it was not on top
      */
-    commitUndo() {
+    commitUndo(expected) {
+      if (!past.length || (expected !== undefined && top(past) !== expected)) return null;
       const entry = past.pop();
-      if (!entry) return null;
       future.push(entry);
       return entry;
     },
 
     /** The mirror of `commitUndo`, after the operation has been re-applied. */
-    commitRedo() {
+    commitRedo(expected) {
+      if (!future.length || (expected !== undefined && top(future) !== expected)) return null;
       const entry = future.pop();
-      if (!entry) return null;
       past.push(entry);
       return entry;
     },

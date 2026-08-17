@@ -56,6 +56,23 @@ const tauriImpl = {
   listStaleBackups: () => invoke('list_stale_backups'),
   discardBackup: (path) => invoke('discard_backup', { path }),
 
+  // Closing a native window does not fire `beforeunload` — the webview is torn
+  // down, not navigated — so this shell has to be told when the user tries, and
+  // given a way to say yes. Present only here: the browser has `beforeunload`
+  // and Electron intercepts the close in its main process, so neither needs it,
+  // and a method by this name that did nothing would be exactly the half-truth
+  // the rule at the top of this file exists to prevent.
+  //
+  // The backend cancels a close only after `arm_close_guard` has been called,
+  // so this resolves *after* the listener is really attached. Failing to arm it
+  // costs the warning; arming it before the listener existed would cost the
+  // ability to close the window at all.
+  onCloseRequested: async (handler) => {
+    await window.__TAURI__.event.listen('revery-tex://close-requested', handler);
+    await invoke('arm_close_guard');
+  },
+  closeWindow: () => invoke('close_window'),
+
   // A system TeX installation, if there is one. Present only on the desktop:
   // a browser cannot start a process, and NativeTexEngine checks for these by
   // presence rather than asking which shell it is in.

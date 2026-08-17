@@ -25,7 +25,7 @@ import { writeZip } from './zip_core.js';
 import * as settings from './settings.js';
 import { attachMenu, openMenuAt, SelectMenu } from './menus.js';
 import { toolboxRows, contextRows } from './toolbox.js';
-import { openDialog, dialogIsOpen } from './dialog.js';
+import { openDialog, dialogIsOpen, ask } from './dialog.js';
 import { openLegal, copySourceLink } from './legal.js';
 import { openAbout } from './about.js';
 import {
@@ -568,9 +568,15 @@ async function saveAll() {
   // "saved 3 file(s)" over a run that discarded one of them.
   let written = 0;
   let reloaded = 0;
+  // Which file the run died on. A save that stops partway has written some of
+  // the batch and not the rest, and "✗ save failed" alone said neither how far
+  // it got nor where to look — so there was no way to tell a total failure from
+  // one that had already put nine of ten files safely on disk.
+  let failedAt = null;
   try {
     for (const [path, f] of pending) {
       let stamp;
+      failedAt = path;
       try {
         stamp = await NativeAPI.writeFile(path, f.content, f.stamp || null);
       } catch (err) {
@@ -598,15 +604,20 @@ async function saveAll() {
       // the file is on disk it is noise, and would otherwise be offered for
       // recovery forever.
       await NativeAPI.discardBackup?.(path).catch(() => {});
+      failedAt = null;
     }
-    refreshDirty();
     setStatus(
       `saved ${written} file(s)${reloaded ? `, ${reloaded} reloaded from disk` : ''}`,
       reloaded ? 'warn' : 'ok');
     if (settings.settings.autoCompile) await compile();
   } catch (err) {
-    setStatus(`✗ save failed: ${err}`, 'err');
-    rawLog('err', `save failed: ${err}`);
+    setStatus(`✗ saved ${written} of ${pending.length} — ${failedAt} failed: ${err}`, 'err');
+    rawLog('err', `save stopped at ${failedAt} after ${written} file(s): ${err}`);
+  } finally {
+    // In `finally`, not after the loop: on the error path this never ran, so the
+    // Save button went on offering the pre-save count and the tree kept its
+    // dirty dots on files that were already written.
+    refreshDirty();
   }
 }
 
@@ -619,7 +630,7 @@ async function resolveConflict(path, msg) {
   const detail = msg.split('CONFLICT:').pop();
   rawLog('err', `conflict: ${detail}`);
   showTab('raw');
-  const overwrite = confirm(
+  const overwrite = await ask(
     `"${path}" changed on disk since you opened it.\n\n${detail}\n\n` +
     `OK  — overwrite the file with your version\n` +
     `Cancel — keep the version on disk and reload it (your edits are lost)`
@@ -627,16 +638,30 @@ async function resolveConflict(path, msg) {
   return overwrite ? 'overwrite' : 'reload';
 }
 
-// Debounced, and only for the file being edited: this is a crash net, not a
-// save. It writes outside the project so recovery files never pollute git or
-// get swept into a compile.
+// Debounced: this is a crash net, not a save. It writes outside the project so
+// recovery files never pollute git or get swept into a compile.
+//
+// Every dirty buffer, not just the one on screen. It used to read `currentPath`
+// *inside* the timer, which was wrong twice over: no other edited file was ever
+// backed up at all, and switching files inside the two-second window meant the
+// timer fired against the new file and the one just left was never written
+// either. A crash then took every edit except those in whichever file happened
+// to have been sat in, idle, when it happened. Nothing said so — the feature
+// looked like it covered the session.
+//
+// `saveAll` discards a file's backup as it writes it, so this set is the
+// unsaved work and stays small.
 function scheduleBackup() {
   if (!project?.onDisk || !NativeAPI.writeBackup) return;
   clearTimeout(backupTimer);
   backupTimer = setTimeout(async () => {
-    const f = currentPath && project.files.get(currentPath);
-    if (!f || !f.dirty) return;
-    try { await NativeAPI.writeBackup(currentPath, f.content); } catch { /* best effort */ }
+    if (!project) return;
+    for (const [path, f] of project.files) {
+      // Binaries are not backed up: they are written at drop time and never
+      // edited here, so there is no unsaved version of one to lose.
+      if (!f.dirty || f.binary || typeof f.content !== 'string') continue;
+      try { await NativeAPI.writeBackup(path, f.content); } catch { /* best effort */ }
+    }
   }, 2000);
 }
 
@@ -647,7 +672,7 @@ async function offerRecovery() {
   if (!stale.length) return;
 
   const names = stale.map(b => b.path).join(', ');
-  const ok = confirm(
+  const ok = await ask(
     `Unsaved changes from a previous session were found in:\n\n${names}\n\n` +
     `Restore them into the editor? (Choosing Cancel discards them.)`
   );
@@ -934,6 +959,34 @@ function renderTree() {
   }
 }
 
+/**
+ * Put focus back in the panel after an operation that came from it.
+ *
+ * A menu row is a button inside a transient menu, and dismissing that menu
+ * removes the element focus is sitting on — so every operation reached through
+ * the tree's context menu or the + button ends with focus on `<body>`. That is
+ * the same defect `renderTree` already guards against for folding a directory,
+ * and for the same reason: it makes Tab restart from the top of the page.
+ *
+ * It is also what decides whether Ctrl+Z can be reached. The shortcut is bound
+ * on `#sidebar` precisely so it can never contend with the editor's own undo,
+ * which means focus has to actually be in there — and after "New folder…" it
+ * was not, so the one keystroke someone reaches for immediately after creating
+ * a folder in the wrong place did nothing at all, silently.
+ *
+ * Falls back through the first row to the + button, which is in the panel
+ * header and so still inside `#sidebar`.
+ */
+function focusTreeRow(path) {
+  const tree = $('filetree');
+  // Already somewhere in the panel — a drag leaves focus on the row it moved,
+  // and stealing it back to a different row would be worse than leaving it.
+  if ($('sidebar')?.contains(document.activeElement)) return;
+  const row = path && tree.querySelector(
+    `.node[data-path="${CSS.escape(path)}"], .node[data-dir="${CSS.escape(path)}"]`);
+  (row || tree.querySelector('.node') || $('newfile'))?.focus();
+}
+
 // ── drag and drop in the tree ──────────────────────────────────────────
 //
 // Two different drags land here and they are not the same thing:
@@ -1130,7 +1183,7 @@ function highlightDrop(el) {
  * @param {string[]} targets  where each of them lands, in the same order
  * @returns {boolean} whether to go ahead
  */
-function confirmBreaksIncludes(moving, targets) {
+async function confirmBreaksIncludes(moving, targets) {
   const broken = [];
   for (const path of moving) {
     for (const by of referencesTo(project, path)) {
@@ -1148,7 +1201,7 @@ function confirmBreaksIncludes(moving, targets) {
   const more = broken.length > 8 ? `\n  …and ${broken.length - 8} more` : '';
   const what = moving.length > 1 ? `these ${moving.length} files` : `"${moving[0]}"`;
   const dest = dirOf(targets[0]) || 'the project root';
-  return confirm(
+  return ask(
     `Moving ${what} to ${dest} will break ${broken.length} ` +
     `reference${broken.length > 1 ? 's' : ''}:\n\n${lines}${more}\n\n` +
     `LaTeX only warns about a missing \\include, so the document will still ` +
@@ -1438,6 +1491,9 @@ async function createFile(parent = '') {
     // "Undo creating x.tex" as a menu row. It also keeps the row from reading
     // as a *second* "New file…" sitting directly above the real one.
     history.push({ kind: 'file', path, ...made, label: `creating ${path}` });
+    // The dialog that asked for the name has taken focus with it; without this
+    // Ctrl+Z is unreachable exactly when it is most wanted. See focusTreeRow.
+    focusTreeRow(path);
     setStatus(`created ${path}`, 'ok');
   });
 }
@@ -1455,6 +1511,7 @@ function createFolder(parent = '') {
     if (!path) { setStatus('✗ that is not a usable folder name', 'err'); return; }
     addFolder(path);
     history.push({ kind: 'folder', path, label: `creating ${path}/` });
+    focusTreeRow(path);
     // No mkdir anywhere in NativeAPI, and none is needed: every backend's write
     // creates missing parents. The folder is remembered for this project, so it
     // is still here on reload — it just does not exist on disk until something
@@ -1550,7 +1607,7 @@ async function moveEntries(moves, record = true) {
   // caller reaches this function precisely so a check cannot exist on one path
   // only. One dialog for the batch — a reference from inside the moving set is
   // not broken by the move, which is why the whole set is passed at once.
-  if (!confirmBreaksIncludes(allMoving, allTargets)) return false;
+  if (!await confirmBreaksIncludes(allMoving, allTargets)) return false;
 
   let moved = 0;
   let complete = true;
@@ -1594,7 +1651,10 @@ async function moveEntries(moves, record = true) {
   const what = plan.length > 1
     ? `${plan.length} items → ${dirOf(one.to) || 'the project root'}`
     : (one.isDir ? `${one.from}/ → ${one.to}/` : `${one.from} → ${one.to}`);
-  if (moved) setStatus(`moved ${what}`, 'ok');
+  // Only when the whole batch landed. A move that stopped partway has already
+  // said so in the catch above, and overwriting that with a green "moved 12
+  // items" left the failure visible nowhere but the log console.
+  if (moved && complete) setStatus(`moved ${what}`, 'ok');
 
   if (record) {
     // A batch that stopped partway has no clean inverse — some files are at
@@ -1608,6 +1668,10 @@ async function moveEntries(moves, record = true) {
     // through `emptyDirs` above without any file changing hands.
     else history.push({ kind: 'move', label: `moving ${what}`,
                         moves: plan.map(({ from, to, isDir }) => ({ from, to, isDir })) });
+    // A drag already leaves focus on the row it moved and focusTreeRow will
+    // leave that alone; this is for the rename dialog and the Move-to-folder
+    // menu, which do not.
+    focusTreeRow(one.to);
   }
   return moved > 0;
 }
@@ -1774,13 +1838,35 @@ async function stepHistory(back) {
   }
 
   historyBusy = true;
+  // What the status bar said before the inverse ran, so a refusal that explained
+  // itself is not talked over. `moveEntries` names the actual reason — the main
+  // document, a collision — and replacing that with a generic "could not undo"
+  // takes away the only sentence that says what to do about it.
+  const saidBefore = $('status').textContent;
   try {
     const ok = back ? await applyInverse(entry) : await applyForward(entry);
     // Consumed only on success. A refusal — a collision, the main document, or
     // the \include warning answered No — leaves the entry where it was.
-    if (!ok) { setStatus(`✗ could not ${back ? 'undo' : 'redo'} ${entry.label}`, 'err'); return; }
-    if (back) history.commitUndo(); else history.commitRedo();
+    if (!ok) {
+      if ($('status').textContent === saidBefore) {
+        setStatus(`✗ could not ${back ? 'undo' : 'redo'} ${entry.label}`, 'err');
+      }
+      return;
+    }
+    // By identity: applying the inverse awaited the backend, and a drag that
+    // finished in that gap has pushed an entry of its own. Committing blind
+    // would file that one away as undone.
+    const moved = back ? history.commitUndo(entry) : history.commitRedo(entry);
+    if (!moved) {
+      history.clear();
+      setStatus(`✗ the project changed while undoing ${entry.label}; undo history cleared`, 'err');
+      rawLog('wrn', `undo raced another change to the tree — history cleared`);
+      return;
+    }
     setStatus(`${back ? 'undid' : 'redid'} ${entry.label}`, 'ok');
+    // So a second Ctrl+Z lands: the redraw above may have removed the row focus
+    // was on, and undo is the one action people repeat without looking.
+    focusTreeRow(entry.kind === 'move' ? entry.moves[0]?.from : entry.path);
   } finally {
     historyBusy = false;
   }
@@ -1825,7 +1911,7 @@ async function deleteEntries(entries) {
   const what = batch.length > 1
     ? `${batch.length} items and the ${doomed.length} file(s) in them`
     : (batch[0].isDir ? `${batch[0].path}/ and the ${doomed.length} file(s) in it` : batch[0].path);
-  if (!confirm(`Delete ${what}?\n\nThis cannot be undone from inside the app.`)) return;
+  if (!await ask(`Delete ${what}?\n\nThis cannot be undone from inside the app.`)) return;
 
   // The message above is the literal truth and stays that way. `deleteFile` is a
   // real delete on all five backends — no trash, nothing to move back — so this
@@ -1835,6 +1921,10 @@ async function deleteEntries(entries) {
   // paths that are no longer there.
   history.barrier();
 
+  let complete = true;
+  // Folders the backend refused to remove because something it cannot see is
+  // still inside. Their rows stay, so the tree keeps matching the disk.
+  const kept = [];
   try {
     // One call per file, then the directories themselves. No backend here can
     // remove a tree, which is deliberate: there is no single call that could
@@ -1848,23 +1938,43 @@ async function deleteEntries(entries) {
     }
     for (const e of batch) {
       if (e.isDir && canWriteDisk() && NativeAPI.deleteFile) {
-        await NativeAPI.deleteFile(e.path).catch(() => {});  // gone with its files on some backends
+        // A non-empty directory is refused by every backend on purpose, and it
+        // is refused precisely when the folder still holds something this
+        // project never loaded — a dotfile, a symlink, a nested subdirectory,
+        // node_modules. Swallowing that told the user the folder was gone while
+        // it sat there on disk, because the tree is drawn from project.files
+        // and the row had already stopped being backed by anything.
+        await NativeAPI.deleteFile(e.path).catch(() => { kept.push(e.path); });
       }
     }
   } catch (err) {
+    complete = false;
     setStatus(`✗ ${err.message || err}`, 'err');
     rawLog('err', `delete stopped partway: ${err.message || err}`);
   }
   let hadEmpty = false;
   for (const e of batch) {
     selected.delete(e.path);
+    // A folder that is still on disk is still a folder. Keeping it in emptyDirs
+    // is what draws the row that says so.
+    if (kept.includes(e.path)) continue;
     if (emptyDirs.delete(e.path)) hadEmpty = true;
   }
-  if (hadEmpty) rememberEmptyDirs();
+  for (const p of kept) emptyDirs.add(p);
+  if (hadEmpty || kept.length) rememberEmptyDirs();
   if (!currentPath && project.files.has(project.main)) openFile(project.main);
   renderTree();
   refreshDirty();
   scheduleOutline();
+  if (!complete) return;            // the catch above has already said what went wrong
+  if (kept.length) {
+    // Never "deleted x/ … kept x/" in one breath. The files inside really did
+    // go; the folder did not, and saying so plainly is the whole point.
+    setStatus(`removed ${doomed.length} file(s), but kept ${kept.join(', ')} — ` +
+              `still holding files this project does not manage`, 'warn');
+    for (const p of kept) rawLog('wrn', `${p} was not removed: it is not empty on disk`);
+    return;
+  }
   setStatus(`deleted ${what}`, 'ok');
 }
 
@@ -2148,8 +2258,8 @@ async function loadProjects() {
   }
 
   projectSel.setOptions(list.filter(p => !p.expectFailure).map(p => ({ label: p.key, value: p.key })));
-  projectSel.onchange = (v) => {
-    if (!confirmDiscard('Switch project')) { projectSel.value = project ? project.key : v; return; }
+  projectSel.onchange = async (v) => {
+    if (!await confirmDiscard('Switch project')) { projectSel.value = project ? project.key : v; return; }
     loadProject(v);
   };
   if (projectSel.value) await loadProject(projectSel.value);
@@ -2159,7 +2269,7 @@ async function loadProjects() {
 /** Open a real folder through NativeAPI. Desktop only for now. */
 async function openFolder() {
   if (!NativeAPI.openFolder) return;
-  if (!confirmDiscard('Open another folder')) return;
+  if (!await confirmDiscard('Open another folder')) return;
   let root;
   try {
     root = await NativeAPI.openFolder();
@@ -2258,8 +2368,8 @@ async function offerSystemTex() {
 
 async function importZip(file) {
   if (!file || !NativeAPI.importZip) return;
-  if (!confirmDiscard('Import a zip')) return;
-  if (project && !confirm(
+  if (!await confirmDiscard('Import a zip')) return;
+  if (project && !await ask(
     `Importing replaces "${project.key}" — Revery TeX holds one project at a time.\n\n` +
     `Export it first if you have not already. Continue?`
   )) return;
@@ -3003,11 +3113,31 @@ window.addEventListener('beforeunload', (e) => {
   return w;
 });
 
+// The same guard for a shell whose window close never reaches `beforeunload`.
+//
+// Presence of the method is the signal, as everywhere else: a backend that can
+// intercept its own close does not define these, and gets nothing here. Without
+// it the warning above was browser-only — the desktop build let a window close
+// take every unsaved buffer with it, which is the one place a user is least
+// likely to have another copy.
+if (NativeAPI.onCloseRequested && NativeAPI.closeWindow) {
+  NativeAPI.onCloseRequested(async () => {
+    const w = unsavedWarning();
+    // `await`, and it is load-bearing rather than tidiness: this shell replaces
+    // `window.confirm` with an asynchronous one returning a *Promise*, and a
+    // Promise is always truthy. Testing it directly closes the window every
+    // time, however the question is answered. See `ask()` in dialog.js.
+    if (!w || await ask(`${w}\n\nClose Revery TeX anyway? Your unsaved edits will be lost.`)) {
+      NativeAPI.closeWindow();
+    }
+  });
+}
+
 /** True if it is safe to discard the current buffers. */
-function confirmDiscard(action) {
+async function confirmDiscard(action) {
   const w = unsavedWarning();
   if (!w) return true;
-  return confirm(`${w}\n\n${action} anyway? Your unsaved edits will be lost.`);
+  return ask(`${w}\n\n${action} anyway? Your unsaved edits will be lost.`);
 }
 
 // ── global error surface ───────────────────────────────────────────────

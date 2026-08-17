@@ -96,6 +96,45 @@ test('the cap drops the oldest entry, keeping the newest', async () => {
   assert.equal(h.peekUndo(), null);   // 'a' and 'b' were evicted
 });
 
+test('a commit refuses when something else has moved the stack underneath it', async () => {
+  const h = await fresh();
+  const a = e('a');
+  h.push(a);
+
+  // What the caller checked and started applying.
+  assert.equal(h.peekUndo(), a);
+  // …and while it awaited the backend, a drag finished and recorded itself.
+  const b = e('b');
+  h.push(b);
+
+  // Committing `a` must not file `b` away as though it had been undone.
+  assert.equal(h.commitUndo(a), null);
+  assert.equal(h.peekUndo(), b, 'the interloper is still where it was');
+  assert.equal(h.redoDepth, 0, 'and nothing was moved to the redo stack');
+});
+
+test('a commit still works when the expected entry is on top', async () => {
+  const h = await fresh();
+  const a = e('a');
+  h.push(a);
+  assert.equal(h.commitUndo(a), a);
+  assert.equal(h.peekRedo(), a);
+  assert.equal(h.commitRedo(a), a);
+  assert.equal(h.peekUndo(), a);
+});
+
+test('redo refuses the same way', async () => {
+  const h = await fresh();
+  const a = e('a');
+  h.push(a);
+  h.commitUndo(a);                 // 'a' is now redoable
+
+  const other = e('other');
+  assert.equal(h.commitRedo(other), null);
+  assert.equal(h.peekRedo(), a);
+  assert.equal(h.depth, 0);
+});
+
 test('an empty history commits nothing rather than throwing', async () => {
   const h = await fresh();
   assert.equal(h.peekUndo(), null);

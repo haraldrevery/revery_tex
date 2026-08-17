@@ -208,6 +208,72 @@ the panel header, outside the tree. The tree's right-click menu carries Undo and
 Redo rows too, since a shortcut is neither discoverable nor reachable with a
 mouse.
 
+**Every operation puts focus back in the panel.** A menu row is a button inside a
+transient menu, and dismissing that menu removes the element focus is sitting on
+— so "New folder…" used to end with focus on `<body>`. That made the undo above
+*unreachable*: the shortcut is scoped to `#sidebar` on purpose, so it returned
+without acting and without saying anything, at exactly the moment someone reaches
+for it. `focusTreeRow()` is called after each recorded operation, and a UI check
+asserts focus lands in the panel with nothing focusing a row on the test's
+behalf. That last part is the point — the earlier version of the check called
+`.focus()` first and passed against the broken build.
+
+### Losing work, and the guards that stop it
+
+Three of these guards existed and did not fire. They are worth stating plainly,
+because a guard that reads as though it protects you is worse than none.
+
+**Nothing calls `window.confirm`.** Every yes/no question goes through `ask()` in
+`dialog.js`, which draws the app's own modal. This is the most serious of the
+three: on the Tauri desktop build a native `confirm()` is routed to the dialog
+plugin, whose `confirm` command the capability manifest does not grant. No prompt
+appeared, the raw log filled with `dialog.confirm not allowed. Command not
+found`, and the call yielded a Promise that never settles — **a Promise is
+truthy, so every `if (confirm(…))` in the app read as `if (true)`**. The delete
+prompt, the discard-unsaved-work prompt and the save-conflict prompt were all
+auto-accepted whatever the user did, and the conflict one chose *overwrite the
+file on disk* every time. `dialog:allow-confirm` does not rescue it — it is a
+deprecated alias registering no such command — and awaiting the native call
+instead would hang the shell forever. Drawing the dialog in the page fixes it
+everywhere at once, matches the reason the menus and pickers are not native
+either, and makes all three shells behave the same. `ask()` returns a promise, so
+**every caller must `await` it**, and Escape or the backdrop resolve `false` so a
+dismissed question keeps the work.
+
+**A native window close does not raise `beforeunload`.** The webview is torn
+down, not navigated, so the unsaved-changes warning the browser build has did
+nothing at all on the Tauri desktop build — closing the window discarded every
+dirty buffer without a word. `main.rs` now cancels every `CloseRequested`, asks
+the frontend, and closes only when it calls back through `close_window`. The
+question is asked *in the webview* rather than with a native dialog for two
+reasons: the wording is then the same sentence in all three shells, and
+`tauri/capabilities/default.json` grants `dialog:allow-open` for the folder
+picker only — a message dialog would mean widening it. The methods live on
+`native_api.js` and exist **only** on the Tauri backend; a shell that intercepts
+its own close does not get a method implying it needs telling.
+
+**The crash net covers every dirty file, not the one on screen.** It used to read
+`currentPath` inside its own two-second timer, which was wrong twice: no other
+edited file was ever backed up, and switching files inside that window meant the
+timer fired against the new file and the one just left was never written either.
+A crash took everything except whatever you happened to be sitting in, idle, at
+the time — and nothing said so.
+
+**A partial failure is never reported as success.** `deleteEntries`, `moveEntries`
+and `saveAll` each caught an error, said so, and were then overwritten by a green
+line on the way out, leaving the truth only in the log console. Each now reports
+what actually happened — `saveAll` names the file it stopped at and how many were
+written, and does its `refreshDirty()` in a `finally` so the dirty marks match
+the disk on both paths.
+
+**A folder that could not be removed is not called deleted.** Every backend's
+directory delete is non-recursive on purpose — `remove_dir`, `rmdirSync`,
+`removeEntry` without `recursive` — so a folder delete *cannot* destroy files the
+app never loaded. But that refusal was swallowed, and since the tree is drawn
+from `project.files` the row vanished anyway: the folder was reported deleted and
+was still there, holding whatever the walk skips (dotfiles, symlinks,
+`node_modules`). The row now stays and the status names it.
+
 ### Settings are a table, not a variable each
 
 `settings.js` holds one `SCHEMA` array. Loading, validating, persisting,

@@ -375,6 +375,13 @@ button.primary { color:var(--text); border-color:var(--accent) }
   color:var(--text-dim);
 }
 .dlg-body { padding:.5rem .9rem .3rem .9rem; display:flex; flex-direction:column; gap:.3rem }
+/* The question `ask()` draws. `pre-wrap` is load-bearing: every message is
+   composed with blank lines between the statement and the question, and
+   collapsing them runs a warning and its consequences into one paragraph. */
+.dlg-ask {
+  margin:0; padding:.2rem 0 .4rem 0; max-width:44ch;
+  white-space:pre-wrap; line-height:1.45; color:var(--text);
+}
 .dlg-row { display:flex; align-items:center; gap:.6rem; min-height:1.8rem }
 .dlg-label {
   flex:none; width:6.5rem; font-size:var(--fs-xs); color:var(--text-dim);

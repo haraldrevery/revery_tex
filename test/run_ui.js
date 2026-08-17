@@ -159,6 +159,32 @@ async function main() {
       { width: 1400, height: 950, deviceScaleFactor: 1, mobile: false });
     await cdp.waitFor('!!window.__reveryTexApp', { what: 'app boot', timeoutMs: 60000 });
 
+    // The app draws its own confirm now (see ask() in dialog.js), so the CDP
+    // auto-accept above no longer covers it. Same policy for the in-page one:
+    // answer OK, and keep what it said so a check can assert on it. Without it
+    // every flow that asks — switching project, discarding edits, deleting —
+    // hangs on a modal nobody clicks, and the run looks like a timeout rather
+    // than an unanswered question.
+    //
+    // Installed for *every* document, not just this one: the suite reloads the
+    // page to check that settings persist, and an observer evaluated once is
+    // gone the moment it does.
+    const ANSWER_ASKS = `(() => {
+      window.__askLog = [];
+      const answer = () => {
+        const p = document.querySelector('.dlg-ask');
+        if (!p) return;
+        window.__askLog.push(p.textContent);
+        const ok = [...document.querySelectorAll('.dlg-foot button')]
+          .find(b => /^OK$/.test(b.textContent.trim()));
+        if (ok) ok.click();
+      };
+      new MutationObserver(answer).observe(document, { childList: true, subtree: true });
+      answer();
+    })()`;
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: ANSWER_ASKS });
+    await cdp.evaluate(ANSWER_ASKS);
+
     /* ── the menu opens and reflects real state ─────────────────────── */
     const opened = await cdp.evaluate(`(() => {
       document.getElementById('settings').click();
@@ -2381,15 +2407,19 @@ async function main() {
       ev(included, 'dragstart', dt);
       ev(dir, 'dragover', dt);
       ev(dir, 'drop', dt);
-      await new Promise(r => setTimeout(r, 250));
-      return { skipped: false, moved: included.dataset.path, into: dir.dataset.dir };
+      await new Promise(r => setTimeout(r, 350));
+      // The question is drawn by the app now, not by the browser, so it is read
+      // from what the auto-answer above recorded rather than captured through
+      // Page.javascriptDialogOpening.
+      const text = window.__askLog[window.__askLog.length - 1] || null;
+      return { skipped: false, moved: included.dataset.path, into: dir.dataset.dir, text };
     })()`, true);
     if (inc.skipped) {
       check('a move that breaks an \\include asks first', true, 'no suitable file in this fixture');
     } else {
       check('a move that breaks an \\include asks first',
-        dialogs.some(d => /\\input\/\\include|will break/i.test(d)),
-        dialogs[0] ? dialogs[0].split('\n')[0] : 'no dialog was shown');
+        !!inc.text && /\\input\/\\include|will break/i.test(inc.text),
+        inc.text ? inc.text.split('\n')[0] : 'no dialog was shown');
     }
 
     /* ── undo in the Files panel ────────────────────────────────────── */
@@ -2407,15 +2437,15 @@ async function main() {
       const tree = document.getElementById('filetree');
       const drawn = (name) => [...tree.querySelectorAll('.node')]
         .some(r => r.dataset.dir === name);
-      // Re-queried every time, never cached: renderTree() replaces every row,
-      // so a reference held across an undo is detached and its events reach
-      // nothing. That looks exactly like the shortcut not being bound.
-      const key = (k) => {
-        const row = tree.querySelector('.node');
-        row.focus();
-        row.dispatchEvent(new KeyboardEvent('keydown',
-          { key: k, ctrlKey: true, bubbles: true, cancelable: true }));
-      };
+      // Dispatched at whatever actually has focus, and nothing is focused here
+      // on the test's behalf. Forcing focus onto a row first is what an earlier
+      // version of this check did, and it hid the real defect completely: the
+      // handler worked, and a user could not reach it, because dismissing the
+      // menu removed the element focus was sitting on and dropped it to <body>.
+      const key = (k) => document.activeElement.dispatchEvent(new KeyboardEvent(
+        'keydown', { key: k, ctrlKey: true, bubbles: true, cancelable: true }));
+      const inPanel = () =>
+        document.getElementById('sidebar').contains(document.activeElement);
       const before = app.treeHistory();
 
       // Through the app's own path, not by poking emptyDirs: the question is
@@ -2437,7 +2467,8 @@ async function main() {
         .find(b => !/cancel/i.test(b.textContent)).click();
       await new Promise(r => setTimeout(r, 150));
 
-      const created = { drawn: drawn(name), history: app.treeHistory() };
+      const created = { drawn: drawn(name), history: app.treeHistory(),
+                        focused: inPanel(), at: document.activeElement.tagName };
 
       // Ctrl+Z with a tree row focused, exactly as a user would.
       key('z');
@@ -2465,6 +2496,12 @@ async function main() {
         folderUndo.created.drawn && folderUndo.created.history.depth === base + 1
           && /creating __undo_probe__/.test(folderUndo.created.history.undo || ''),
         JSON.stringify(folderUndo.created));
+      // The one that matters: the shortcut is scoped to the panel, so if the
+      // dialog left focus on <body> then Ctrl+Z is unreachable at exactly the
+      // moment someone wants it, and says nothing when it declines.
+      check('and leaves focus in the panel, so Ctrl+Z can be reached',
+        folderUndo.created.focused,
+        `focus was on ${folderUndo.created.at}`);
       check('Ctrl+Z in the panel removes it and makes it redoable',
         !folderUndo.undone.drawn && folderUndo.undone.history.depth === base
           && /creating __undo_probe__/.test(folderUndo.undone.history.redo || ''),
@@ -2568,15 +2605,17 @@ async function main() {
       const moved = { there: paths().includes(to), gone: !paths().includes(from),
                       history: app.treeHistory() };
 
-      // Re-queried after the move redrew the tree — see the note above.
-      const row = tree.querySelector('.node');
-      row.focus();
-      row.dispatchEvent(new KeyboardEvent('keydown',
+      // Whatever a real drag left focused — no .focus() call here either. A
+      // drag starts with a mousedown on the row, so focus should already be in
+      // the panel; asserting it is part of the check.
+      const focusedInPanel =
+        document.getElementById('sidebar').contains(document.activeElement);
+      document.activeElement.dispatchEvent(new KeyboardEvent('keydown',
         { key: 'z', ctrlKey: true, bubbles: true, cancelable: true }));
       await new Promise(r => setTimeout(r, 500));
 
       return {
-        from, to, moved,
+        from, to, moved, focusedInPanel,
         back: paths().includes(from),
         cleared: !paths().includes(to),
         history: app.treeHistory(),
@@ -2591,6 +2630,8 @@ async function main() {
       check('a drag records one undoable move',
         moveUndo.moved.there && moveUndo.moved.gone && moveUndo.moved.history.depth >= 1,
         JSON.stringify(moveUndo.moved));
+      check('a drag leaves focus in the panel too',
+        moveUndo.focusedInPanel);
       check('undo puts a moved file back where it started',
         moveUndo.back && moveUndo.cleared,
         `${moveUndo.to} → ${moveUndo.from}: back=${moveUndo.back} cleared=${moveUndo.cleared}`);
@@ -2629,7 +2670,7 @@ async function main() {
         .find(b => /^Delete/.test(b.textContent.trim()));
       if (!del) return { skipped: 'no Delete row' };
       del.click();
-      await new Promise(r => setTimeout(r, 400));
+      await new Promise(r => setTimeout(r, 500));   // asked and auto-answered
       return { armed, after: app.treeHistory() };
     })()`, true);
 
