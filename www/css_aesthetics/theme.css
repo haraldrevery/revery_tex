@@ -80,7 +80,7 @@
   --accent:rgba(255,255,255,.58); --scrollbar:rgba(255,255,255,.1); --menu-bg:#1f1f1f;
   --ok:#7fc97f; --warn:#e2c46a; --err:#e08a7a;
   --sel:rgba(255,255,255,.22);
-  --tex-command:#8ab4d8; --tex-env:#c3a6e0; --tex-math:#e2c46a; --tex-arg:#9fc98f;
+  --tex-command:#aedf61; --tex-env:#c3a6e0; --tex-math:#eacc69; --tex-arg:#9fc98f;
 }
 [data-theme="light"] {
   --bg:#fafaf8; --bg-panel:#ffffff; --bg-hover:#f2f2ef;
@@ -91,7 +91,7 @@
   --accent:rgba(0,0,0,.58); --scrollbar:rgba(0,0,0,.1); --menu-bg:#ffffff;
   --ok:#2e7d32; --warn:#8a6d1f; --err:#b3261e;
   --sel:rgba(0,0,0,.22);
-  --tex-command:#1a5f8a; --tex-env:#6b3fa0; --tex-math:#8a6d1f; --tex-arg:#2f6b2a;
+  --tex-command:#265e00; --tex-env:#6b3fa0; --tex-math:#8a6d1f; --tex-arg:#2f6b2a;
 }
 [data-theme="paper"] {
   --bg:#f4efe4; --bg-panel:#ece5d6; --bg-hover:#dabca2;
@@ -102,7 +102,7 @@
   --accent:rgba(176,95,51,.55); --scrollbar:rgba(110,80,40,.14); --menu-bg:#ece5d6;
   --ok:#4a7a3a; --warn:#6f5613; --err:#a33a2a;
   --sel:rgba(110,80,40,.22);
-  --tex-command:#975b11; --tex-env:#7a4a6a; --tex-math:#9f6200; --tex-arg:#4a6a3a;
+  --tex-command:#2c6d00; --tex-env:#7a4a6a; --tex-math:#9f6200; --tex-arg:#4a6a3a;
 }
 [data-theme="forest"] {
   --bg:#0e1a11; --bg-panel:#152019; --bg-hover:#1d2d22;
