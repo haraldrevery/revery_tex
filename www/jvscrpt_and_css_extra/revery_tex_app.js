@@ -38,6 +38,7 @@ import {
 import { initOutline, refreshOutline, scheduleOutline, applyOutlineVisibility } from './outline.js';
 import { initPaneSizeButtons } from './pane_size.js';
 import { buildTree, flattenTree, directoryPaths, normalizePath } from './file_tree.js';
+import { createHistory } from './tree_history.js';
 import { referencesTo } from './document_model.js';
 import { $, download } from './dom.js';
 import {
@@ -708,6 +709,16 @@ function applyRememberedEmptyDirs() {
   for (const d of stored) if (!real.has(d)) emptyDirs.add(d);
 }
 
+// ── undo, for structural changes only ──────────────────────────────────
+//
+// Deliberately *not* persisted, and cleared whenever the project changes. Every
+// check an undo makes before it acts compares the entry against `project.files`,
+// which describes this session's reading of the folder — so a stack that
+// outlived a reload would be checked against a model that had never seen
+// whatever happened to the directory in between. See `tree_history.js` for why
+// entries are only consumed once the operation has actually landed.
+const history = createHistory();
+
 // ── selection ──────────────────────────────────────────────────────────
 //
 // `.active` and `.selected` are two different things and have to stay that way:
@@ -1287,6 +1298,15 @@ async function importDroppedFiles(fileList, parent) {
   }
 
   if (added.length) {
+    // Files arrive here from outside the project and are written as they are
+    // read, so there is nothing to invert — and undoing an import would mean
+    // deleting files whose only copy may now be the one just added. Same
+    // reasoning as the barrier in `deleteEntries`. Inside this branch rather
+    // than before the loop, so a drop that was refused in full does not cost
+    // the history: every iteration above catches its own failure, so nothing
+    // reaches here having written a file without recording it in `added`.
+    history.barrier();
+
     renderTree();
     refreshDirty();
     scheduleOutline();
@@ -1356,6 +1376,47 @@ function askName({ title, label, def, submitLabel = 'Create' }, onOk) {
   });
 }
 
+/**
+ * Put an empty file at `path`, in memory and on disk.
+ *
+ * Split out of `createFile` so that redoing one is the same code rather than a
+ * second copy of it — a copy that forgot the `emptyDirs` line below would leave
+ * a folder drawn twice, and one that forgot the rollback would leave a phantom
+ * file in the tree after a failed write.
+ *
+ * The caller has already validated the path and checked for collisions.
+ *
+ * @returns {{emptied: string|null, stamp: object|null}}
+ *   `emptied` is the folder this file just made real, if any — the one thing an
+ *   undo cannot work out for itself afterwards, because by then the directory
+ *   holds a file and no longer looks empty. `stamp` is what the file was
+ *   written as, which is how an undo later recognises it as untouched.
+ */
+async function addEmptyFile(path) {
+  project.files.set(path, { content: '', binary: false, dirty: true, stamp: null });
+  // Written immediately where there is a disk, so the tree matches what is
+  // actually there rather than promising a file that only exists if you
+  // remember to save.
+  if (canWriteDisk() && NativeAPI.writeFile) {
+    try {
+      const stamp = await NativeAPI.writeFile(path, '', null);
+      Object.assign(project.files.get(path), { stamp, dirty: false });
+    } catch (err) {
+      project.files.delete(path);
+      setStatus(`✗ ${err.message || err}`, 'err');
+      renderTree();
+      throw err;
+    }
+  }
+  // A folder that only existed in the tree now holds something.
+  const emptied = emptyDirs.delete(dirOf(path)) ? dirOf(path) : null;
+  if (emptied) rememberEmptyDirs();
+  renderTree();
+  openFile(path);
+  refreshDirty();
+  return { emptied, stamp: project.files.get(path).stamp };
+}
+
 async function createFile(parent = '') {
   askName({ title: 'New file', label: 'Name', def: '' }, async (raw) => {
     const path = normalizePath(raw, parent);
@@ -1366,37 +1427,34 @@ async function createFile(parent = '') {
     const clash = nameCollision(path, await pathsOnDisk());
     if (clash) { setStatus(`✗ ${clash}`, 'err'); return; }
 
-    project.files.set(path, { content: '', binary: false, dirty: true, stamp: null });
-    // Written immediately where there is a disk, so the tree matches what is
-    // actually there rather than promising a file that only exists if you
-    // remember to save.
-    if (canWriteDisk() && NativeAPI.writeFile) {
-      try {
-        const stamp = await NativeAPI.writeFile(path, '', null);
-        Object.assign(project.files.get(path), { stamp, dirty: false });
-      } catch (err) {
-        project.files.delete(path);
-        setStatus(`✗ ${err.message || err}`, 'err');
-        renderTree();
-        return;
-      }
-    }
-    // A folder that only existed in the tree now holds something.
-    if (emptyDirs.delete(dirOf(path))) rememberEmptyDirs();
-    renderTree();
-    openFile(path);
-    refreshDirty();
+    let made;
+    try { made = await addEmptyFile(path); }
+    catch { return; }                      // addEmptyFile has already said why
+    // Recorded only once the write has succeeded: the rollback above leaves no
+    // file, so an entry pointing at one would be stale the moment it was made.
+    //
+    // A gerund, here and in every other entry, because one string has to read
+    // correctly in two frames: "undid creating x.tex" in the status bar, and
+    // "Undo creating x.tex" as a menu row. It also keeps the row from reading
+    // as a *second* "New file…" sitting directly above the real one.
+    history.push({ kind: 'file', path, ...made, label: `creating ${path}` });
     setStatus(`created ${path}`, 'ok');
   });
+}
+
+/** Draw a folder that holds nothing yet. Nothing here reaches the disk. */
+function addFolder(path) {
+  emptyDirs.add(path);
+  rememberEmptyDirs();
+  renderTree();
 }
 
 function createFolder(parent = '') {
   askName({ title: 'New folder', label: 'Name', def: '' }, (raw) => {
     const path = normalizePath(raw, parent);
     if (!path) { setStatus('✗ that is not a usable folder name', 'err'); return; }
-    emptyDirs.add(path);
-    rememberEmptyDirs();
-    renderTree();
+    addFolder(path);
+    history.push({ kind: 'folder', path, label: `creating ${path}/` });
     // No mkdir anywhere in NativeAPI, and none is needed: every backend's write
     // creates missing parents. The folder is remembered for this project, so it
     // is still here on reload — it just does not exist on disk until something
@@ -1446,9 +1504,12 @@ async function moveOne(from, to) {
  * dialog rather than one per file.
  *
  * @param {Array<{from: string, to: string, isDir: boolean}>} moves
+ * @param {boolean} [record] whether to note this on the undo stack. Only undo
+ *   and redo pass false: they move the entry between stacks themselves, and an
+ *   inverse that recorded itself would become its own redo.
  * @returns {Promise<boolean>} whether anything moved
  */
-async function moveEntries(moves) {
+async function moveEntries(moves, record = true) {
   // A folder in the set already carries its own contents, so a file listed
   // beside its moving ancestor would be moved twice — the second time from a
   // path that no longer holds it. Only possible since a selection could hold
@@ -1492,12 +1553,14 @@ async function moveEntries(moves) {
   if (!confirmBreaksIncludes(allMoving, allTargets)) return false;
 
   let moved = 0;
+  let complete = true;
   try {
     for (const p of plan) {
       for (let i = 0; i < p.moving.length; i++) { await moveOne(p.moving[i], p.targets[i]); moved++; }
     }
   } catch (err) {
     // Partway through: say so rather than pretending it worked.
+    complete = false;
     setStatus(`✗ ${err.message || err}`, 'err');
     rawLog('err', `move stopped partway — ${moved} of ${allMoving.length} files: ${err.message || err}`);
   }
@@ -1527,17 +1590,204 @@ async function moveEntries(moves) {
   scheduleOutline();
   // Every refusal above says so; a move that worked said nothing at all, which
   // left reading the tree as the only way to find out what a drag had done.
-  if (moved) {
-    const one = plan[0];
-    setStatus(plan.length > 1
-      ? `moved ${plan.length} items → ${dirOf(one.to) || 'the project root'}`
-      : (one.isDir ? `moved ${one.from}/ → ${one.to}/` : `moved ${one.from} → ${one.to}`), 'ok');
+  const one = plan[0];
+  const what = plan.length > 1
+    ? `${plan.length} items → ${dirOf(one.to) || 'the project root'}`
+    : (one.isDir ? `${one.from}/ → ${one.to}/` : `${one.from} → ${one.to}`);
+  if (moved) setStatus(`moved ${what}`, 'ok');
+
+  if (record) {
+    // A batch that stopped partway has no clean inverse — some files are at
+    // their targets and some are not, and moving the whole set back would be a
+    // second half-applied operation on top of the first. The history goes
+    // instead, so nothing below it can be replayed against the mess.
+    if (!complete) history.barrier();
+    // `plan`, not `moves`: the filters above dropped no-ops and files nested
+    // under a moving ancestor, so the argument is not what actually happened.
+    // Recorded even when `moved` is 0, because an empty folder moves entirely
+    // through `emptyDirs` above without any file changing hands.
+    else history.push({ kind: 'move', label: `moving ${what}`,
+                        moves: plan.map(({ from, to, isDir }) => ({ from, to, isDir })) });
   }
   return moved > 0;
 }
 
 /** One entry, by the same rules. Rename and a single-row drag both arrive here. */
 const moveEntry = (from, to, isDir) => moveEntries([{ from, to, isDir }]);
+
+/* ── undoing one of those ─────────────────────────────────────────────────
+ *
+ * Three rules hold this together, and none of them may be relaxed:
+ *
+ *   1. **An inverse goes through the same function the forward operation did.**
+ *      Undoing a move calls `moveEntries`, so it faces the main-document
+ *      refusal, the collision checks and the \include warning exactly as a drag
+ *      would. An undo therefore cannot do anything a user could not have done
+ *      by hand, and the guards cannot drift apart — which is the same reason
+ *      rename and drag were merged into one function to begin with.
+ *
+ *   2. **The world is checked before, and again after.** `settled()` asks
+ *      whether the project still looks the way the operation left it. If it
+ *      does not, the entry is stale and the whole history goes: an entry below
+ *      a stale one rests on the same assumptions. Checking again afterwards is
+ *      what decides whether the entry is consumed, so an inverse that was
+ *      refused — including the user answering No to the \include warning —
+ *      leaves the stack exactly as it was and can be retried.
+ *
+ *   3. **Nothing with content in it is ever removed.** The only deletion undo
+ *      performs is of a file it has just confirmed is still empty and unsaved.
+ */
+
+/** Does `path` name something the project currently holds? */
+const entryExists = (path, isDir) => (isDir ? isDirPath(path) : project.files.has(path));
+
+/**
+ * Is the project in the state this entry describes the *result* of?
+ *
+ * @param {object} entry
+ * @param {boolean} done  true to ask "has the operation happened?", false for
+ *   "has it been taken back?" — the same question either way round, which is
+ *   why undo and redo share one predicate rather than each having its own.
+ */
+function settled(entry, done) {
+  if (entry.kind === 'move') {
+    // Every destination holds the entry and no origin does, or the reverse.
+    return entry.moves.every(m => done
+      ? (entryExists(m.to, m.isDir) && !entryExists(m.from, m.isDir))
+      : (entryExists(m.from, m.isDir) && !entryExists(m.to, m.isDir)));
+  }
+  if (entry.kind === 'folder') return emptyDirs.has(entry.path) === done;
+  if (entry.kind === 'file') {
+    if (!done) return !project.files.has(entry.path);
+    // Present, still empty, and never written since. A file someone has typed
+    // into is not the file that was created, and undo must not remove it —
+    // this is the single check standing between Ctrl+Z and somebody's work.
+    const f = project.files.get(entry.path);
+    if (!f || f.binary || f.content !== '') return false;
+    // Stamp identity, not `dirty`. `dirty` only means "not yet written", which
+    // is the permanent state of every file in a project with no disk behind it
+    // — testing it would refuse every undo in the browser-only backend. The
+    // stamp is a fresh object per write, so comparing the reference asks the
+    // question that actually matters: has this file been saved since it was
+    // made? A buffer emptied *after* a save reads as unchanged by content
+    // alone, and deleting it would take the saved copy with it.
+    return f.stamp === entry.stamp;
+  }
+  return false;
+}
+
+/** Take an entry's operation back. Returns whether the project actually moved. */
+async function applyInverse(entry) {
+  if (entry.kind === 'move') {
+    await moveEntries(entry.moves.map(m => ({ from: m.to, to: m.from, isDir: m.isDir })), false);
+  } else if (entry.kind === 'folder') {
+    emptyDirs.delete(entry.path);
+    rememberEmptyDirs();
+    renderTree();
+  } else if (entry.kind === 'file') {
+    if (!await removeEmptyFile(entry.path)) return false;
+    // The folder this file made real goes back to being one the tree draws on
+    // its own — otherwise undoing the file quietly takes the folder with it.
+    if (entry.emptied) addFolder(entry.emptied);
+  }
+  return settled(entry, false);
+}
+
+/** Do it again. */
+async function applyForward(entry) {
+  if (entry.kind === 'move') {
+    await moveEntries(entry.moves, false);
+  } else if (entry.kind === 'folder') {
+    addFolder(entry.path);
+  } else if (entry.kind === 'file') {
+    // Something may have taken the name back since the undo — the same check
+    // `createFile` makes, for the same reason: this writes with no stamp, so a
+    // collision here is a file truncated to nothing.
+    const clash = nameCollision(entry.path, await pathsOnDisk());
+    if (clash) { setStatus(`✗ ${clash}`, 'err'); return false; }
+    try {
+      // The rewrite produces a new stamp, so the entry adopts it — otherwise
+      // the next Ctrl+Z would compare against the stamp of a write two
+      // operations ago and refuse a file it had just made itself.
+      Object.assign(entry, await addEmptyFile(entry.path));
+    } catch { return false; }
+  }
+  return settled(entry, true);
+}
+
+/**
+ * Delete the empty file `path`, on disk as well as in the model.
+ *
+ * Only ever reached from `applyInverse`, and only after `settled()` has
+ * confirmed the file is still empty. Deliberately not shared with
+ * `deleteEntries`: that one is about files with contents and asks first, and a
+ * single function serving both would be one condition away from skipping the
+ * question.
+ */
+async function removeEmptyFile(path) {
+  try {
+    if (canWriteDisk() && NativeAPI.deleteFile) await NativeAPI.deleteFile(path);
+  } catch (err) {
+    setStatus(`✗ ${err.message || err}`, 'err');
+    return false;
+  }
+  project.files.delete(path);
+  docStates.delete(path);
+  selected.delete(path);
+  if (path === currentPath) {
+    currentPath = null;
+    $('editortitle').textContent = 'no file';
+    if (project.files.has(project.main)) openFile(project.main);
+  }
+  renderTree();
+  refreshDirty();
+  scheduleOutline();
+  return true;
+}
+
+/**
+ * True while an undo or redo is in flight.
+ *
+ * `moveEntries` awaits the backend, and the shortcut can arrive again long
+ * before it returns. Two inverses interleaved would each check `settled()`
+ * against a project the other was halfway through changing.
+ */
+let historyBusy = false;
+
+/**
+ * One step in either direction.
+ *
+ * @param {boolean} back  true for undo, false for redo
+ */
+async function stepHistory(back) {
+  if (historyBusy || !project) return;
+  const entry = back ? history.peekUndo() : history.peekRedo();
+  if (!entry) { setStatus(back ? 'nothing to undo' : 'nothing to redo'); return; }
+
+  // The state the entry expects to find: after the operation if we are about to
+  // undo it, before it if we are about to put it back.
+  if (!settled(entry, back)) {
+    history.clear();
+    setStatus(`✗ ${entry.label} — the project has changed since; undo history cleared`, 'err');
+    rawLog('wrn', `undo refused: the project no longer matches "${entry.label}"`);
+    return;
+  }
+
+  historyBusy = true;
+  try {
+    const ok = back ? await applyInverse(entry) : await applyForward(entry);
+    // Consumed only on success. A refusal — a collision, the main document, or
+    // the \include warning answered No — leaves the entry where it was.
+    if (!ok) { setStatus(`✗ could not ${back ? 'undo' : 'redo'} ${entry.label}`, 'err'); return; }
+    if (back) history.commitUndo(); else history.commitRedo();
+    setStatus(`${back ? 'undid' : 'redid'} ${entry.label}`, 'ok');
+  } finally {
+    historyBusy = false;
+  }
+}
+
+const undoTree = () => stepHistory(true);
+const redoTree = () => stepHistory(false);
 
 async function renameEntry(path, isDir) {
   if (!isDir && path === project.main) {
@@ -1576,6 +1826,14 @@ async function deleteEntries(entries) {
     ? `${batch.length} items and the ${doomed.length} file(s) in them`
     : (batch[0].isDir ? `${batch[0].path}/ and the ${doomed.length} file(s) in it` : batch[0].path);
   if (!confirm(`Delete ${what}?\n\nThis cannot be undone from inside the app.`)) return;
+
+  // The message above is the literal truth and stays that way. `deleteFile` is a
+  // real delete on all five backends — no trash, nothing to move back — so this
+  // does not get an approximate undo entry. It ends the history instead, because
+  // an entry recorded *before* a delete describes files the delete may have
+  // taken, and one more Ctrl+Z would otherwise step straight past it and move
+  // paths that are no longer there.
+  history.barrier();
 
   try {
     // One call per file, then the directories themselves. No backend here can
@@ -1664,7 +1922,23 @@ function moveTargetRows(paths) {
 function treeMenuRows(node) {
   const parent = node ? (node.dir ? node.path : dirOf(node.path)) : '';
   const acting = actOn(node);
-  const rows = [
+  const rows = [];
+
+  // Ctrl+Z is not discoverable and does not work from a pointer, and this is a
+  // panel people use with the mouse. The rows appear only when there is
+  // something to act on, which also makes the menu say whether an operation was
+  // recorded at all — a delete leaves neither row, which is the honest answer.
+  const undoable = history.peekUndo();
+  const redoable = history.peekRedo();
+  if (undoable) {
+    rows.push({ type: 'action', label: `Undo ${undoable.label}`, title: 'Ctrl+Z', run: undoTree });
+  }
+  if (redoable) {
+    rows.push({ type: 'action', label: `Redo ${redoable.label}`, title: 'Ctrl+Y', run: redoTree });
+  }
+  if (rows.length) rows.push({ type: 'divider' });
+
+  rows.push(
     { type: 'action', label: 'New file…', run: () => createFile(parent) },
     { type: 'action', label: 'New folder…', run: () => createFolder(parent) },
     // Lands wherever the menu was opened — the right-clicked folder, or the
@@ -1674,7 +1948,7 @@ function treeMenuRows(node) {
       title: 'Add files from your computer — or drag them onto this panel',
       run: () => importFilesInto(parent)
     }
-  ];
+  );
   if (node) {
     rows.push({ type: 'divider' });
     // Aimed at a row inside a multi-selection, everything below acts on the
@@ -2069,6 +2343,9 @@ async function loadFromDisk(root) {
   // A selection is about the project that was open, and its paths mean nothing
   // in this one. The folders made from the tree, by contrast, are remembered.
   clearSelection();
+  // And neither does an undo entry — every path in one names a file in the
+  // project that was open, and `figures/` exists in more projects than not.
+  history.clear();
   applyRememberedEmptyDirs();
 
   syncMainSelect();
@@ -2096,6 +2373,7 @@ async function loadProject(key) {
   // server on purpose (book-legacy pins main_legacy.tex), and a remembered
   // override would silently compile something the gate did not ask for.
   clearSelection();                 // as in loadFromDisk, and for the same reason
+  history.clear();                  // likewise
   applyRememberedEmptyDirs();
   syncMainSelect();
   refreshDirty();
@@ -2555,6 +2833,36 @@ document.addEventListener('keydown', (ev) => {
   ev.preventDefault();
   if (ev.key === 'Enter') compile(); else saveAll();
 });
+
+/**
+ * Ctrl+Z and Ctrl+Y for the Files panel.
+ *
+ * Scoped by *where the focus is*, not by excluding text-entry contexts as the
+ * handler above does. Ctrl+Z already means something everywhere else on the
+ * page — CodeMirror binds it at Prec.high — and a global handler that had to
+ * decide whether the editor wanted this keystroke would be wrong the first time
+ * someone added another editor. Requiring focus inside the sidebar means the
+ * event never reaches this listener while the editor has it, so the two cannot
+ * contend at all.
+ *
+ * `#sidebar` rather than `#filetree`: the + button that creates a folder lives
+ * in the panel header, outside the tree itself, so binding to the tree alone
+ * would leave the one shortcut unreachable straight after the one operation
+ * most likely to want it. The sidebar holds nothing else — no input, no editor.
+ *
+ * Ctrl+Y and Ctrl+Shift+Z both redo, because people arrive with both. Shift
+ * makes the event's `key` a capital Z.
+ */
+document.addEventListener('keydown', (ev) => {
+  if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return;
+  const z = ev.key === 'z' || ev.key === 'Z';
+  const y = ev.key === 'y' || ev.key === 'Y';
+  if (!z && !y) return;
+  if (dialogIsOpen()) return;
+  if (!ev.target?.closest?.('#sidebar')) return;
+  ev.preventDefault();
+  if (y || ev.shiftKey) redoTree(); else undoTree();
+});
 // Presence of the method is the signal, never a check on the environment name.
 // A shell that cannot open a folder does not get a button that implies it can.
 if (!NativeAPI.openFolder) $('open').style.display = 'none';
@@ -2845,6 +3153,21 @@ window.__reveryTexApp = {
       for (const r of preview.linksOnPage(p)) out.push({ page: p, ...r });
     }
     return out;
+  },
+  /**
+   * What the Files panel would undo or redo next.
+   *
+   * The labels rather than the entries: a driver needs to know that a delete
+   * left nothing undoable, and that a move recorded one operation and not one
+   * per file — neither of which is visible from the tree.
+   */
+  treeHistory() {
+    return {
+      depth: history.depth,
+      redoDepth: history.redoDepth,
+      undo: history.peekUndo()?.label ?? null,
+      redo: history.peekRedo()?.label ?? null
+    };
   },
   /** Follow the first link that resolves to a destination. Returns where it went. */
   async followFirstLink() {

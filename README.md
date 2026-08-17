@@ -75,6 +75,7 @@ rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-t
 │    dialog.js                    modal shell + form with a live preview       │
 │    picker.js                    lazy card strip: figures, by thumbnail       │
 │    file_tree.js                 paths → a nested tree; pure, no DOM          │
+│    tree_history.js              the Files panel's undo stack; pure, no DOM   │
 │    background_image.js          your own picture, resized into a data URL   │
 │  image_assets/                  background photographs — proprietary        │
 │    math_preview.js              KaTeX, loaded on first use                   │
@@ -167,6 +168,45 @@ source, because those paths are the author's text and come in several
 spellings. `referencesTo()` in `document_model.js` answers the question from the
 same include graph the outline is built from, so "what the document reads" and
 "what a move would break" cannot disagree.
+
+**Ctrl+Z undoes what can be undone, and nothing else.** Moves, renames, new
+folders and new files are recorded on a stack in `tree_history.js`; Ctrl+Y or
+Ctrl+Shift+Z replays them. Deletes and imports are **not**, and they clear the
+stack instead.
+
+That asymmetry is the design, not a gap. This panel writes to disk at the moment
+of the action rather than at Save, so an undo is a second real filesystem
+operation, and only some of them have an inverse that cannot lose anything. A
+move inverts to a move back — through `moveEntries()` itself, so an undo faces
+the main-document refusal, the collision checks and the `\include` warning
+exactly as a drag does, and cannot do something you could not have done by hand.
+`deleteFile` has no inverse on any of the five backends: there is no trash, and
+the bytes are gone. An "undo" that restored a delete by writing the copy still
+in memory would be a *new write* wearing the word undo, so the confirm goes on
+saying deletes cannot be undone, and means it.
+
+Clearing the stack rather than skipping the entry is the other half. An entry
+recorded before a delete describes files the delete may have taken, so leaving
+it reachable would let one more Ctrl+Z step straight past the delete and move
+paths that are no longer there.
+
+Every entry is checked against the project before it is applied and again
+afterwards, and is only consumed if the operation actually landed — so an
+inverse that gets refused can be retried, and one whose world has moved on
+refuses and clears the history rather than acting on a stale path. The single
+deletion undo performs is of a file it has confirmed is still empty *and* still
+carries the stamp it was written with: a buffer emptied after a save reads as
+unchanged by content alone, and removing it would take the saved copy too. The
+stack is session-only and cleared on project switch, because every check it
+makes compares against this session's reading of the folder.
+
+The shortcut is bound on `#sidebar` rather than globally. CodeMirror already
+binds Ctrl+Z at `Prec.high`, and requiring focus inside the panel means the
+event never reaches the tree's handler while the editor has it — the two cannot
+contend at all. `#sidebar` and not `#filetree` because the `+` button lives in
+the panel header, outside the tree. The tree's right-click menu carries Undo and
+Redo rows too, since a shortcut is neither discoverable nor reachable with a
+mouse.
 
 ### Settings are a table, not a variable each
 

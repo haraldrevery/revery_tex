@@ -2392,6 +2392,284 @@ async function main() {
         dialogs[0] ? dialogs[0].split('\n')[0] : 'no dialog was shown');
     }
 
+    /* ── undo in the Files panel ────────────────────────────────────── */
+    //
+    // The stack mechanics are unit-tested (test/tree_history.test.js). What only
+    // a browser can answer is whether the entries describe the *project*: that
+    // an inverse puts a file back where it was rather than somewhere plausible,
+    // that a delete leaves nothing to undo, and — the one that matters most —
+    // that none of this took Ctrl+Z away from the editor.
+
+    // A folder is the safest thing to undo: it exists only in `emptyDirs` and
+    // never reaches the disk, so a failure here cannot cost anything.
+    const folderUndo = await cdp.evaluate(`(async () => {
+      const app = window.__reveryTexApp;
+      const tree = document.getElementById('filetree');
+      const drawn = (name) => [...tree.querySelectorAll('.node')]
+        .some(r => r.dataset.dir === name);
+      // Re-queried every time, never cached: renderTree() replaces every row,
+      // so a reference held across an undo is detached and its events reach
+      // nothing. That looks exactly like the shortcut not being bound.
+      const key = (k) => {
+        const row = tree.querySelector('.node');
+        row.focus();
+        row.dispatchEvent(new KeyboardEvent('keydown',
+          { key: k, ctrlKey: true, bubbles: true, cancelable: true }));
+      };
+      const before = app.treeHistory();
+
+      // Through the app's own path, not by poking emptyDirs: the question is
+      // whether creating a folder records an entry, not whether a Set works.
+      const name = '__undo_probe__';
+      // The dialog is the only way in, so drive it as a person would. Same
+      // selectors the "New file" checks above use.
+      document.getElementById('newfile').click();
+      const row = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /new folder/i.test(b.textContent));
+      if (!row) return { skipped: 'no New folder row' };
+      row.click();
+      await new Promise(r => setTimeout(r, 80));
+      const input = document.querySelector('.dlg input[type="text"]');
+      if (!input) return { skipped: 'no dialog input' };
+      input.value = name;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      [...document.querySelectorAll('.dlg-foot button')]
+        .find(b => !/cancel/i.test(b.textContent)).click();
+      await new Promise(r => setTimeout(r, 150));
+
+      const created = { drawn: drawn(name), history: app.treeHistory() };
+
+      // Ctrl+Z with a tree row focused, exactly as a user would.
+      key('z');
+      await new Promise(r => setTimeout(r, 200));
+      const undone = { drawn: drawn(name), history: app.treeHistory() };
+
+      key('y');
+      await new Promise(r => setTimeout(r, 200));
+      const redone = { drawn: drawn(name), history: app.treeHistory() };
+
+      // Leave the fixture as it was found.
+      key('z');
+      await new Promise(r => setTimeout(r, 200));
+      return { before, created, undone, redone, cleaned: !drawn(name) };
+    })()`, true);
+
+    if (folderUndo.skipped) {
+      check('a new folder can be undone', false, folderUndo.skipped);
+    } else {
+      // Relative to where the stack already stood: the checks above this one
+      // have created and moved things of their own, and an absolute depth here
+      // would only be asserting the order of this file.
+      const base = folderUndo.before.depth;
+      check('creating a folder records one undoable entry',
+        folderUndo.created.drawn && folderUndo.created.history.depth === base + 1
+          && /creating __undo_probe__/.test(folderUndo.created.history.undo || ''),
+        JSON.stringify(folderUndo.created));
+      check('Ctrl+Z in the panel removes it and makes it redoable',
+        !folderUndo.undone.drawn && folderUndo.undone.history.depth === base
+          && /creating __undo_probe__/.test(folderUndo.undone.history.redo || ''),
+        JSON.stringify(folderUndo.undone));
+      check('Ctrl+Y draws it again',
+        folderUndo.redone.drawn && folderUndo.redone.history.depth === base + 1
+          && folderUndo.redone.history.redoDepth === 0,
+        JSON.stringify(folderUndo.redone));
+      check('and the probe folder is gone again afterwards', folderUndo.cleaned);
+    }
+
+    // Undoing a *file* is the only thing here that deletes anything, so the
+    // guard in front of it is the one worth proving: an empty file it made
+    // itself goes, a file with anything in it does not.
+    const fileUndo = await cdp.evaluate(`(async () => {
+      const app = window.__reveryTexApp;
+      const tree = document.getElementById('filetree');
+      const has = (p) => [...tree.querySelectorAll('.node')].some(r => r.dataset.path === p);
+      const key = (k) => {
+        const row = tree.querySelector('.node');
+        row.focus();
+        row.dispatchEvent(new KeyboardEvent('keydown',
+          { key: k, ctrlKey: true, bubbles: true, cancelable: true }));
+      };
+      const make = async (name) => {
+        document.getElementById('newfile').click();
+        [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+          .find(b => /new file/i.test(b.textContent)).click();
+        await new Promise(r => setTimeout(r, 80));
+        const i = document.querySelector('.dlg input[type="text"]');
+        i.value = name;
+        i.dispatchEvent(new Event('input', { bubbles: true }));
+        [...document.querySelectorAll('.dlg-foot button')]
+          .find(b => !/cancel/i.test(b.textContent)).click();
+        await new Promise(r => setTimeout(r, 200));
+      };
+
+      // (a) made and left alone — undo should remove it.
+      await make('__undo_empty__.tex');
+      const madeEmpty = has('__undo_empty__.tex');
+      key('z');
+      await new Promise(r => setTimeout(r, 300));
+      const emptyGone = !has('__undo_empty__.tex');
+
+      // (b) made and then typed into — undo must refuse, and say so.
+      await make('__undo_typed__.tex');
+      app.setBuffer('__undo_typed__.tex', '\\\\section{work nobody wants deleted}');
+      const armed = app.treeHistory();
+      key('z');
+      await new Promise(r => setTimeout(r, 300));
+      const survived = has('__undo_typed__.tex');
+      const status = document.getElementById('status').textContent;
+      const after = app.treeHistory();
+      return { madeEmpty, emptyGone, armed, survived, status, after };
+    })()`, true);
+
+    check('undo removes an empty file it created',
+      fileUndo.madeEmpty && fileUndo.emptyGone,
+      `made=${fileUndo.madeEmpty} gone=${fileUndo.emptyGone}`);
+    check('undo refuses to delete a file that has been typed into',
+      fileUndo.survived, `status: ${fileUndo.status}`);
+    check('and clears the history rather than acting on a stale entry',
+      fileUndo.armed.depth >= 1 && fileUndo.after.depth === 0
+        && /changed since/.test(fileUndo.status),
+      `${JSON.stringify(fileUndo.after)} — ${fileUndo.status}`);
+
+    // A move is the operation people actually reach for Ctrl+Z after, and the
+    // only one whose inverse touches the disk. The check is that the file is
+    // back at the path it started from — not merely that something moved.
+    dialogs.length = 0;
+    const moveUndo = await cdp.evaluate(`(async () => {
+      const app = window.__reveryTexApp;
+      const tree = document.getElementById('filetree');
+      const rows = () => [...tree.querySelectorAll('.node')];
+      const ev = (el, t, dt) => el.dispatchEvent(
+        new DragEvent(t, { bubbles: true, cancelable: true, dataTransfer: dt }));
+      const paths = () => rows().map(r => r.dataset.path).filter(Boolean);
+
+      const before = paths();
+      // Any non-main .tex sitting at the project root, and any folder to put it
+      // in. Not hardcoded: the fixture this runs against is whatever loaded.
+      const dirOf = (p) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
+      const src = rows().find(r => r.dataset.path
+        && /\\.tex$/.test(r.dataset.path)
+        && !r.classList.contains('main'));
+      if (!src) return { skipped: 'no movable .tex in this fixture' };
+      const from = src.dataset.path;
+      const base = from.split('/').pop();
+      // Any folder that is not already holding it, and not inside it.
+      const dir = rows().find(r => r.dataset.dir
+        && r.dataset.dir !== dirOf(from)
+        && !r.dataset.dir.startsWith(from + '/'));
+      if (!dir) return { skipped: 'no other folder to move into' };
+      const to = dir.dataset.dir + '/' + base;
+
+      const dt = new DataTransfer();
+      ev(src, 'dragstart', dt);
+      ev(dir, 'dragover', dt);
+      ev(dir, 'drop', dt);
+      await new Promise(r => setTimeout(r, 300));
+      const moved = { there: paths().includes(to), gone: !paths().includes(from),
+                      history: app.treeHistory() };
+
+      // Re-queried after the move redrew the tree — see the note above.
+      const row = tree.querySelector('.node');
+      row.focus();
+      row.dispatchEvent(new KeyboardEvent('keydown',
+        { key: 'z', ctrlKey: true, bubbles: true, cancelable: true }));
+      await new Promise(r => setTimeout(r, 500));
+
+      return {
+        from, to, moved,
+        back: paths().includes(from),
+        cleared: !paths().includes(to),
+        history: app.treeHistory(),
+        // The strongest assertion available: the tree is exactly what it was.
+        identical: JSON.stringify(paths().sort()) === JSON.stringify(before.sort())
+      };
+    })()`, true);
+
+    if (moveUndo.skipped) {
+      check('undo puts a moved file back', true, moveUndo.skipped);
+    } else {
+      check('a drag records one undoable move',
+        moveUndo.moved.there && moveUndo.moved.gone && moveUndo.moved.history.depth >= 1,
+        JSON.stringify(moveUndo.moved));
+      check('undo puts a moved file back where it started',
+        moveUndo.back && moveUndo.cleared,
+        `${moveUndo.to} → ${moveUndo.from}: back=${moveUndo.back} cleared=${moveUndo.cleared}`);
+      check('and leaves the tree exactly as it was',
+        moveUndo.identical, JSON.stringify(moveUndo.history));
+    }
+
+    // The promise the delete dialog makes — "cannot be undone from inside the
+    // app" — has to stay true. An entry recorded before the delete would let one
+    // more Ctrl+Z step past it onto files that are no longer there.
+    const afterDelete = await cdp.evaluate(`(async () => {
+      const app = window.__reveryTexApp;
+      const tree = document.getElementById('filetree');
+      // Something undoable first, so an empty stack cannot pass this by default.
+      document.getElementById('newfile').click();
+      [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /new folder/i.test(b.textContent)).click();
+      await new Promise(r => setTimeout(r, 80));
+      const input = document.querySelector('.dlg input[type="text"]');
+      if (!input) return { skipped: 'no dialog input' };
+      input.value = '__barrier_probe__';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      [...document.querySelectorAll('.dlg-foot button')]
+        .find(b => !/cancel/i.test(b.textContent)).click();
+      await new Promise(r => setTimeout(r, 150));
+      const armed = app.treeHistory().depth;
+
+      // Delete that same folder. It holds nothing, so nothing is lost — but it
+      // goes through deleteEntries, which is what arms the barrier.
+      const target = [...tree.querySelectorAll('.node')]
+        .find(r => r.dataset.dir === '__barrier_probe__');
+      if (!target) return { skipped: 'probe folder not drawn' };
+      target.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+      await new Promise(r => setTimeout(r, 80));
+      const del = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /^Delete/.test(b.textContent.trim()));
+      if (!del) return { skipped: 'no Delete row' };
+      del.click();
+      await new Promise(r => setTimeout(r, 400));
+      return { armed, after: app.treeHistory() };
+    })()`, true);
+
+    if (afterDelete.skipped) {
+      check('a delete leaves nothing to undo', false, afterDelete.skipped);
+    } else {
+      check('a delete leaves nothing to undo or redo',
+        afterDelete.armed >= 1 && afterDelete.after.depth === 0
+          && afterDelete.after.redoDepth === 0,
+        `armed=${afterDelete.armed} after=${JSON.stringify(afterDelete.after)}`);
+    }
+
+    // The regression that matters most. CodeMirror binds Ctrl+Z at Prec.high,
+    // and a global handler that fired regardless of focus would take the
+    // editor's own undo away — silently, since both are called "undo".
+    const editorUndo = await cdp.evaluate(`(async () => {
+      const t = window.__reveryTexTest;
+      const app = window.__reveryTexApp;
+      const view = t.view();
+      const before = view.state.doc.toString();
+      view.dispatch({ changes: { from: 0, insert: '% undo probe\\n' } });
+      const typed = view.state.doc.toString();
+
+      const treeBefore = JSON.stringify(app.treeHistory());
+      view.contentDOM.focus();
+      view.contentDOM.dispatchEvent(new KeyboardEvent('keydown',
+        { key: 'z', ctrlKey: true, bubbles: true, cancelable: true }));
+      await new Promise(r => setTimeout(r, 200));
+
+      return {
+        inserted: typed !== before,
+        // The editor's own history is what should have answered.
+        restored: view.state.doc.toString() === before,
+        treeUntouched: JSON.stringify(app.treeHistory()) === treeBefore
+      };
+    })()`, true);
+    check('Ctrl+Z in the editor still undoes text, not the file tree',
+      editorUndo.inserted && editorUndo.restored && editorUndo.treeUntouched,
+      JSON.stringify(editorUndo));
+
     /* ── completion and snippets ────────────────────────────────────── */
     // The source itself is driven through __reveryTexTest.completeAt, which
     // runs it over a synthetic document: what the dropdown *would* show, with
