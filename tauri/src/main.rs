@@ -600,6 +600,47 @@ fn close_window(window: tauri::Window) -> Result<(), String> {
     window.close().map_err(|e| e.to_string())
 }
 
+/* ── frameless window controls ───────────────────────────────────────── */
+// `decorations` is false in tauri.conf.json, so the window has no OS title bar
+// and the page draws its own Minimize, Maximize and Close. These back them.
+//
+// Own commands rather than the `core:window` permissions for the same calls:
+// each is one named action on this app's own window, which is a smaller grant
+// than opening the window plugin to the frontend. The one permission the
+// capability manifest does add is `core:window:allow-start-dragging`, which
+// Tauri's own drag script needs for the drag region on #topbar — and
+// double-click-to-maximize rides on that same script, through
+// `internal-toggle-maximize`, which `core:default` already grants.
+
+/// Minimize to the taskbar.
+#[tauri::command]
+fn minimize_window(window: tauri::Window) -> Result<(), String> {
+    window.minimize().map_err(|e| e.to_string())
+}
+
+/// Toggle between maximized and restored — what the middle button does.
+#[tauri::command]
+fn toggle_maximize_window(window: tauri::Window) -> Result<(), String> {
+    if window.is_maximized().map_err(|e| e.to_string())? {
+        window.unmaximize().map_err(|e| e.to_string())
+    } else {
+        window.maximize().map_err(|e| e.to_string())
+    }
+}
+
+/// Enter or leave real fullscreen. Bound to F11 in window_chrome.js.
+#[tauri::command]
+fn set_fullscreen(window: tauri::Window, fullscreen: bool) -> Result<(), String> {
+    window.set_fullscreen(fullscreen).map_err(|e| e.to_string())
+}
+
+/// Whether the window is already fullscreen, so the frontend can seed its flag
+/// from the truth rather than assuming it started windowed.
+#[tauri::command]
+fn is_fullscreen(window: tauri::Window) -> Result<bool, String> {
+    window.is_fullscreen().map_err(|e| e.to_string())
+}
+
 /* ── system TeX ──────────────────────────────────────────────────────── */
 
 /// What the user has installed. Cheap enough to call on demand, and it must be
@@ -661,6 +702,10 @@ fn main() {
             run_tex,
             arm_close_guard,
             close_window,
+            minimize_window,
+            toggle_maximize_window,
+            set_fullscreen,
+            is_fullscreen,
         ])
         // `beforeunload` does not run when a native window is closed — the
         // webview is torn down rather than navigated — so the unsaved-changes

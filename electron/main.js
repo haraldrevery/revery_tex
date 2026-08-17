@@ -76,6 +76,14 @@ function registerProtocol() {
   });
 }
 
+/**
+ * The live window, for the window: IPC below.
+ *
+ * Module-level rather than passed around: `createWindow` is also called from
+ * the `activate` handler, so the handlers cannot close over a single instance.
+ */
+let mainWindow = null;
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1280,
@@ -84,6 +92,14 @@ function createWindow() {
     minHeight: 480,
     backgroundColor: '#0a0a0a',
     title: 'Revery TeX',
+    // No OS title bar: the app draws its own. #topbar becomes the drag handle
+    // via -webkit-app-region in theme.css, which also gives Chromium's native
+    // double-click-to-maximize, and #win-controls carries Minimize, Maximize
+    // and Close. See www/jvscrpt_and_css_extra/window_chrome.js.
+    //
+    // No `titleBarStyle` branch for darwin: macOS is not a target — see the
+    // comment on TARGETS in build_tools/build_installers.js.
+    frame: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,   // ALWAYS true
@@ -123,6 +139,7 @@ function createWindow() {
   });
 
   win.loadURL(`${ORIGIN}/index.html`);
+  mainWindow = win;
   return win;
 }
 
@@ -157,6 +174,24 @@ handle('fs:renameFile', (from, to) => core.renameFile(requireRoot(), from, to));
 handle('fs:writeBackup', (p, c) => core.writeBackup(backupDir(), requireRoot(), p, c));
 handle('fs:listStaleBackups', () => core.listStaleBackups(backupDir(), requireRoot()));
 handle('fs:discardBackup', (p) => core.discardBackup(backupDir(), requireRoot(), p));
+
+/* ── the window, which now has no OS controls of its own ─────────────── */
+// The renderer can move, size and close its own window and nothing else. Note
+// what is absent: no "set bounds", no "always on top", no way to name another
+// window. Through the same handle() wrapper as everything above, so a failure
+// crosses the bridge as a value rather than an opaque remote-method error.
+
+handle('window:minimize', () => { if (mainWindow) mainWindow.minimize(); });
+handle('window:toggleMaximize', () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMaximized()) mainWindow.unmaximize(); else mainWindow.maximize();
+});
+// Straight into `win.close()`, which fires the same will-prevent-unload above
+// that the OS close button used to. The unsaved-changes dialog is therefore one
+// implementation reached two ways, not two that can disagree.
+handle('window:close', () => { if (mainWindow) mainWindow.close(); });
+handle('window:setFullscreen', (on) => { if (mainWindow) mainWindow.setFullScreen(!!on); });
+handle('window:isFullscreen', () => (mainWindow ? mainWindow.isFullScreen() : false));
 
 /* ── the user's own TeX installation ─────────────────────────────────── */
 // The renderer names a tool and a main file; it never supplies arguments.

@@ -1,7 +1,7 @@
 // Bridge for the Electron renderer.
 //
-// Exposes exactly the nine filesystem operations plus two for a system TeX,
-// and nothing else — no ipcRenderer,
+// Exposes exactly the filesystem operations, two for a system TeX and five for
+// this app's own frameless window, and nothing else — no ipcRenderer,
 // no require, no fs. The renderer never gets a general-purpose channel.
 //
 // Errors cross the bridge as {ok:false,error} values and are rethrown here, so
@@ -35,5 +35,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // the renderer picks a tool by name from a fixed allowlist and names a file.
   // Arguments are built in the main process and can never come from the page.
   detectTex: () => call('tex:detect'),
-  runTex: (tool, mainFile, timeoutSecs) => call('tex:run', tool, mainFile, timeoutSecs)
+  runTex: (tool, mainFile, timeoutSecs) => call('tex:run', tool, mainFile, timeoutSecs),
+
+  // The window is frameless, so the page draws Minimize, Maximize and Close.
+  // These act on this app's own window and take no window argument — there is
+  // nothing here for the renderer to point at anything else.
+  minimizeWindow: () => call('window:minimize'),
+  toggleMaximizeWindow: () => call('window:toggleMaximize'),
+  closeWindow: () => call('window:close'),
+  setFullscreen: (on) => call('window:setFullscreen', on),
+  isFullscreen: () => call('window:isFullscreen')
 });

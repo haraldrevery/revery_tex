@@ -37,6 +37,7 @@ import {
 } from './custom_font.js';
 import { initOutline, refreshOutline, scheduleOutline, applyOutlineVisibility } from './outline.js';
 import { initPaneSizeButtons } from './pane_size.js';
+import { initWindowChrome } from './window_chrome.js';
 import { buildTree, flattenTree, directoryPaths, normalizePath } from './file_tree.js';
 import { createHistory } from './tree_history.js';
 import { createDiagnosticPositions } from './diagnostic_positions.js';
@@ -129,6 +130,10 @@ settings.onChange(() => {
 // The − / + on the editor and outline pane heads. Registers its own onChange,
 // so it reflects a size changed from the Settings menu too.
 initPaneSizeButtons();
+// Minimize / Maximize / Close, on the shells that draw no OS title bar. A
+// no-op in the browser. Not awaited: it only reads the current fullscreen
+// state, and nothing below depends on the answer.
+initWindowChrome();
 
 /**
  * CodeMirror measures character width once and caches it. Changing the font or
