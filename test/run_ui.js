@@ -1223,19 +1223,26 @@ async function main() {
     const toggled = await cdp.evaluate(`(() => {
       const pane = document.getElementById('outlinepane');
       const div = document.querySelector('.vdiv[data-resize="outline"]');
-      document.getElementById('outlinetoggle').click();
-      const off = { pane: pane.hidden, divider: div.hidden,
-                    label: document.getElementById('outlinetoggle').textContent.trim(),
+      const btn = document.getElementById('outlinetoggle');
+      const read = () => ({ label: btn.textContent.trim(),
+                            pressed: btn.getAttribute('aria-pressed') });
+      btn.click();
+      const off = { ...read(), pane: pane.hidden, divider: div.hidden,
                     stored: JSON.parse(localStorage.getItem('revery_tex_settings') || '{}').showOutline };
-      document.getElementById('outlinetoggle').click();
-      return { off, onAgain: !pane.hidden && !div.hidden,
-               label: document.getElementById('outlinetoggle').textContent.trim() };
+      btn.click();
+      return { off, onAgain: !pane.hidden && !div.hidden, ...read() };
     })()`, true);
     check('the topbar button hides the pane and its divider',
       toggled.off.pane && toggled.off.divider, JSON.stringify(toggled.off));
     // A divider left behind is a drag handle for something that is not there.
+    // The state is aria-pressed, which the stylesheet fills on, rather than a ✓
+    // appended to the label: #topbar clips from the right, so the label has to
+    // keep its width across both states.
     check('the button says which state it is in',
-      toggled.off.label === 'Outline' && toggled.label === 'Outline ✓',
+      toggled.off.pressed === 'false' && toggled.pressed === 'true',
+      `pressed ${toggled.off.pressed} → ${toggled.pressed}`);
+    check('and does so without changing the width of its label',
+      toggled.off.label === 'Outline' && toggled.label === 'Outline',
       `${toggled.off.label} → ${toggled.label}`);
     check('the choice is persisted as a setting', toggled.off.stored === false,
       String(toggled.off.stored));
@@ -2024,6 +2031,176 @@ async function main() {
     })()`, true);
     // The harness answers confirm() with OK, so this is the confirmed path.
     check('delete removes the file', !deleted.paths.includes('notes/renamed.tex'), deleted.status);
+
+    /* ── selecting more than one row ────────────────────────────────── */
+    // The gesture this exists for: several files arrive at once and want
+    // sorting into folders, which before meant dragging them one at a time.
+    const multi = await cdp.evaluate(`(async () => {
+      const rows = () => [...document.querySelectorAll('#filetree .node')];
+      const rowFor = (p) => rows().find(r => r.dataset.path === p);
+      const click = (el, mods = {}) =>
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ...mods }));
+      const picked = () => rows().filter(r => r.classList.contains('selected'))
+                                 .map(r => r.dataset.path ?? r.dataset.dir);
+
+      // Not the main file, and not a binary: a binary row is selectable but
+      // never opens, so it cannot answer the "plain click still opens" check.
+      const files = rows().filter(r => r.dataset.path && !r.classList.contains('main')
+                                       && !r.classList.contains('binary'))
+                          .map(r => r.dataset.path);
+      const [a, b] = files;
+      const titleBefore = document.getElementById('editortitle').textContent;
+
+      // Ctrl+click selects without opening — the whole point of the modifier.
+      click(rowFor(a), { ctrlKey: true });
+      click(rowFor(b), { ctrlKey: true });
+      const two = picked();
+      const stillClosed = document.getElementById('editortitle').textContent === titleBefore;
+      const counted = document.getElementById('filecount').textContent;
+
+      // Ctrl+click again takes one back out.
+      click(rowFor(b), { ctrlKey: true });
+      const afterToggleOff = picked();
+
+      // A plain click drops the selection and opens, exactly as it always did.
+      click(rowFor(a));
+      const afterPlain = picked();
+      const opened = document.getElementById('editortitle').textContent;
+
+      return { two, stillClosed, counted, afterToggleOff, afterPlain, opened, a, b };
+    })()`, true);
+    check('ctrl+click selects rows without opening them',
+      multi.two.length === 2 && multi.stillClosed,
+      `${multi.two.join(', ')}${multi.stillClosed ? '' : ' — but the editor moved'}`);
+    check('the panel head says how many are selected',
+      /2 of \d+ selected/.test(multi.counted), multi.counted);
+    check('ctrl+click again deselects', multi.afterToggleOff.length === 1,
+      multi.afterToggleOff.join(', '));
+    // The guarantee the rest of the tree's behaviour rests on: with no
+    // modifier held, nothing about the old single-selection behaviour moved.
+    check('a plain click still clears the selection and opens the file',
+      multi.afterPlain.length === 0 && multi.opened === multi.a,
+      `${multi.opened} · ${multi.afterPlain.length} left selected`);
+
+    const ranged = await cdp.evaluate(`(async () => {
+      const rows = () => [...document.querySelectorAll('#filetree .node')];
+      const click = (el, mods = {}) =>
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ...mods }));
+      const visible = rows().map(r => r.dataset.path ?? r.dataset.dir);
+      // Anchor on the first row, extend to the fourth: four rows inclusive.
+      click(rows()[0], { ctrlKey: true });
+      click(rows()[3], { shiftKey: true });
+      const got = rows().filter(r => r.classList.contains('selected'))
+                        .map(r => r.dataset.path ?? r.dataset.dir);
+      return { got, want: visible.slice(0, 4) };
+    })()`, true);
+    check('shift+click takes the range between the two rows',
+      ranged.got.join('|') === ranged.want.join('|'),
+      `${ranged.got.join(', ')} vs ${ranged.want.join(', ')}`);
+
+    const bulk = await cdp.evaluate(`(async () => {
+      const rows = () => [...document.querySelectorAll('#filetree .node')];
+      const rowFor = (p) => rows().find(r => r.dataset.path === p);
+      const click = (el, mods = {}) =>
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ...mods }));
+
+      // Files and a destination of our own, so nothing here depends on which
+      // folders the fixture happens to ship.
+      const make = (what, name) => {
+        document.getElementById('newfile').click();
+        [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+          .find(b => new RegExp('new ' + what, 'i').test(b.textContent)).click();
+        const i = document.querySelector('.dlg input[type="text"]');
+        i.value = name; i.dispatchEvent(new Event('input', { bubbles: true }));
+        [...document.querySelectorAll('.dlg-foot button')]
+          .find(b => !/cancel/i.test(b.textContent)).click();
+      };
+      make('file', 'sortme/one.tex');
+      await new Promise(r => setTimeout(r, 60));
+      make('file', 'sortme/two.tex');
+      await new Promise(r => setTimeout(r, 60));
+      make('folder', 'dest');
+      await new Promise(r => setTimeout(r, 60));
+
+      // A plain click first: the range test above left rows selected, and this
+      // block is about a selection of exactly two.
+      click(rows().find(r => r.classList.contains('main')));
+      click(rowFor('sortme/one.tex'), { ctrlKey: true });
+      click(rowFor('sortme/two.tex'), { ctrlKey: true });
+
+      const r = rowFor('sortme/two.tex').getBoundingClientRect();
+      rowFor('sortme/two.tex').dispatchEvent(new MouseEvent('contextmenu',
+        { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 5 }));
+      const labels = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .map(b => b.textContent.trim());
+      return { labels };
+    })()`, true);
+    check('right-clicking a multi-selection offers to move and delete all of it',
+      bulk.labels.some(l => /Move 2 items to/.test(l))
+        && bulk.labels.some(l => /Delete 2 items/.test(l)),
+      bulk.labels.join(' | '));
+    // Rename is about one path, so it is the one row that goes away.
+    check('and does not offer to rename two things at once',
+      !bulk.labels.some(l => /Rename/.test(l)), bulk.labels.join(' | '));
+
+    // Opened with a synthetic click and *chosen* with a real one, the same way
+    // the theme and table-reference submenus are driven above: el.click() fires
+    // no mousedown, so it cannot dismiss the parent menu the panel belongs to,
+    // and realClick on the trigger would toggle the panel back shut after its
+    // own mouseMoved had already opened it on hover.
+    const destinations = await cdp.evaluate(`(() => {
+      const t = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /Move 2 items to/.test(b.textContent));
+      if (!t) return null;
+      t.click();
+      const panel = document.querySelector('.submenu:not([hidden])');
+      return panel ? [...panel.querySelectorAll('.menu-item')].map(b => b.textContent.trim()) : null;
+    })()`, true);
+    check('the move submenu lists the folders it could go to',
+      !!destinations && destinations.includes('dest/')
+        && destinations.includes('⌐ project root'),
+      (destinations || []).join(' | '));
+    await realClick(cdp, `[...document.querySelectorAll('.submenu:not([hidden]) .menu-item')]
+      .find(b => b.textContent.trim() === 'dest/')`);
+    const movedBoth = await cdp.evaluate(`(async () => {
+      await new Promise(r => setTimeout(r, 150));
+      const paths = [...document.querySelectorAll('#filetree .node')].map(n => n.dataset.path);
+      return { paths, status: document.getElementById('status').textContent };
+    })()`, true);
+    check('the move-to-folder submenu relocates the whole selection',
+      movedBoth.paths.includes('dest/one.tex') && movedBoth.paths.includes('dest/two.tex')
+        && !movedBoth.paths.includes('sortme/one.tex'),
+      movedBoth.status);
+
+    const guarded = await cdp.evaluate(`(async () => {
+      const rows = () => [...document.querySelectorAll('#filetree .node')];
+      const click = (el, mods = {}) =>
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ...mods }));
+      // Re-queried before every use: each of these clicks re-renders the tree,
+      // which replaces every row, and a reference held across one is detached —
+      // its handlers still fire but it is no longer inside #filetree, so a
+      // contextmenu dispatched on it never reaches the panel's listener.
+      const mainRow = () => rows().find(r => r.classList.contains('main'));
+      click(mainRow());                  // clear what the move above left selected
+      click(rows().find(r => r.dataset.path === 'dest/one.tex'), { ctrlKey: true });
+      click(mainRow(), { ctrlKey: true });
+      const target = mainRow();
+      const r = target.getBoundingClientRect();
+      target.dispatchEvent(new MouseEvent('contextmenu',
+        { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 5 }));
+      [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /Delete 2 items/.test(b.textContent))?.click();
+      await new Promise(res => setTimeout(res, 120));
+      return { status: document.getElementById('status').textContent,
+               survived: [...document.querySelectorAll('#filetree .node')]
+                 .map(n => n.dataset.path) };
+    })()`, true);
+    // Refused whole, not partly applied: the batch is checked before anything
+    // moves, so the file that could have gone is still there too.
+    check('a batch containing the main document is refused entirely',
+      /main document/i.test(guarded.status)
+        && guarded.survived.includes('dest/one.tex'),
+      guarded.status);
 
     /* ── drag and drop in the tree ──────────────────────────────────── */
     // Real drag gestures cannot be synthesised over CDP without the OS drag
@@ -2822,6 +2999,44 @@ async function main() {
       fontBooted.attr === 'custom' && fontBooted.rule
       && /ReveryUserFont/.test(fontBooted.family || ''),
       `${fontBooted.attr}, rule=${fontBooted.rule}, ${fontBooted.family}`);
+
+    /* ── a folder made in the tree survives a reload ────────────────── */
+    // It did not before: `emptyDirs` was a plain in-memory Set, so a folder
+    // created from the panel was gone on the next load with nothing said about
+    // it. A folder holds no file until something is saved into it, which is
+    // exactly why it has to be remembered rather than re-derived.
+    const madeFolder = await cdp.evaluate(`(async () => {
+      const s = await import('./jvscrpt_and_css_extra/settings.js');
+      document.getElementById('newfile').click();
+      [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /new folder/i.test(b.textContent)).click();
+      const i = document.querySelector('.dlg input[type="text"]');
+      i.value = 'survives_reload'; i.dispatchEvent(new Event('input', { bubbles: true }));
+      [...document.querySelectorAll('.dlg-foot button')]
+        .find(b => !/cancel/i.test(b.textContent)).click();
+      await new Promise(r => setTimeout(r, 80));
+      const key = window.__reveryTexApp.projectKey;
+      return {
+        key,
+        shown: !!document.querySelector('#filetree .node[data-dir="survives_reload"]'),
+        stored: (s.settings.emptyDirsByProject || {})[key] || []
+      };
+    })()`, true);
+    check('a new folder is remembered against the project that owns it',
+      madeFolder.shown && madeFolder.stored.includes('survives_reload'),
+      `${madeFolder.key} → ${madeFolder.stored.join(', ')}`);
+
+    await cdp.send('Page.reload');
+    await sleep(2500);
+    await cdp.waitFor('!!document.querySelector("#filetree .node")',
+      { what: 'reload with a created folder', timeoutMs: 30000 });
+    const afterReload = await cdp.evaluate(`(() => ({
+      key: window.__reveryTexApp.projectKey,
+      there: !!document.querySelector('#filetree .node[data-dir="survives_reload"]')
+    }))()`, true);
+    check('and is still in the tree after a reload',
+      afterReload.key === madeFolder.key && afterReload.there,
+      `${afterReload.key}: ${afterReload.there ? 'present' : 'gone'}`);
 
     const forgotten = await cdp.evaluate(`(async () => {
       const cf = await import('./jvscrpt_and_css_extra/custom_font.js');
