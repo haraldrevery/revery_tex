@@ -3722,6 +3722,115 @@ async function main() {
       `${gutter.onChapter.file}: ${gutter.onChapter.markers} marker(s), ` +
       `${gutter.onChapter.owned} owned of ${gutter.total} total`);
 
+    /* ── clicking an issue lands on its code, after edits ───────────── */
+    // No test ever clicked an issue row, which is how the panel shipped
+    // jumping to the wrong line. A diagnostic's line is where the *compiler*
+    // saw it; the moment anything is typed above it that number is stale, and
+    // the click used it raw while the gutter marker had already moved. The two
+    // disagreed by exactly the number of lines inserted.
+    const clicked = await cdp.evaluate(`(async () => {
+      const T = window.__reveryTexTest, A = window.__reveryTexApp;
+      const wait = (ms) => new Promise(r => setTimeout(r, ms));
+      const rows = () => [...document.querySelectorAll('#issues .issue')];
+      const openRow = async (p) => {
+        document.querySelector('#filetree .node[data-path="' + CSS.escape(p) + '"]')?.click();
+        await wait(250);
+      };
+      const cursorLine = () => {
+        const v = T.view(), s = v.state;
+        return s.doc.lineAt(s.selection.main.head).number;
+      };
+      // Does a gutter dot sit on the same screen row as the cursor? This is the
+      // invariant that broke: the marker and the click target are two
+      // representations of one position, and nothing checked they agreed.
+      const dotOnCursorLine = () => {
+        const v = T.view();
+        const top = v.coordsAtPos(v.state.selection.main.head)?.top;
+        if (top == null) return false;
+        return [...document.querySelectorAll('#editor .cm-diag')]
+          .filter(e => e.closest('.cm-gutterElement')?.style.visibility !== 'hidden')
+          .some(e => Math.abs(e.getBoundingClientRect().top - top) < 8);
+      };
+
+      const all = A.issues();
+      const idx = all.findIndex(i => i.mappedLine);
+      if (idx < 0) return { skip: 'no diagnostic carries a line' };
+      const target = all[idx];
+      await openRow(target.file);
+      if (document.getElementById('editortitle').textContent !== target.file) {
+        return { skip: 'could not open ' + target.file };
+      }
+
+      const PAD = 5;
+      const before = A.issues()[idx].mappedLine;
+      T.view().dispatch({ changes: { from: 0, insert: '%pad\\n'.repeat(PAD) } });
+      await wait(400);                       // the coalesced Issues repaint
+
+      const shifted = A.issues()[idx].mappedLine;
+      const label = rows()[idx]?.querySelector('.where')?.textContent.trim() || '';
+      rows()[idx]?.click();
+      await wait(150);
+      const landed = cursorLine();
+      const agreed = dotOnCursorLine();
+
+      // Switching away and back rebuilds the gutter from scratch. It used to
+      // rebuild from the log's raw number, throwing the mapping away.
+      const other = [...document.querySelectorAll('#filetree .node[data-path]')]
+        .map(n => n.dataset.path).find(p => p !== target.file);
+      let afterSwitch = null;
+      if (other) {
+        await openRow(other);
+        await openRow(target.file);
+        rows()[idx]?.click();
+        await wait(150);
+        afterSwitch = { line: cursorLine(), agreed: dotOnCursorLine() };
+      }
+
+      // A wholesale rewrite from outside the editor: no ChangeSet describes it,
+      // so the position is not knowable and the row must say so rather than
+      // jump somewhere plausible.
+      A.setBuffer(target.file, 'totally different\\ncontents\\n');
+      await wait(400);
+      const stale = A.issues()[idx].mappedLine;
+      const staleRow = rows()[idx]?.classList.contains('stale') || false;
+      const parked = cursorLine();
+      rows()[idx]?.click();
+      await wait(150);
+
+      return {
+        file: target.file, logLine: target.line, before, shifted, landed, agreed, label,
+        afterSwitch, stale, staleRow, movedWhileStale: cursorLine() !== parked
+      };
+    })()`, true);
+
+    if (clicked.skip) {
+      check('clicking an issue lands on its code', false, clicked.skip);
+    } else {
+      // The bug, stated as a number: five lines in above it, five lines down.
+      check('an issue row follows the code it is about through an edit',
+        clicked.shifted === clicked.before + 5 && clicked.landed === clicked.shifted,
+        `${clicked.file}: log said ${clicked.logLine}, was ${clicked.before}, ` +
+        `now ${clicked.shifted}, cursor landed on ${clicked.landed}`);
+      // Neither view may drift from the other again.
+      check('and the gutter marker is on the line the click landed on',
+        clicked.agreed === true, `dot aligned with cursor: ${clicked.agreed}`);
+      check('the row names the file, not a bare line number',
+        /:\d+/.test(clicked.label), `row said "${clicked.label}"`);
+      check('a file switch does not snap the marker back to the stale line',
+        !clicked.afterSwitch ||
+        (clicked.afterSwitch.line === clicked.shifted && clicked.afterSwitch.agreed),
+        clicked.afterSwitch
+          ? `back on ${clicked.afterSwitch.line} (expected ${clicked.shifted}), ` +
+            `dot aligned: ${clicked.afterSwitch.agreed}`
+          : 'no second file to switch to');
+      // Refusing to answer is the point. The old clamp would have put the
+      // cursor on the last line of the rewritten file and looked deliberate.
+      check('a rewrite from outside the editor marks the row stale, not wrong',
+        clicked.stale === null && clicked.staleRow && !clicked.movedWhileStale,
+        `mapped=${clicked.stale} stale-class=${clicked.staleRow} ` +
+        `cursor moved=${clicked.movedWhileStale}`);
+    }
+
     /* ── biblatex without biber: from dead end to one click ─────────── */
     // The whole point of this feature, driven end to end. biber is Perl, so no
     // in-browser engine will ever run it; a biblatex document therefore

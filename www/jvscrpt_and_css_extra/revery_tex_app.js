@@ -39,6 +39,7 @@ import { initOutline, refreshOutline, scheduleOutline, applyOutlineVisibility } 
 import { initPaneSizeButtons } from './pane_size.js';
 import { buildTree, flattenTree, directoryPaths, normalizePath } from './file_tree.js';
 import { createHistory } from './tree_history.js';
+import { createDiagnosticPositions } from './diagnostic_positions.js';
 import { referencesTo } from './document_model.js';
 import { $, download } from './dom.js';
 import {
@@ -48,7 +49,7 @@ import {
 import { switchBiblatexBackend } from './latex_snippets.js';
 import { applyEdit } from './editor_actions.js';
 import {
-  initLogConsole, rawLog, clearLog, setStatus, showTab, togglePanel,
+  initLogConsole, rawLog, clearLog, setStatus, showTab, togglePanel, refreshIssues,
   setPanelHeight, savePanelHeight, setIssues, getIssues, hasErrors, logText,
   applyPanelPlacement
 } from './log_console.js';
@@ -91,6 +92,15 @@ const syncTex = new SyncTex();
  * and scroll position, which the old whole-document replace threw away.
  */
 const docStates = new Map();
+
+/**
+ * Where each diagnostic's line has moved to since the compile that reported it.
+ *
+ * Separate from docStates on purpose: that is a cache and may be cleared or
+ * evicted, while this has to answer for files the reader never opened. See
+ * diagnostic_positions.js for why the gutter's own mapping is not enough.
+ */
+const diagPositions = createDiagnosticPositions();
 
 // Settings live in settings.js as one declarative table; this file only reads
 // values. Every control that writes one is elsewhere — the menu is built from
@@ -339,33 +349,134 @@ function projectPathFor(raw) {
  * and every other file stays clean. Attributing warnings properly means
  * tracking the log's `(filename … )` file stack, which is a separate piece of
  * work and a notoriously fiddly one.
+ *
+ * Returns `{path, inferred}` rather than a bare path so that guess can be shown
+ * *as* a guess. It used to be indistinguishable from a fact, and the row said
+ * only `line 200` — the half of the answer that means nothing without a
+ * filename — so a warning belonging to a chapter read as a confident claim
+ * about the main file.
  */
+/** Could the main-file fallback be wrong? Only if there is another .tex to mean. */
+function couldMeanAnotherFile() {
+  if (!project) return false;
+  let tex = 0;
+  for (const p of project.files.keys()) {
+    if (p.endsWith('.tex') && ++tex > 1) return true;
+  }
+  return false;
+}
+
 function fileForDiagnostic(d) {
-  return projectPathFor(d?.file) || project?.main || null;
+  const named = projectPathFor(d?.file);
+  if (named) return { path: named, inferred: false };
+  // The fallback is only a *guess* where there is something else it could have
+  // been. For a one-file document — the common case, and the only one the
+  // bundled engine can be precise about — the main file is the only candidate,
+  // and marking it uncertain would put a doubt on every row of every simple
+  // project that the code does not actually have.
+  return { path: project?.main || null, inferred: couldMeanAnotherFile() };
+}
+
+/**
+ * Everything needed to act on a diagnostic: which file, which line *now*, and
+ * how sure we are about the file.
+ *
+ * The line is the log's number mapped through every edit since the compile —
+ * see diagnostic_positions.js. `line: null` means the position is not knowable
+ * (edited away, or the file was rewritten outside the editor), and callers must
+ * treat that as "do not move the cursor" rather than falling back to the raw
+ * number. `inferred` means the file is the main-document guess rather than
+ * something the log actually said, so the UI can show it as a guess.
+ */
+function resolveIssue(d) {
+  const { path, inferred } = fileForDiagnostic(d);
+  if (!path || !d?.line) return { path, inferred, line: null };
+  const f = project?.files.get(path);
+  const { line } = diagPositions.locate(path, d.line, f?.content);
+  return { path, inferred, line };
 }
 
 // Diagnostics carry a line number only when the log gave one; the gutter shows
 // just those, and only for the file they are about. The Issues tab remains the
 // complete list.
+//
+// Built from the *mapped* position, not the log's raw number. This is called on
+// every openFile, so building it from the raw number threw away the mapping the
+// gutter's own StateField had been maintaining — switching to another file and
+// back snapped every marker back to where the line used to be.
 function pushDiagnosticsToGutter() {
   if (!view) return;
-  const here = getIssues().filter(d => d.line && fileForDiagnostic(d) === currentPath);
+  const here = [];
+  for (const d of getIssues()) {
+    const at = resolveIssue(d);
+    if (at.line && at.path === currentPath) here.push({ ...d, line: at.line });
+  }
   view.dispatch({ effects: setDiagnostics.of(here) });
+}
+
+/**
+ * Repaint the Issues rows so their line numbers keep up with the edits.
+ *
+ * Coalesced exactly as scheduleOutline is, and for the same reason: holding a
+ * key down must not rebuild the panel once per character. Without it the row
+ * would show the compile-time number while a click used the mapped one — the
+ * same displayed-vs-acted-on split, one level up from the bug being fixed.
+ */
+let issueTimer = null;
+function scheduleIssueRefresh(delay = 300) {
+  clearTimeout(issueTimer);
+  issueTimer = setTimeout(refreshIssues, delay);
+}
+
+/**
+ * A file's text was replaced from outside the editor, so its diagnostics no
+ * longer have knowable positions — and the rows must be repainted to say so.
+ *
+ * The repaint is the half that is easy to forget: none of these paths produces
+ * a transaction, so nothing else would notice. Without it the row keeps
+ * offering a line it will refuse to jump to, which is a different lie from the
+ * one being fixed but the same kind.
+ */
+function invalidateDiagnostics(path) {
+  diagPositions.invalidate(path);
+  scheduleIssueRefresh();
 }
 
 /** An Issues row was clicked: open the file it is about, then go to the line. */
 function gotoIssue(d) {
-  if (!d?.line) return;
-  const target = fileForDiagnostic(d);
-  if (target && target !== currentPath && project?.files.has(target)) openFile(target);
-  gotoLine(d.line);
+  const { path, line } = resolveIssue(d);
+  if (path && path !== currentPath && project?.files.has(path)) openFile(path);
+  // Opening the file is still worth doing when the line is gone — it is where
+  // the reader was headed. Moving the cursor is not: the only honest answers
+  // are the right line or none, and this used to pick a wrong one.
+  if (line == null) {
+    setStatus('that line has been edited since the last compile — recompile to place it', 'warn');
+    return;
+  }
+  if (!gotoLine(line)) {
+    setStatus(`line ${line} is past the end of ${path}`, 'warn');
+  }
 }
 
+/** Put the cursor on 1-based line `n`. False if there is no such line. */
 function gotoLine(n) {
-  if (!view) return;
-  const line = view.state.doc.line(Math.min(Math.max(1, n), view.state.doc.lines));
+  if (!view) return false;
+  const doc = view.state.doc;
+  // No clamp. It used to be Math.min(Math.max(1, n), doc.lines), and for a
+  // diagnostic attributed to the wrong file — which under the bundled engine is
+  // every diagnostic, since it passes no -file-line-error — that silently put
+  // the cursor on the last line of whatever file was guessed. A wrong answer
+  // wearing a right one's costume, and the exact opposite of the policy the
+  // diagnostics gutter applies three files away, where an out-of-range marker
+  // is dropped rather than clamped (latex_editor.js).
+  //
+  // The outline's callers cannot be out of range: their numbers come from
+  // scanning this same buffer, so the clamp was only ever load-bearing here.
+  if (!(n >= 1 && n <= doc.lines)) return false;
+  const line = doc.line(n);
   view.dispatch({ selection: { anchor: line.from }, scrollIntoView: true });
   view.focus();
+  return true;
 }
 
 // ── editor ─────────────────────────────────────────────────────────────
@@ -449,6 +560,11 @@ function editorExtensions() {
           const f = project.files.get(currentPath);
           f.content = u.state.doc.toString();
           f.dirty = true;
+          // Before refreshDirty, and unconditionally: this is the only place an
+          // edit is observable, and a transaction missed here is a diagnostic
+          // that silently keeps pointing at the line it used to be on.
+          diagPositions.record(currentPath, u.changes);
+          scheduleIssueRefresh();
           refreshDirty();
           scheduleBackup();
         }
@@ -599,6 +715,9 @@ async function saveAll() {
         if (choice === 'reload') {
           const r = await NativeAPI.readTextFile(path);
           f.content = r.content; f.stamp = r.stamp; f.dirty = false;
+          // Wholesale replacement with no ChangeSet describing it, so the
+          // accumulated mapping is about a document that no longer exists.
+          invalidateDiagnostics(path);
           if (path === currentPath) openFile(path);
           rawLog('wrn', `reloaded ${path} from disk, discarding local edits`);
           reloaded++;
@@ -745,6 +864,7 @@ async function offerRecovery() {
     }
     f.content = b.content;
     f.dirty = true;
+    invalidateDiagnostics(b.path);      // replaced wholesale, as in the reload path
     restored++;
   }
 
@@ -1615,6 +1735,9 @@ async function moveOne(from, to) {
   const st = docStates.get(from);
   docStates.delete(from);
   if (st) docStates.set(to, st);
+  // A rename moves the file, not its text, so the diagnostics keep their
+  // positions — they just have to be looked up under the new path.
+  diagPositions.rename(from, to);
   if (project.main === from) project.main = to;
   if (currentPath === from) { currentPath = to; $('editortitle').textContent = to; }
   // The selection is a set of paths, and this file's path just changed. Same
@@ -1873,6 +1996,8 @@ async function removeEmptyFile(path) {
   }
   project.files.delete(path);
   docStates.delete(path);
+  diagPositions.forget(path);
+  scheduleIssueRefresh();       // its rows can no longer point anywhere
   selected.delete(path);
   if (path === currentPath) {
     currentPath = null;
@@ -2019,6 +2144,8 @@ async function deleteEntries(entries) {
       if (canWriteDisk() && NativeAPI.deleteFile) await NativeAPI.deleteFile(p);
       project.files.delete(p);
       docStates.delete(p);          // nothing left for its undo history to be about
+      diagPositions.forget(p);      // nor for a diagnostic to point into
+      scheduleIssueRefresh();       // (debounced, so the loop costs one repaint)
       selected.delete(p);           // nor for it to be selected for
       if (p === currentPath) { currentPath = null; $('editortitle').textContent = 'no file'; }
     }
@@ -2580,6 +2707,9 @@ async function loadFromDisk(root) {
   // have a main.tex, and reusing one's state for the other would hand over its
   // undo history along with it.
   docStates.clear();
+  // As do the diagnostic baselines: they are keyed by path, and two projects
+  // can both have a main.tex.
+  diagPositions.clear();
   // And so does the PDF, for the same reason.
   await resetPreview();
   // Before anything reads project.main: the remembered choice overrules the
@@ -2764,6 +2894,12 @@ async function compile() {
     setStatus('compiling…', 'warn');
 
     const files = [...project.files].map(([path, f]) => ({ path, content: f.content }));
+    // The baseline this compile's line numbers will count against — taken here,
+    // from the exact array the engine is about to be handed, rather than when
+    // the result comes back. A compile runs for tens of seconds and nothing
+    // stops the user typing through it, so a baseline captured on arrival is
+    // already several edits stale.
+    diagPositions.snapshot(files);
     const t0 = performance.now();
     const r = await eng.compile({
       files,
@@ -2857,10 +2993,15 @@ async function useBundledBibtex() {
   // visible and undoable where the user is looking; otherwise straight into the
   // buffer, which openFile would show the same way.
   if (currentPath === main && view) {
+    // A real transaction, so the diagnostic positions follow it on their own.
     applyEdit(view, edit);
   } else {
     f.content = f.content.slice(0, edit.from) + edit.insert + f.content.slice(edit.to);
     f.dirty = true;
+    // This branch is not a transaction, so nothing describes the shift to the
+    // diagnostics. The edit is one line in the preamble and would move every
+    // line below it.
+    invalidateDiagnostics(main);
     refreshDirty();
   }
   // The tool the document needs has changed, so re-derive it before compiling —
@@ -2992,8 +3133,17 @@ async function showPdf(bytes, pages) {
       const hit = syncTex.fromPdf(page, x, y);
       if (!hit) return;
       if (hit.file && project.files.has(hit.file) && hit.file !== currentPath) openFile(hit.file);
-      gotoLine(hit.line);
-      setStatus(`↖ ${hit.file}:${hit.line}`, 'ok');
+      // SyncTeX records describe the document as it was compiled, so a line can
+      // fall off the end once the file has been shortened since. gotoLine no
+      // longer clamps, and the status must not claim a jump that did not
+      // happen — it used to say `↖ main.tex:400` while the cursor sat on line
+      // 12. (The records are not remapped through edits the way diagnostics now
+      // are; that is the same class of staleness and a separate change.)
+      if (gotoLine(hit.line)) {
+        setStatus(`↖ ${hit.file}:${hit.line}`, 'ok');
+      } else {
+        setStatus(`↖ ${hit.file}:${hit.line} — past the end of the file now; recompile`, 'warn');
+      }
     });
     const goBack = () => {
       const moved = preview.back();
@@ -3301,7 +3451,10 @@ window.addEventListener('unhandledrejection', (e) => {
 // ── boot ───────────────────────────────────────────────────────────────
 // The panel first: it owns the status line, and everything below reports
 // through it.
-initLogConsole({ onGotoIssue: gotoIssue });
+// Both callbacks are the same question — where does this diagnostic point? —
+// asked for action and for display. They share `resolveIssue` so a row cannot
+// show one line and jump to another.
+initLogConsole({ onGotoIssue: gotoIssue, describeIssue: resolveIssue });
 view = makeEditor();
 // Before loading: openFile() refreshes the outline, and it should have somewhere
 // to put the first project's headings rather than rendering them twice.
@@ -3389,9 +3542,19 @@ window.__reveryTexApp = {
    * such answer existed and every diagnostic went to whichever file was open.
    */
   issues() {
-    return getIssues().map(d => ({
-      severity: d.severity, line: d.line ?? null, file: fileForDiagnostic(d)
-    }));
+    return getIssues().map(d => {
+      const at = resolveIssue(d);
+      return {
+        severity: d.severity,
+        // The log's own number, kept for tests that pin what the parser read…
+        line: d.line ?? null,
+        file: at.path,
+        // …and where it is now, which is what a click actually uses. Null once
+        // the line has been edited away.
+        mappedLine: at.line,
+        inferred: at.inferred
+      };
+    });
   },
   /** The bytes the Export button would download — a click gives the driver nothing. */
   async exportBytes() { return project ? (await buildExportZip()).bytes : null; },
@@ -3399,6 +3562,7 @@ window.__reveryTexApp = {
     const f = project?.files.get(path);
     if (!f) return false;
     f.content = text; f.dirty = true;
+    invalidateDiagnostics(path);      // wholesale replacement, no ChangeSet
     if (path === currentPath) openFile(path); else refreshOutline();
     refreshDirty();
     return true;

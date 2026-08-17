@@ -17,6 +17,13 @@ let rawLines = [];
 let trimmed = 0;
 let issues = [];
 let gotoIssue = () => {};
+/**
+ * Where a diagnostic is *now*, asked of whoever owns the project.
+ *
+ * Default answers "wherever the log said", which is what this panel assumed for
+ * its whole life and is only true until the reader types.
+ */
+let describeIssue = (d) => ({ path: null, inferred: false, line: d.line ?? null });
 
 /* ── raw log ─────────────────────────────────────────────────────────── */
 
@@ -94,6 +101,18 @@ export function setIssues(list) {
 export const getIssues = () => issues;
 export const hasErrors = () => issues.some(d => d.severity === 'error');
 
+/**
+ * Redraw without changing the diagnostics themselves.
+ *
+ * The rows show a line number, and that number moves as the reader edits. If it
+ * were painted once at compile time it would drift away from where the click
+ * actually lands — the same divergence between a displayed fact and an acted-on
+ * one that this whole change is about, just one level up.
+ */
+export function refreshIssues() {
+  if (issues.length) renderIssues();
+}
+
 function renderIssues() {
   const body = $('issues');
   body.textContent = '';
@@ -118,10 +137,35 @@ function renderIssues() {
     row.appendChild(document.createTextNode(
       (d.package ? `[${d.package}] ` : '') + d.message));
     if (d.line) {
+      const at = describeIssue(d);
       const w = document.createElement('span');
       w.className = 'where';
-      w.textContent = `  line ${d.line}`;
+      // The file, not just the number. `line 200` alone is the half of the
+      // answer that means nothing — it was read as a claim about the file on
+      // screen, which for a warning attributed by guesswork it never was.
+      w.textContent = `  ${at.path ? `${at.path}:` : 'line '}${at.line ?? d.line}`;
+      if (at.inferred) {
+        // A guess shown as a guess. The log did not name a file: the bundled
+        // engine passes no -file-line-error, and package warnings never carry
+        // one under any engine.
+        const g = document.createElement('span');
+        g.className = 'guess';
+        g.textContent = ' ?';
+        g.title = 'the log did not say which file; assuming the main document';
+        w.appendChild(g);
+      }
       row.appendChild(w);
+
+      if (at.line == null) {
+        // Edited since the compile, or rewritten from outside the editor.
+        // Struck rather than hidden: the diagnostic is still real, only its
+        // position is not. Deliberately not clickable — the previous behaviour
+        // was to jump to the stale number, which is the bug.
+        row.classList.add('stale');
+        row.title = 'this line has moved since the last compile — recompile to place it';
+      } else {
+        row.classList.add('linked');
+      }
       // The whole diagnostic, not just its line. A line number means nothing
       // without the file it counts in, and this used to jump to that number
       // inside whatever file happened to be open — so an error in a chapter
@@ -229,14 +273,22 @@ export function setStatus(text, cls = '') {
 /**
  * Wire the panel up. Must run before anything logs.
  *
- * @param {{onGotoIssue?: (d: object)=>void}} opts  jumping the editor to a
- *        diagnostic is the one thing this panel cannot do itself, so it arrives
- *        from outside rather than the panel importing the editor. The whole
- *        diagnostic is handed over, not a bare line number: deciding which file
- *        a line belongs to needs the project, which this panel does not have.
+ * @param {{onGotoIssue?: (d: object)=>void,
+ *          describeIssue?: (d: object)=>{path: string|null, inferred: boolean, line: number|null}}} opts
+ *        jumping the editor to a diagnostic is the one thing this panel cannot
+ *        do itself, so it arrives from outside rather than the panel importing
+ *        the editor. The whole diagnostic is handed over, not a bare line
+ *        number: deciding which file a line belongs to needs the project, which
+ *        this panel does not have.
+ *
+ *        `describeIssue` is the same question asked for display rather than for
+ *        action, and it exists so the two cannot answer differently — a row
+ *        that shows one line and jumps to another is the failure this panel
+ *        shipped with.
  */
-export function initLogConsole({ onGotoIssue } = {}) {
+export function initLogConsole({ onGotoIssue, describeIssue: describe } = {}) {
   if (onGotoIssue) gotoIssue = onGotoIssue;
+  if (describe) describeIssue = describe;
 
   for (const t of document.querySelectorAll('.tab')) t.onclick = () => showTab(t.dataset.tab);
   $('togglepanel').onclick = () => togglePanel();

@@ -298,6 +298,16 @@ const diagField = CM.StateField.define({
         true
       );
     }
+    // Markers follow the text they are about. This half was always here and
+    // always right — the bug was that it had no counterpart: the Issues panel
+    // kept the log's raw number, so after an edit the dot was in one place and
+    // clicking the row sent the cursor to another.
+    //
+    // diagnostic_positions.js is that counterpart. It maps the *same*
+    // ChangeSets from the *same* baseline, so the two cannot disagree; this is
+    // the per-frame path, and that one is what survives a file switch, since a
+    // state that has been swapped out carries no mapping forward. Neither is
+    // redundant, and removing either brings the divergence back.
     return tr.docChanged ? set.map(tr.changes) : set;
   }
 });

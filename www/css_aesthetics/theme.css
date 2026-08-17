@@ -1012,10 +1012,19 @@ body.dragging * { user-select:none !important }
 .l-hdr { color:var(--accent); text-transform:uppercase; letter-spacing:var(--tracking-wide) }
 .l-meta { color:var(--text-dim) }
 
-.issue { cursor:pointer; padding:.15rem 0; white-space:normal }
-.issue:hover { color:var(--text) }
+/* The hand belongs only on rows that go somewhere. It used to be on every row,
+   including the ones with no line at all, which promised a jump that never came. */
+.issue { padding:.15rem 0; white-space:normal }
+.issue.linked { cursor:pointer }
+.issue.linked:hover { color:var(--text) }
 .issue .sev { display:inline-block; width:4.2rem; text-transform:uppercase;
               letter-spacing:var(--tracking-wide); font-size:var(--fs-xs) }
 .issue.error .sev { color:var(--err) } .issue.warning .sev { color:var(--warn) }
 .issue .where { color:var(--text-dim) }
+/* The log's number, kept visible but struck: the line has been edited since the
+   compile and where it went is not knowable, so the row says so instead of
+   jumping somewhere plausible. */
+.issue.stale .where { text-decoration:line-through; opacity:.7 }
+/* The file is the main-document guess, not something the log said. */
+.issue .where .guess { opacity:.6 }
 .empty { color:var(--text-dim); font-size:var(--fs-xs); letter-spacing:var(--tracking-wider); text-transform:uppercase }
