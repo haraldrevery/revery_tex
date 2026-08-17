@@ -59,6 +59,50 @@ export async function ask(message) {
 }
 
 /**
+ * A question with more than two answers.
+ *
+ * Some choices genuinely have three, and forcing them into OK/Cancel is how a
+ * dialog ends up with no safe exit — the save-conflict prompt was "overwrite the
+ * file on disk" or "throw away my edits", with Escape silently meaning the
+ * second. Every real question there has a third answer: leave it alone and let
+ * me look.
+ *
+ * @param {string} message
+ * @param {Array<{value: *, label: string, primary?: boolean}>} choices
+ * @param {*} dismissed  what Escape, the backdrop and the close button mean.
+ *   Always the answer that changes nothing.
+ */
+export function askChoice(message, choices, dismissed) {
+  return new Promise((resolve) => {
+    let answered = false;
+    const settle = (v) => { if (!answered) { answered = true; resolve(v); } };
+
+    const modal = openModal({ title: 'Revery TeX', onClose: () => settle(dismissed) });
+
+    const text = document.createElement('p');
+    text.className = 'dlg-ask';
+    text.textContent = message;          // textContent: the message carries paths
+    modal.body.appendChild(text);
+
+    const buttons = choices.map((c) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      if (c.primary) b.className = 'primary';
+      b.textContent = c.label;
+      b.onclick = () => { settle(c.value); modal.close(); };
+      return b;
+    });
+    modal.foot.append(...buttons);
+    modal.panel.appendChild(modal.foot);
+
+    // Focus whichever choice means "change nothing", so Enter on a dialog nobody
+    // read is never the destructive one. Falls back to the first button.
+    const safe = choices.findIndex(c => c.value === dismissed);
+    (buttons[safe >= 0 ? safe : 0])?.focus();
+  });
+}
+
+/**
  * The modal `ask` is built from.
  *
  * Cancel is the default and the safe answer: Escape, the backdrop and the close
@@ -67,38 +111,10 @@ export async function ask(message) {
  * the broken native path did.
  */
 function askInPage(message) {
-  return new Promise((resolve) => {
-    let answered = false;
-    const settle = (v) => { if (!answered) { answered = true; resolve(v); } };
-
-    const modal = openModal({
-      title: 'Revery TeX',
-      // Escape and the backdrop both land here, and both mean "no".
-      onClose: () => settle(false)
-    });
-
-    const text = document.createElement('p');
-    text.className = 'dlg-ask';
-    text.textContent = message;          // textContent: the message carries paths
-    modal.body.appendChild(text);
-
-    const cancel = document.createElement('button');
-    cancel.type = 'button';
-    cancel.textContent = 'Cancel';
-    cancel.onclick = () => { settle(false); modal.close(); };
-
-    const ok = document.createElement('button');
-    ok.type = 'button';
-    ok.className = 'primary';
-    ok.textContent = 'OK';
-    ok.onclick = () => { settle(true); modal.close(); };
-
-    modal.foot.append(cancel, ok);
-    modal.panel.appendChild(modal.foot);
-    // Cancel, not OK: every caller asks before doing something destructive, so
-    // Enter on a dialog nobody read should not be the one that goes ahead.
-    cancel.focus();
-  });
+  return askChoice(message, [
+    { value: false, label: 'Cancel' },
+    { value: true, label: 'OK', primary: true }
+  ], false);
 }
 
 /**

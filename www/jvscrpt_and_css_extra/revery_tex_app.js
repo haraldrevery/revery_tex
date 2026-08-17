@@ -25,7 +25,7 @@ import { writeZip } from './zip_core.js';
 import * as settings from './settings.js';
 import { attachMenu, openMenuAt, SelectMenu } from './menus.js';
 import { toolboxRows, contextRows } from './toolbox.js';
-import { openDialog, dialogIsOpen, ask } from './dialog.js';
+import { openDialog, dialogIsOpen, ask, askChoice } from './dialog.js';
 import { openLegal, copySourceLink } from './legal.js';
 import { openAbout } from './about.js';
 import {
@@ -568,6 +568,7 @@ async function saveAll() {
   // "saved 3 file(s)" over a run that discarded one of them.
   let written = 0;
   let reloaded = 0;
+  let skipped = 0;
   // Which file the run died on. A save that stops partway has written some of
   // the batch and not the rest, and "✗ save failed" alone said neither how far
   // it got nor where to look — so there was no way to tell a total failure from
@@ -585,7 +586,16 @@ async function saveAll() {
         // Someone else changed this file since we opened it. Never silently
         // pick a winner — the other copy may be the one that matters.
         const choice = await resolveConflict(path, msg);
-        if (choice === 'cancel') { setStatus('save cancelled', 'warn'); return; }
+        if (choice === 'cancel') {
+          // Leave this one alone and carry on with the rest. Aborting the whole
+          // save here was the old behaviour and it punished the wrong files:
+          // one conflicted document stopped every other unsaved file from
+          // reaching disk. The buffer stays dirty, so nothing is lost and the
+          // Save button still shows there is work outstanding.
+          rawLog('wrn', `left ${path} alone — it changed on disk and was not saved`);
+          skipped++;
+          continue;
+        }
         if (choice === 'reload') {
           const r = await NativeAPI.readTextFile(path);
           f.content = r.content; f.stamp = r.stamp; f.dirty = false;
@@ -607,8 +617,10 @@ async function saveAll() {
       failedAt = null;
     }
     setStatus(
-      `saved ${written} file(s)${reloaded ? `, ${reloaded} reloaded from disk` : ''}`,
-      reloaded ? 'warn' : 'ok');
+      `saved ${written} file(s)` +
+      `${reloaded ? `, ${reloaded} reloaded from disk` : ''}` +
+      `${skipped ? `, ${skipped} left unsaved — changed on disk` : ''}`,
+      (reloaded || skipped) ? 'warn' : 'ok');
     if (settings.settings.autoCompile) await compile();
   } catch (err) {
     setStatus(`✗ saved ${written} of ${pending.length} — ${failedAt} failed: ${err}`, 'err');
@@ -625,17 +637,31 @@ async function saveAll() {
  * A conflict is a genuine choice, so it gets a real prompt rather than a toast.
  * Defaulting either way loses somebody's work silently, which is the whole
  * thing this check exists to prevent.
+ *
+ * Three answers, not two. Both of the original pair destroyed a version of the
+ * file — and being a two-button prompt, Escape and the backdrop silently meant
+ * *reload*, which throws away the edits in the editor along with that file's
+ * undo history (`openFile` rebuilds the state when the content changes under
+ * it). The honest third answer is to leave the file alone: the save skips it,
+ * the buffer stays dirty, and the person can go and look at both versions
+ * before deciding. That is the one dismissal maps to.
  */
 async function resolveConflict(path, msg) {
   const detail = msg.split('CONFLICT:').pop();
   rawLog('err', `conflict: ${detail}`);
   showTab('raw');
-  const overwrite = await ask(
+  return askChoice(
     `"${path}" changed on disk since you opened it.\n\n${detail}\n\n` +
-    `OK  — overwrite the file with your version\n` +
-    `Cancel — keep the version on disk and reload it (your edits are lost)`
+    `Overwrite — write your version over the file\n` +
+    `Reload — take the file on disk (your edits are lost)\n` +
+    `Leave it — save nothing for this file and decide later`,
+    [
+      { value: 'cancel', label: 'Leave it' },
+      { value: 'reload', label: 'Reload' },
+      { value: 'overwrite', label: 'Overwrite', primary: true }
+    ],
+    'cancel'
   );
-  return overwrite ? 'overwrite' : 'reload';
 }
 
 // Debounced: this is a crash net, not a save. It writes outside the project so
@@ -665,31 +691,81 @@ function scheduleBackup() {
   }, 2000);
 }
 
+/**
+ * Offer back what a crash took.
+ *
+ * Three rules, each of them the fix for a way this lost work:
+ *
+ *   - **Nothing is deleted on a dismissal.** One Cancel used to discard every
+ *     backup at once, unpreviewed and unrecoverable, and being a modal it was
+ *     what Escape did too. Now only an explicit Discard removes anything, and
+ *     the default answer is to keep them for next time.
+ *   - **Each file is asked about separately**, with its size and age, because
+ *     "restore all or lose all" is not a choice anyone can make about a list of
+ *     filenames.
+ *   - **A backup whose file has since gone is restored, not thrown away.** The
+ *     old `if (ok && f)` sent that case to the discard branch — so the backup
+ *     was destroyed in exactly the situation it existed for, where the file
+ *     itself is missing and the copy in here is the only one left.
+ */
 async function offerRecovery() {
   if (!project?.onDisk || !NativeAPI.listStaleBackups) return;
   let stale = [];
   try { stale = await NativeAPI.listStaleBackups(); } catch { return; }
   if (!stale.length) return;
 
-  const names = stale.map(b => b.path).join(', ');
-  const ok = await ask(
-    `Unsaved changes from a previous session were found in:\n\n${names}\n\n` +
-    `Restore them into the editor? (Choosing Cancel discards them.)`
-  );
+  let restored = 0;
   for (const b of stale) {
-    const f = project.files.get(b.path);
-    if (ok && f) {
-      f.content = b.content;
-      f.dirty = true;
-    } else {
-      await NativeAPI.discardBackup(b.path).catch(() => {});
+    const age = b.saved ? `, saved ${describeAge(b.saved)}` : '';
+    const size = `${(b.content || '').length} characters`;
+    const gone = !project.files.get(b.path);
+    const answer = await askChoice(
+      `Unsaved changes from a previous session were found in:\n\n` +
+      `  ${b.path}  (${size}${age})\n\n` +
+      (gone ? `That file is no longer in the project, so this backup is the only copy.\n\n` : '') +
+      `Restore it into the editor?`,
+      [
+        { value: 'keep', label: 'Not now' },
+        { value: 'discard', label: 'Discard' },
+        { value: 'restore', label: 'Restore', primary: true }
+      ],
+      'keep'          // dismissal keeps the backup and changes nothing
+    );
+
+    if (answer === 'discard') { await NativeAPI.discardBackup(b.path).catch(() => {}); continue; }
+    if (answer !== 'restore') continue;          // 'keep': offered again next time
+
+    let f = project.files.get(b.path);
+    if (!f) {
+      // The file went away while the backup survived. Put it back rather than
+      // asking the user to recreate a path they cannot see any more.
+      project.files.set(b.path, { content: '', binary: false, dirty: true, stamp: null });
+      f = project.files.get(b.path);
+      rawLog('wrn', `${b.path} was missing — recreated from its backup`);
     }
+    f.content = b.content;
+    f.dirty = true;
+    restored++;
   }
-  if (ok) {
-    rawLog('wrn', `restored ${stale.length} file(s) from crash backup — unsaved`);
+
+  if (restored) {
+    rawLog('wrn', `restored ${restored} file(s) from crash backup — unsaved`);
+    renderTree();                 // a recreated file needs a row
     if (currentPath) openFile(currentPath);
+    setStatus(`restored ${restored} file(s) from a previous session — not yet saved`, 'warn');
   }
   refreshDirty();
+}
+
+/** Rough, human wording for a timestamp. Precision here would be false comfort. */
+function describeAge(ms) {
+  const mins = Math.max(0, Math.round((Date.now() - ms) / 60000));
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'} ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? '' : 's'} ago`;
 }
 
 // ── file tree ──────────────────────────────────────────────────────────
@@ -1911,7 +1987,17 @@ async function deleteEntries(entries) {
   const what = batch.length > 1
     ? `${batch.length} items and the ${doomed.length} file(s) in them`
     : (batch[0].isDir ? `${batch[0].path}/ and the ${doomed.length} file(s) in it` : batch[0].path);
-  if (!await ask(`Delete ${what}?\n\nThis cannot be undone from inside the app.`)) return;
+  // The paths, not just a tally. "Delete 7 items and the 23 file(s) in them?"
+  // names nothing a person can check, and the whole reason to ask before an
+  // irreversible delete is so they can notice the one row they did not mean to
+  // have selected. Capped, because a dialog nobody can read is the same problem
+  // in the other direction.
+  const listed = doomed.length ? doomed : batch.map(e => `${e.path}/`);
+  const preview = listed.slice(0, 8).map(p => `  ${p}`).join('\n')
+    + (listed.length > 8 ? `\n  …and ${listed.length - 8} more` : '');
+  if (!await ask(
+    `Delete ${what}?\n\n${preview}\n\nThis cannot be undone from inside the app.`
+  )) return;
 
   // The message above is the literal truth and stays that way. `deleteFile` is a
   // real delete on all five backends — no trash, nothing to move back — so this
@@ -2187,17 +2273,48 @@ function syncMainSelect() {
 function rememberMainFile() {
   if (!project?.key) return;
   const store = settings.settings.mainByProject ?? {};
-  store[project.key] = project.main;
+  // `{root, main}`, not a bare path. `project.key` is only the folder's *name*
+  // (project_store.js derives it with `.split('/').pop()`), so two projects
+  // called `thesis` share this entry — and the value decides which file gets
+  // compiled. Recording the root is what lets the reader tell them apart.
+  store[project.key] = { root: project.root ?? null, main: project.main };
   settings.settings.mainByProject = store;
   settings.save();
 }
 
-/** The remembered choice for this project, if it still names a file. */
+/**
+ * The remembered choice for this project, if it still names a file *and* was
+ * made about this project.
+ *
+ * Existence alone is not identity. Every LaTeX project has a `main.tex` and most
+ * have a `chapters/intro.tex`, so a remembered path from a different folder of
+ * the same name will usually still resolve here — and then silently overrule the
+ * inference, taking the engine, the bibliography backend and `\makeindex` with
+ * it through `redescribeProject`. The result is a PDF of the wrong document with
+ * no error anywhere.
+ *
+ * Entries written before this carried a bare string and so have no provenance;
+ * they are ignored rather than trusted, which costs at most one re-pick of the
+ * main file and is written back correctly the moment it is chosen.
+ */
 function applyRememberedMain() {
-  const want = settings.settings.mainByProject?.[project.key];
+  const saved = settings.settings.mainByProject?.[project.key];
+  // A string is the old shape: no root, so no way to know whose it was.
+  const want = (saved && typeof saved === 'object') ? saved.main : null;
+  const from = (saved && typeof saved === 'object') ? saved.root : undefined;
   if (!want || want === project.main || !project.files.has(want)) return;
+  // `root` is absent on projects that have no folder (a fixture), where the key
+  // is the fixture's own name and cannot collide with a user's folder.
+  if (project.root != null && from !== project.root) {
+    rawLog('wrn', `ignored a remembered main document (${want}) — it was chosen for a different folder`);
+    return;
+  }
   project.main = want;
   if (project.onDisk) redescribeProject(project);
+  // Said out loud: a remembered choice outranking what the document itself
+  // implies is exactly the kind of thing that goes unnoticed until a compile
+  // comes back short.
+  rawLog('inf', `main document ${want} — remembered from a previous session, not inferred`);
 }
 
 /**
@@ -2369,10 +2486,28 @@ async function offerSystemTex() {
 async function importZip(file) {
   if (!file || !NativeAPI.importZip) return;
   if (!await confirmDiscard('Import a zip')) return;
-  if (project && !await ask(
-    `Importing replaces "${project.key}" — Revery TeX holds one project at a time.\n\n` +
-    `Export it first if you have not already. Continue?`
-  )) return;
+
+  // What is about to be replaced, asked of *storage* rather than of `project`.
+  //
+  // The guard here used to be `if (project && …)`, which skipped the warning in
+  // precisely the state where it matters most: a project that failed to open
+  // leaves `project` null while its files sit in storage untouched, so the next
+  // import wiped them with nothing said at all. On this backend there is no
+  // folder behind the store and no way back, so the question is asked whenever
+  // there is something to lose.
+  let held = 0;
+  if (NativeAPI.readDirectory) {
+    try { held = (await NativeAPI.readDirectory()).filter(e => e.type === 'file').length; }
+    catch { held = 0; }        // nothing stored yet — the one case with no risk
+  }
+  if (held) {
+    const whose = project ? `"${project.key}"` : 'the project already in storage';
+    if (!await ask(
+      `Importing ${file.name || 'that zip'} replaces ${whose} — ` +
+      `${held} file(s) — and Revery TeX holds one project at a time.\n\n` +
+      `This cannot be undone. Export it first if you have not already.\n\nContinue?`
+    )) return;
+  }
 
   setStatus('reading zip…', 'warn');
   let name;

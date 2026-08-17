@@ -261,6 +261,92 @@ async function main() {
     check('and the edit reaches storage',
       renamed.stored === 'written after a rename\n', JSON.stringify(renamed.stored));
 
+    /* ── a remembered main document belongs to one project ─────────── */
+    // `project.key` is only the folder's *name* (`root.split('/').pop()`), so
+    // two projects called `thesis` share this entry — and it decides which file
+    // is compiled, plus the engine, bibtex backend and \makeindex re-derived
+    // from it by `redescribeProject`. Existence of the path is not identity:
+    // every LaTeX project has a main.tex and most have chapters/intro.tex.
+    //
+    // Driven here rather than in run_ui.js because `applyRememberedMain` only
+    // runs on the `loadFromDisk` path, which the fixture suite never takes.
+    const planted = await cdp.evaluate(`(async () => {
+      const s = await import('./jvscrpt_and_css_extra/settings.js');
+      const key = window.__reveryTexApp.projectKey;
+      const store = s.settings.mainByProject || {};
+      // Recorded against a different folder that happens to share the name.
+      store[key] = { root: '/somewhere/else/' + key, main: 'chapters/one.tex' };
+      s.settings.mainByProject = store;
+      s.save();
+      return { key };
+    })()`, true);
+
+    // Re-import the same zip: that is the shortest route back through
+    // loadFromDisk, which is what calls applyRememberedMain.
+    await cdp.evaluate(`(async () => {
+      const { writeZip } = await import('./jvscrpt_and_css_extra/zip_core.js');
+      const enc = new TextEncoder();
+      const bytes = await writeZip([
+        { path: 'my-thesis/main.tex', bytes: enc.encode(${JSON.stringify(DOC)}) },
+        { path: 'my-thesis/chapters/one.tex', bytes: enc.encode(${JSON.stringify(CHAPTER)}) }
+      ]);
+      await window.NativeAPI.importZip(new File([bytes], 'my-thesis.zip', { type: 'application/zip' }));
+      return true;
+    })()`, true);
+    await cdp.send('Page.reload', {});
+    await sleep(600);
+    await cdp.waitFor('!!window.__reveryTexApp && window.__reveryTexApp.ready',
+      { what: 'the project after a foreign main was planted', timeoutMs: 60000 });
+
+    const chosenMain = await cdp.evaluate(`(async () => {
+      const s = await import('./jvscrpt_and_css_extra/settings.js');
+      const row = document.querySelector('#filetree .node.main');
+      const store = s.settings.mainByProject || {};
+      delete store[window.__reveryTexApp.projectKey];    // leave no trap behind
+      s.settings.mainByProject = store;
+      s.save();
+      return row ? row.dataset.path : null;
+    })()`, true);
+
+    check('a remembered main document from another folder is ignored',
+      chosenMain !== 'chapters/one.tex',
+      `planted chapters/one.tex for key ${planted.key}; main is ${chosenMain}`);
+
+    /* ── a bad import must not destroy the project ─────────────────── */
+    // The store *is* the project on this backend — no folder behind it, no
+    // versioning, nothing to restore from. So every refusal has to happen
+    // before `files.clear()`. It did not: the .tex requirement lived in
+    // readProjectFromDisk, which runs after the store has already been emptied,
+    // so importing the wrong archive erased the project and then failed to open
+    // the replacement. This is the check that would have caught that.
+    const survived = await cdp.evaluate(`(async () => {
+      const before = (await window.NativeAPI.readDirectory()).map(e => e.path).sort();
+      const { writeZip } = await import('./jvscrpt_and_css_extra/zip_core.js');
+      const enc = new TextEncoder();
+      // A zip with files in it, but not one .tex among them.
+      const bytes = await writeZip([
+        { path: 'photos/a.png', bytes: enc.encode('not really a png') },
+        { path: 'readme.md', bytes: enc.encode('# nope') }
+      ]);
+      let threw = null;
+      try {
+        await window.NativeAPI.importZip(new File([bytes], 'photos.zip', { type: 'application/zip' }));
+      } catch (e) {
+        threw = String(e && e.message ? e.message : e);
+      }
+      const after = (await window.NativeAPI.readDirectory()).map(e => e.path).sort();
+      return {
+        threw,
+        intact: JSON.stringify(before) === JSON.stringify(after),
+        before: before.length, after: after.length
+      };
+    })()`, true);
+
+    check('a zip with no .tex is refused', !!survived.threw && /\.tex/i.test(survived.threw),
+      survived.threw || 'it was accepted');
+    check('and the project it would have replaced is still there',
+      survived.intact, `${survived.before} file(s) before, ${survived.after} after`);
+
     // A folder the backend refuses to remove must not be reported as deleted.
     // This needs a project with real storage behind it — `canWriteDisk()` gates
     // the whole disk branch, so on a dev-server fixture the delete never

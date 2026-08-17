@@ -95,6 +95,19 @@ export const webZipImpl = {
   async importZip(blob) {
     const entries = normalizeZipEntries(await readZip(new Uint8Array(await blob.arrayBuffer())));
     if (!entries.length) throw new Error('That zip contains no files');
+    // Every refusal has to happen before `files.clear()` below, because that
+    // line destroys the only copy of the project there is — this store *is* the
+    // project, with no folder behind it and nothing to restore from.
+    //
+    // The `.tex` requirement used to live in `readProjectFromDisk`, which runs
+    // *after* this function returns. So importing the wrong archive — a zip of
+    // photos, a downloaded release, anything whose only `.tex` sits under a path
+    // the reader skips — erased the project and then failed to open the
+    // replacement, leaving the user with an error message and no work. Same
+    // test as `project_store.js` applies, asked here where it can still refuse.
+    if (!entries.some(e => /\.tex$/i.test(e.path))) {
+      throw new Error('That zip has no .tex file in it — nothing was changed');
+    }
 
     const name = (blob.name || 'project').replace(/\.zip$/i, '') || 'project';
     const now = Date.now();

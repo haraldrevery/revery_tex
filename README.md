@@ -220,8 +220,40 @@ behalf. That last part is the point — the earlier version of the check called
 
 ### Losing work, and the guards that stop it
 
-Three of these guards existed and did not fire. They are worth stating plainly,
+Most of these guards existed and did not fire. They are worth stating plainly,
 because a guard that reads as though it protects you is worse than none.
+
+**A bad import cannot take the project with it.** On the `web-zip` backend the
+IndexedDB store *is* the project — no folder behind it, no versioning, nothing to
+restore from — and `importZip` clears it. The `.tex` requirement lived in
+`readProjectFromDisk`, which runs *afterwards*, so importing the wrong archive
+erased the project and then failed to open the replacement. Every refusal now
+happens before `files.clear()`. The replace warning also lost its `if (project &&
+…)` guard: that skipped the question in exactly the state where it mattered, a
+project that failed to load leaving its files in storage while `project` was null.
+
+**A remembered main document belongs to one project.** `project.key` is the
+folder's *name* (`root.split('/').pop()`), so two folders called `thesis` share
+`mainByProject` — and that value decides what gets compiled, plus the engine,
+bibliography backend and `\makeindex` re-derived from it. Existence is not
+identity: every project has a `main.tex`. Entries now carry the root they were
+chosen for and are ignored when it does not match. Browser crash backups had the
+same disease and the same cure: they are keyed on a stable id resolved through
+`isSameEntry()` rather than the folder's name, so one project's unsaved text can
+no longer be offered as recovery for another's same-named file. The desktop
+shells were always safe here — they hash the absolute path.
+
+**A save conflict has a third answer.** Both original choices destroyed a version
+of the file, and being a modal, Escape silently meant *reload* — which discards
+the editor's text along with that file's undo history. "Leave it" now skips that
+one file, keeps the buffer dirty, and lets the rest of the save finish; it is
+what dismissal maps to. Aborting the whole save on one conflict, which is what
+used to happen, punished every other unsaved file for it.
+
+**Crash recovery is per file, and never discards on a dismissal.** One Cancel
+used to delete every backup at once, unpreviewed — and a backup whose file had
+since been deleted was thrown away rather than restored, which is precisely the
+case it existed for.
 
 **Nothing calls `window.confirm`.** Every yes/no question goes through `ask()` in
 `dialog.js`, which draws the app's own modal. This is the most serious of the
