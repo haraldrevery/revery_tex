@@ -133,9 +133,11 @@ export function applyOutlineVisibility() {
   document.querySelector('.vdiv[data-resize="outline"]').hidden = !on;
   const btn = $('outlinetoggle');
   // The label is constant and `aria-pressed` carries the state, which the
-  // stylesheet fills on. It used to grow a ✓ when on — but #topbar clips from
-  // the right, so a label that changes width as it changes state spends clip
-  // budget in the bar where Toolbox and Settings already vanish first.
+  // stylesheet deliberately does not paint — the pane itself is the indication.
+  // It used to grow a ✓ when on — but #topbar clips from the right, so a label
+  // that changes width as it changes state spends clip budget in the bar where
+  // Toolbox and Settings already vanish first. The title still says which way
+  // the click goes, for the pointer and for screen readers.
   btn.title = on ? 'Hide the document outline' : 'Show the document outline';
   btn.setAttribute('aria-pressed', String(on));
   if (on) refreshOutline();

@@ -213,15 +213,11 @@ button:focus-visible { border-color:var(--accent); color:var(--text);
   box-shadow:0 0 0 2px var(--bg), 0 0 0 3px var(--accent) }
 button:disabled { opacity:.35; cursor:default }
 button.primary { color:var(--text); border-color:var(--accent) }
-/* The outline toggle says it is on by filling. The label used to grow a ✓,
-   which changed its width as it changed state, and #topbar clips from the
-   right. The fill is accent-tinted rather than the neutral --bg-hover that
-   :hover above already paints, so an off button under the pointer does not
-   read as an on one; the border is deliberately left alone, so hovering an on
-   button still visibly responds. */
-#outlinetoggle[aria-pressed="true"] {
-  background:color-mix(in srgb, var(--accent) 4%, var(--bg-hover)); color:var(--text);
-}
+/* The outline toggle carries no on-state styling: the pane it opens is right
+   there beside it, so a fill would only restate what the layout already says.
+   aria-pressed still tracks the state for anything that cannot see the pane.
+   (It used to fill accent-tinted, and before that to grow a ✓ — which changed
+   its width as it changed state, and #topbar clips from the right.) */
 
 #topbar {
   height:2.4rem; flex:none; display:flex; align-items:center;
@@ -255,9 +251,9 @@ body.is-fullscreen #win-controls { display:none }
 
    It is also what makes them affordable. #topbar-main is already over-full at
    the default 1280 window with no project open, and #docname and #status are
-   the two items that give way; at the default 120% UI size three bordered
-   buttons took 112px of their room and three bare ones take 95px. The
-   remaining squeeze is real and measured — see Known limits in README.
+   the two items that give way; three bordered buttons cost 112px of their room
+   and three bare ones cost 79px. The remaining squeeze is real and measured —
+   see the note in README.
 
    Fixed width so the row does not change size when □ becomes ❐, and so the
    three targets are identical whatever glyph each draws. */
