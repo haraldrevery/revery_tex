@@ -83,6 +83,7 @@ rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-t
 │    settings.js                  one declarative table: load, apply, menu     │
 │    menus.js                     dropdown component (radio, stepper, action)  │
 │    settings_boot.js             pre-paint theme, so there is no flash        │
+│    window_chrome.js             Min/Max/Close, for the frameless shells      │
 │    pdf_preview.js               pdf.js canvas renderer                       │
 │    codemirror-bundle.js         generated — edit build_tools/cm_entry_tex.js  │
 │  engine/dist/                   TeX Live WASM + texmf (~172 MB, committed)   │
@@ -280,9 +281,14 @@ the frontend, and closes only when it calls back through `close_window`. The
 question is asked *in the webview* rather than with a native dialog for two
 reasons: the wording is then the same sentence in all three shells, and
 `tauri/capabilities/default.json` grants `dialog:allow-open` for the folder
-picker only — a message dialog would mean widening it. The methods live on
-`native_api.js` and exist **only** on the Tauri backend; a shell that intercepts
-its own close does not get a method implying it needs telling.
+picker only — a message dialog would mean widening it. The listener lives on
+`native_api.js` and `onCloseRequested` exists **only** on the Tauri backend; a
+shell that intercepts its own close does not get a method implying it needs
+telling. `closeWindow` is on both, because both are frameless and the page draws
+the Close button — but the guard in `revery_tex_app.js` requires *both* methods,
+so Electron's Close still goes through `win.close()` into the same
+`will-prevent-unload` dialog the OS close button used to raise, and is never
+asked twice.
 
 **The crash net covers every dirty file, not the one on screen.** It used to read
 `currentPath` inside its own two-second timer, which was wrong twice: no other
@@ -730,6 +736,30 @@ a document that compiles in one shell and not the other is undiagnosable.
   which WebKitGTK does not implement, so Tauri is verified by screenshot.
   Electron *does* speak CDP (`--remote-debugging-port`), and the full app —
   compile and save through the real IPC — is driven end to end there.
+- **The topbar is over-subscribed at the default window size.** Both desktop
+  shells run frameless (no OS title bar), so `#win-controls` — Minimize,
+  Maximize, Close — lives in `#topbar` and costs 95px of it. `#topbar-main`
+  clips from the right, and `#docname` and `#status` are the two items that
+  give way, so they absorb the whole of it. Measured in Electron at 1280×800
+  with the default 120% UI size and no project open:
+
+  |                   | `#docname` | `#status` |
+  | ----------------- | ---------- | --------- |
+  | controls hidden   | 80 / 121px | 115 / 187px |
+  | controls shown    | 42 / 121px | 51 / 187px  |
+
+  Neither label fitted before the controls existed; both are now down to a few
+  characters, and "open a folder to begin" reads as `o…`. Nothing is *clipped*
+  at 1280 — every button including Settings is fully visible, which is what the
+  `#topbar-main` wrapper is for — but the threshold where Settings and Toolbox
+  start disappearing moved from ~1130px to ~1210px.
+
+  Three ways out if this becomes a problem, cheapest first: drop the
+  `<span class="lbl">Engine</span>` before `#engine`, which renders the word
+  twice for ~55px; give `#status` a `title` so the full text is at least
+  reachable on hover; or move the drag strip and controls to a dedicated ~1.6rem
+  bar above `#topbar`, which leaves the toolbar's budget untouched at the cost
+  of permanent vertical space.
 
 ---
 
@@ -768,6 +798,22 @@ Each of these cost real debugging time:
   `electron .` boots as plain Node and every Electron API is `undefined`. The
   npm script unsets it; `main.js` also fails with the fix rather than a
   `Cannot read properties of undefined`.
+- **A control added to `#topbar` without a `no-drag` opt-out silently stops
+  responding.** Both shells are frameless and the bar is the drag handle.
+  Electron's region is a *union*: `-webkit-app-region: drag` on `#topbar` adds
+  the whole bar, and only an explicit `no-drag` subtracts — so `.spacer` and
+  `#topbar-main` need nothing, but a new button not matched by the selector in
+  `theme.css` stays inside the drag region and eats its own clicks. Tauri needs
+  no opt-out at all: its drag script walks up from the click target and stops at
+  any `BUTTON`/`INPUT`, which is also why the attribute is
+  `data-tauri-drag-region="deep"` rather than bare — bare drags only on direct
+  hits against `#topbar` itself, which `#topbar-main` covers end to end.
+- **Do not add a `dblclick` handler to maximize.** Both shells already do it —
+  Chromium from the drag region, Tauri from the same script, via
+  `internal-toggle-maximize`, which `core:default` grants. Revery Notebook wires
+  one by hand against an older Tauri; copying that here toggles twice and lands
+  back where it started. The one permission this does need is
+  `core:window:allow-start-dragging`, which `core:default` does *not* include.
 - **Electron must serve the app over a custom protocol**, not `loadFile()`.
   Chromium refuses `fetch()` on `file://`, and the engine fetches its wasm and
   every data package, so a `file://` window cannot start the compiler at all.

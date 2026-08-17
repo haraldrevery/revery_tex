@@ -73,6 +73,20 @@ const tauriImpl = {
   },
   closeWindow: () => invoke('close_window'),
 
+  // The window has no OS title bar, so the app draws its own controls. Present
+  // only on the desktop backends: a browser tab cannot minimise itself, and
+  // window_chrome.js checks for these by presence rather than asking which
+  // shell it is in, which is what keeps the buttons out of the web build.
+  //
+  // Dragging and double-click-to-maximize are not here. Tauri's own drag
+  // script handles both from the data-tauri-drag-region attribute, and Electron
+  // gets them from -webkit-app-region:drag — a method for either would be a
+  // second implementation of something the shell already does.
+  minimizeWindow: () => invoke('minimize_window'),
+  toggleMaximizeWindow: () => invoke('toggle_maximize_window'),
+  setFullscreen: (on) => invoke('set_fullscreen', { fullscreen: on }),
+  isFullscreen: () => invoke('is_fullscreen'),
+
   // A system TeX installation, if there is one. Present only on the desktop:
   // a browser cannot start a process, and NativeTexEngine checks for these by
   // presence rather than asking which shell it is in.
@@ -117,7 +131,21 @@ const electronImpl = isElectron ? {
   discardBackup: (path) => window.electronAPI.discardBackup(path),
 
   detectTex: () => window.electronAPI.detectTex(),
-  runTex: (tool, mainFile, timeoutSecs) => window.electronAPI.runTex(tool, mainFile, timeoutSecs)
+  runTex: (tool, mainFile, timeoutSecs) => window.electronAPI.runTex(tool, mainFile, timeoutSecs),
+
+  // As above, minus `onCloseRequested`: this shell intercepts its own close in
+  // the main process and asks with a native dialog, so it must not also define
+  // the listener — the guard in revery_tex_app.js requires both methods, and
+  // giving it both here would ask twice.
+  //
+  // `closeWindow` calls `win.close()`, which re-enters that same interception.
+  // The button and the (now absent) OS close therefore run one code path, not
+  // two that can drift.
+  minimizeWindow: () => window.electronAPI.minimizeWindow(),
+  toggleMaximizeWindow: () => window.electronAPI.toggleMaximizeWindow(),
+  closeWindow: () => window.electronAPI.closeWindow(),
+  setFullscreen: (on) => window.electronAPI.setFullscreen(on),
+  isFullscreen: () => window.electronAPI.isFullscreen()
 } : null;
 
 /**
