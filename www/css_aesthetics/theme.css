@@ -80,7 +80,7 @@
   --accent:rgba(255,255,255,.58); --scrollbar:rgba(255,255,255,.1); --menu-bg:#1f1f1f;
   --ok:#7fc97f; --warn:#e2c46a; --err:#e08a7a;
   --sel:rgba(255,255,255,.22);
-  --tex-command:#b9ea69; --tex-env:#c3a6e0; --tex-math:#eacc69; --tex-arg:#9fc98f;
+  --tex-command:#aedf61; --tex-env:#c3a6e0; --tex-math:#eacc69; --tex-arg:#9fc98f;
 }
 [data-theme="light"] {
   --bg:#fafaf8; --bg-panel:#ffffff; --bg-hover:#f2f2ef;
