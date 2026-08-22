@@ -17,6 +17,8 @@ import { openDialog } from './dialog.js';
 import { openPicker } from './picker.js';
 import { renderMath, mathSource, shrinkToFit } from './math_preview.js';
 import * as settings from './settings.js';
+// One MIME map for the app: thumbnails here, the editor-pane preview there.
+import { MIME } from './media_view.js';
 
 /**
  * Whether references should be inserted as cleveref's `\cref`.
@@ -105,11 +107,6 @@ function tableReferenceRow(view, project) {
 }
 
 /* ── figures ─────────────────────────────────────────────────────────── */
-
-const MIME = {
-  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
-  bmp: 'image/bmp', webp: 'image/webp', svg: 'image/svg+xml', pdf: 'application/pdf'
-};
 
 /** A filename as a first draft of a caption: `chalmers_logo.png` → `Chalmers logo`. */
 export function captionFromPath(path) {

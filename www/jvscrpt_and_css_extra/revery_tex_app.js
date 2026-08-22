@@ -43,9 +43,10 @@ import { createHistory } from './tree_history.js';
 import { createDiagnosticPositions } from './diagnostic_positions.js';
 import { referencesTo } from './document_model.js';
 import { $, download } from './dom.js';
+import { showMedia, clearMedia } from './media_view.js';
 import {
-  readProjectFromDisk, readProjectFromFixture, TEXT_EXT_RE, inferBibTool,
-  redescribeProject, mainCandidates
+  readProjectFromDisk, readProjectFromFixture, TEXT_EXT_RE, PLAIN_TEXT_EXT_RE,
+  inferBibTool, redescribeProject, mainCandidates
 } from './project_store.js';
 import { switchBiblatexBackend } from './latex_snippets.js';
 import { applyEdit } from './editor_actions.js';
@@ -70,6 +71,11 @@ const mainSel = new SelectMenu($('docname'), { empty: 'no document' });
 // ── state ──────────────────────────────────────────────────────────────
 let project = null;          // { key, main, engine, files: Map<path, {content, dirty}> }
 let currentPath = null;
+// The file the media preview is showing, if any. Never set at the same time as
+// currentPath: the editor pane shows one thing, and the two are how it says
+// which. See showMediaFile() for why they are mutually exclusive rather than a
+// single variable plus a flag.
+let mediaPath = null;
 let view = null;             // CodeMirror EditorView
 let lastPdf = null;
 let preview = null;
@@ -493,8 +499,18 @@ function gotoLine(n) {
  * EditorState — see docStates. Everything the closures below read (`project`,
  * `currentPath`, `syncTex`, `preview`) is module-level and read when the event
  * fires, so a per-file state behaves exactly as the single shared one did.
+ *
+ * `path` decides whether the LaTeX layer is included at all. A `.md` or `.txt`
+ * is text but it is not TeX, and giving it stex colouring meant prose rendered
+ * as if every word were a command, with the completion list opening on the way.
+ * Null — the empty editor before a project loads — keeps the LaTeX set, which
+ * is what it has always had.
+ *
+ * The set is baked into the EditorState at creation and docStates is keyed by
+ * path, so a file cannot end up with another file's mode.
  */
-function editorExtensions() {
+function editorExtensions(path = null) {
+  const plain = !!path && PLAIN_TEXT_EXT_RE.test(path);
   return [
       CM.lineNumbers(),
       CM.highlightActiveLine(),
@@ -505,10 +521,14 @@ function editorExtensions() {
       CM.codeFolding(),
       CM.foldGutter(),
       CM.syntaxHighlighting(CM.defaultHighlightStyle, { fallback: true }),
-      CM.latex(),
-      // LaTeX-specific behaviour: \begin auto-close, project-aware completion,
-      // TeX-shaped highlighting, and compile diagnostics in the gutter.
-      ...latexEditingExtensions(() => project),
+      // Nothing below the language line is TeX-aware, so a plain-text file
+      // still gets line numbers, folding, search, history and wrapping.
+      ...(plain ? [] : [
+        CM.latex(),
+        // LaTeX-specific behaviour: \begin auto-close, project-aware completion,
+        // TeX-shaped highlighting, and compile diagnostics in the gutter.
+        ...latexEditingExtensions(() => project)
+      ]),
       CM.highlightSelectionMatches(),
       CM.EditorView.lineWrapping,
       // The app's own two chords, at their own precedence.
@@ -593,6 +613,9 @@ function openFile(path) {
   const f = project.files.get(path);
   if (!f || f.binary) return;
 
+  // Whatever the pane was showing, it is showing the editor now.
+  hideMedia();
+
   // Keep the state we are leaving, not the one this file was opened with.
   // Transactions produce new state objects, so the entry stored at open time is
   // the document *before* any editing — putting it back would lose the edits
@@ -612,25 +635,86 @@ function openFile(path) {
   // would not think to invalidate a cache. It costs one string compare, against
   // a full-document replace on every open before.
   if (!st || st.doc.toString() !== f.content) {
-    st = CM.EditorState.create({ doc: f.content, extensions: editorExtensions() });
+    st = CM.EditorState.create({ doc: f.content, extensions: editorExtensions(path) });
   }
   // setState, never dispatch. A dispatch would enter this file's undo history as
   // an edit; setState replaces the state wholesale, so undo starts from the file
   // as it was opened.
   view.setState(st);
+  // The editor may have been display:none when that state landed — a preview
+  // was showing — and CodeMirror measures a hidden element as zero-height, so
+  // it would draw one line and stop until something else forced a resize.
+  view.requestMeasure();
   docStates.set(path, st);
   // The new state carries its own fields, so the gutter is empty until the
   // diagnostics are pushed into it again. They were never per-file before —
   // switching files left the previous file's markers in the gutter.
   pushDiagnosticsToGutter();
 
-  // Scoped to the panel that owns these rows. Document-wide, this also swept the
-  // outline's rows, which share the .node class — harmless while `active` was
-  // the only state a row could be in, and a trap the moment `selected` existed.
+  markActiveRow(path);
+  refreshOutline();
+}
+
+/**
+ * Mark one row as the one the editor pane is showing.
+ *
+ * Scoped to the panel that owns these rows. Document-wide, this also swept the
+ * outline's rows, which share the .node class — harmless while `active` was the
+ * only state a row could be in, and a trap the moment `selected` existed.
+ */
+function markActiveRow(path) {
   for (const n of $('filetree').querySelectorAll('.node')) {
     n.classList.toggle('active', n.dataset.path === path);
   }
+}
+
+/**
+ * Show a file the editor cannot open — an image, a PDF, anything else — in the
+ * editor's place.
+ *
+ * `currentPath = null` is the load-bearing line, not bookkeeping. The editor's
+ * updateListener writes `state.doc.toString()` into
+ * `project.files.get(currentPath)`, so leaving it pointing anywhere while a
+ * preview is up is one stray transaction away from putting a string where a
+ * Uint8Array lives — and saveAll would then write that over the user's figure.
+ * Nulling it makes the writeback unreachable rather than merely unlikely; the
+ * `hidden` editor is a second, weaker guard, and it is not the one relied on.
+ *
+ * The outgoing document's state is stashed first, exactly as openFile does, so
+ * coming back to a text file keeps its undo history.
+ */
+function showMediaFile(path) {
+  if (!project) return;
+  const f = project.files.get(path);
+  if (!f) return;
+
+  if (currentPath && view) docStates.set(currentPath, view.state);
+  currentPath = null;
+  mediaPath = path;
+
+  $('editortitle').textContent = path;
+  $('editor').hidden = true;
+  $('mediaview').hidden = false;
+  // Fire-and-forget: the PDF branch is async and nothing below waits on the
+  // pixels. A failure inside paints its own card rather than throwing out here.
+  showMedia($('mediaview'), path, f, { onLog: rawLog });
+
+  refreshDirty();
+  markActiveRow(path);
+  // The outline is the whole project's headings, so it stays as it is — but
+  // `cursorPosition()` reads currentPath, which is now null, so the "you are
+  // here" mark clears rather than staying on the file that was open. Clicking
+  // a heading still works and brings the editor back with it.
   refreshOutline();
+}
+
+/** Put the editor back. Safe to call when no preview is up. */
+function hideMedia() {
+  if (!mediaPath) return;
+  mediaPath = null;
+  clearMedia($('mediaview'));
+  $('mediaview').hidden = true;
+  $('editor').hidden = false;
 }
 
 /** Where the outline's "you are here" mark belongs. */
@@ -1026,12 +1110,14 @@ function onRowClick(node, e) {
     renderTree();
     return;
   }
-  if (!node.binary) openFile(node.path);
-  // openFile re-marks `.active` in place and never rebuilds the tree, so the
-  // rows this click just deselected would keep their highlight — a selection
-  // that is gone from the state and still lit on screen. A binary opens
-  // nothing, so it always needs the redraw the click itself implies.
-  if (had || node.binary) renderTree();
+  // A binary opens a preview in the editor's place rather than a buffer; the
+  // editor refuses it either way, and that refusal is what keeps bytes out of
+  // a text document. See showMediaFile().
+  if (node.binary) showMediaFile(node.path); else openFile(node.path);
+  // Both re-mark `.active` in place and neither rebuilds the tree, so the rows
+  // this click just deselected would keep their highlight — a selection that is
+  // gone from the state and still lit on screen.
+  if (had) renderTree();
 }
 
 function renderTree() {
@@ -1086,6 +1172,17 @@ function renderTree() {
     }
   }
 
+  // Same backstop, one line up: mediaPath is a string too, and a preview of a
+  // file that has been deleted or renamed out from under it would keep showing
+  // bytes that are no longer in the project — with an object URL still held.
+  // Here rather than at each of delete, rename, move and project-switch,
+  // because that is four places to remember and a fifth added later is the one
+  // that gets forgotten.
+  if (mediaPath && !project.files.has(mediaPath)) {
+    hideMedia();
+    $('editortitle').textContent = currentPath || 'no file';
+  }
+
   let shown = 0;
   for (const node of rows) {
     // A button, not a div with an onclick. The tree is how this app is
@@ -1120,20 +1217,19 @@ function renderTree() {
       n.className = 'node'
         + (node.path === project.main ? ' main' : '')
         + (node.binary ? ' binary' : '')
-        + (node.path === currentPath ? ' active' : '')
+        // currentPath or mediaPath — never both, and `.active` means the one
+        // the editor pane is showing whichever of the two it came from.
+        + (node.path === currentPath || node.path === mediaPath ? ' active' : '')
         + (f && f.dirty ? ' dirty' : '')
         + picked;
       n.dataset.path = node.path;
-      // Binaries stay visible and stay unopenable: the editor would show bytes.
-      // aria-disabled, never the `disabled` property — a disabled button
-      // receives no mouse events at all, which would take right-click Rename
-      // and Delete away from exactly the files most likely to need them, and
-      // now the click that selects one as well. It stays focusable and
-      // announced as unavailable; only *opening* is refused, which is why the
-      // handler below is attached to every row rather than to text files alone.
-      // A figure has to be selectable — sorting imported images into a folder
-      // is half of what selection is for.
-      if (node.binary) n.setAttribute('aria-disabled', 'true');
+      // No aria-disabled any more, and nothing here to add: a binary row opens
+      // a preview in the editor pane, so it is neither unavailable nor a
+      // special case. It carried aria-disabled — never the `disabled`
+      // property, which would have taken right-click Rename and Delete away
+      // from exactly the files most likely to need them — for as long as
+      // clicking one did nothing at all. Announcing it as unavailable now
+      // would be a lie about a row that works.
       n.onclick = (e) => onRowClick(node, e);
       shown++;
     }
@@ -1568,7 +1664,13 @@ async function importDroppedFiles(fileList, parent) {
     setStatus(`added ${added.length} file(s)${refused ? `, ${refused} refused` : ''}`, 'ok');
     // Opening the one file someone just dropped is what they meant; opening one
     // of twelve is a guess, so several stay where they are.
-    if (added.length === 1 && !project.files.get(added[0]).binary) openFile(added[0]);
+    // One file dropped, so show it — a figure lands in the preview, a source
+    // file in the editor. Dropping a single image and being shown nothing was
+    // indistinguishable from the drop having failed.
+    if (added.length === 1) {
+      if (project.files.get(added[0]).binary) showMediaFile(added[0]);
+      else openFile(added[0]);
+    }
   }
 }
 
@@ -2712,6 +2814,11 @@ async function loadFromDisk(root) {
   // have a main.tex, and reusing one's state for the other would hand over its
   // undo history along with it.
   docStates.clear();
+  // The preview goes with them. renderTree's backstop only catches a path the
+  // new project does not have, and `figures/logo.png` exists in more projects
+  // than not — which would leave the old project's bytes on screen under the
+  // new project's filename.
+  hideMedia();
   // As do the diagnostic baselines: they are keyed by path, and two projects
   // can both have a main.tex.
   diagPositions.clear();
@@ -2747,6 +2854,7 @@ async function loadProject(key) {
   const { project: loaded, patchLog } = await readProjectFromFixture(key);
   project = loaded;
   docStates.clear();                // as in loadFromDisk, and for the same reason
+  hideMedia();                      // likewise
   await resetPreview();             // likewise
 
   // No applyRememberedMain here: a fixture's main file is declared by the dev
