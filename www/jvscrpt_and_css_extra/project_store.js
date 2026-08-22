@@ -11,13 +11,30 @@
 
 /**
  * Files opened as text. Everything else is read as bytes and shown in the tree
- * but not editable.
+ * but not editable — a preview, not a buffer; see media_view.js.
  *
  * One list, not two. The app previously had two of these differing only by
  * `ltx`, so the same file was text when opened from disk and binary when it
- * came from the dev server.
+ * came from the dev server. `test/serve.js` keeps its own copy for the fixture
+ * manifest's utf8/base64 choice and must be edited with this one.
+ *
+ * Only genuinely-text extensions belong here. Adding a binary one would have it
+ * read through readTextFile — a UTF-8 decode that replaces every invalid byte —
+ * and the next saveAll() would write the mangled string back over the original.
  */
-export const TEXT_EXT_RE = /\.(tex|bib|cls|sty|bbl|ind|def|cfg|txt|clo|ltx)$/i;
+export const TEXT_EXT_RE = /\.(tex|bib|cls|sty|bbl|ind|def|cfg|txt|clo|ltx|md|markdown)$/i;
+
+/**
+ * Text files with no LaTeX in them.
+ *
+ * These get the editor's base extensions and nothing else: no stex colouring,
+ * no `\begin` auto-close, and no LaTeX completion popping up mid-sentence.
+ *
+ * An explicit list rather than the inverse of TEXT_EXT_RE. Inverting would
+ * silently downgrade `cls`, `clo` and `def`, which are LaTeX and want every bit
+ * of the LaTeX layer.
+ */
+export const PLAIN_TEXT_EXT_RE = /\.(md|markdown|txt)$/i;
 
 /**
  * Drop LaTeX comments before looking for commands.

@@ -792,8 +792,11 @@ body.dragging * { user-select:none !important }
 /* Dimmed and not hoverable, but still focusable: a binary row cannot be opened,
    yet it is right-clickable for Rename and Delete, so it stays a real target.
    The focus ring is deliberately kept for that reason. */
-.node.binary, .node.dim-note { color:var(--text-dim); cursor:default }
-.node.binary:hover { background:none; color:var(--text-dim) }
+/* Dim, because a binary is still not a source file — but clickable, and it
+   hovers like every other row. It opens a preview in the editor pane rather
+   than a buffer; see showMediaFile(). */
+.node.binary { color:var(--text-dim) }
+.node.dim-note { color:var(--text-dim); cursor:default }
 
 /* A selection is a set an operation will act on; .active is the one file the
    editor is showing. They coincide constantly and must still be told apart, so
@@ -803,9 +806,9 @@ body.dragging * { user-select:none !important }
 
    Below the directory and binary rules on purpose, not by accident. Every one
    of these is a single-class selector, so the cascade is decided by order
-   alone: written above them, `.node.dir`'s dim colour and `.node.binary:hover`'s
-   `background:none` both took the highlight straight back off — and a folder
-   and an image are exactly what a selection is most often made of. It stays
+   alone: written above them, the dim colours `.node.dir` and `.node.binary`
+   set took the highlight's own colour straight back off — and a folder and an
+   image are exactly what a selection is most often made of. It stays
    above the drag rules for the same reason in reverse: a drag in progress is
    the more urgent thing to show. */
 .node.selected { background:color-mix(in srgb, var(--accent) 18%, transparent); color:var(--text) }
@@ -859,6 +862,34 @@ body.dragging * { user-select:none !important }
 
 /* ── editor ─────────────────────────────────────────────────────────── */
 #editor { flex:1; min-height:0; overflow:hidden }
+
+/* ── media preview ──────────────────────────────────────────────────── */
+/* Takes the editor's place, never sits beside it: both are `flex:1` and the
+   hidden one is `hidden`, which is display:none, so it leaves the column
+   entirely rather than sharing the height. */
+#mediaview {
+  flex:1; min-height:0; overflow:auto; padding:16px;
+  display:flex; align-items:center; justify-content:center;
+  background:var(--bg); scrollbar-gutter:stable;
+}
+#mediaview[hidden] { display:none }
+#mediaview::-webkit-scrollbar { width:8px; height:8px }
+#mediaview::-webkit-scrollbar-thumb { background:var(--scrollbar); border-radius:2px }
+/* contain, not cover: a figure is being inspected, so the whole of it has to be
+   on screen even when the pane is the wrong shape for it. */
+#mediaview img { max-width:100%; max-height:100%; object-fit:contain }
+/* The PDF branch mounts PdfPreview on its own child, which stretches rather
+   than centring — a multi-page document scrolls. */
+#mediaview .media-pdf { align-self:stretch; width:100%; height:100%; overflow:auto }
+.media-card {
+  max-width:32ch; padding:1.25rem 1.5rem; text-align:center;
+  border:1px solid var(--border-md); border-radius:6px; background:var(--bg-panel);
+}
+/* anywhere, not break-all: break-all fills every line to the edge and cuts
+   mid-word even when the name would have fitted on the next one, which turned
+   `chalmers_logo_v.eps` into `chalmers_log / o_v.eps` in a narrow pane. */
+.media-card-name { color:var(--text); overflow-wrap:anywhere }
+.media-card-note { margin-top:.4rem; color:var(--text-muted); font-size:var(--fs-sm) }
 .cm-editor { height:100% }
 /* Editor font, size and line height are settings; the !important is required
    because CodeMirror sets these inline on .cm-scroller itself. Size is scaled

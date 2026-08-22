@@ -81,9 +81,15 @@ const OUTPUT_EXT = new Set([
 ]);
 const PREBUILT_KEEP = new Set(['.bbl', '.ind']);
 
-// Text extensions are sent as UTF-8 strings; everything else as base64.
+// Text extensions are sent as UTF-8 strings; everything else as base64. This is
+// the dev server's copy of project_store.js's TEXT_EXT_RE, and the two must
+// agree: readProjectFromFixture trusts TEXT_EXT_RE over the encoding and falls
+// back to atob() when they disagree, which is latin-1 — so a file that is text
+// there and base64 here arrives with every non-ASCII character mangled. `.ltx`
+// was missing from this set for exactly that reason.
 const TEXT_EXT = new Set([
-  '.tex', '.bib', '.cls', '.sty', '.bbl', '.ind', '.def', '.cfg', '.txt', '.clo'
+  '.tex', '.bib', '.cls', '.sty', '.bbl', '.ind', '.def', '.cfg', '.txt',
+  '.clo', '.ltx', '.md', '.markdown'
 ]);
 
 const PROJECTS = {

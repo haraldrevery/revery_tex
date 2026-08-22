@@ -115,6 +115,10 @@
       <button id="editorsizedown" title="Smaller editor text" aria-label="Smaller editor text">−</button>
       <button id="editorsizeup" title="Larger editor text" aria-label="Larger editor text">+</button></div>
     <div id="editor"></div>
+    <!-- Shown in the editor's place for a file the editor cannot open: an
+         image, a PDF, or a card naming whatever else it is. Never a buffer —
+         see showMediaFile(), which clears currentPath before revealing it. -->
+    <div id="mediaview" hidden role="group" aria-label="File preview"></div>
   </section>
   <div class="vdiv" data-resize="editor"></div>
 

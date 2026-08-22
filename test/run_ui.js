@@ -1911,8 +1911,9 @@ async function main() {
     // app is navigated with could not be reached without a mouse, while every
     // menu and dialog could.
     const rowKeys = await cdp.evaluate(`(async () => {
-      const row = [...document.querySelectorAll('#filetree .node[data-path]')]
-        .find(r => !r.hasAttribute('aria-disabled'));
+      // A text file: .binary rows open a preview rather than a buffer, so they
+      // would not put their path in #editortitle by way of the editor.
+      const row = document.querySelector('#filetree .node[data-path]:not(.binary)');
       // This is the assertion that matters: a div without a tabindex cannot
       // become activeElement, so .focus() landing here is what proves the row
       // is reachable by keyboard at all. A synthetic KeyboardEvent would not
@@ -1927,15 +1928,41 @@ async function main() {
       const dir = document.querySelector('#filetree .node[data-dir]');
       const expanded = dir && dir.getAttribute('aria-expanded');
 
+      // A binary row is an ordinary row now: focusable, clickable, and it shows
+      // the file in the editor's place. It carried aria-disabled — never the
+      // disabled property, which gets no mouse events and would have taken
+      // right-click Rename away from it — for as long as clicking one did
+      // nothing at all. Announcing a working row as unavailable is the thing
+      // being guarded against here.
       const binary = document.querySelector('#filetree .node.binary');
-      // aria-disabled, never the disabled property: a disabled button gets no
-      // mouse events, which would take right-click Rename away from it.
       const binaryFocusable = !!binary && !binary.disabled
-        && binary.getAttribute('aria-disabled') === 'true';
+        && !binary.hasAttribute('aria-disabled');
+
+      binary.focus();
+      const binaryTakesFocus = document.activeElement === binary;
+      binary.click();
+      await new Promise(r => setTimeout(r, 120));
+      const media = document.getElementById('mediaview');
+      const binaryPreviewed = document.getElementById('editortitle').textContent === binary.dataset.path
+        && !media.hidden
+        && document.getElementById('editor').hidden
+        && media.childElementCount > 0
+        && binary.classList.contains('active');
+
+      // Back to a text file: the editor must come back, and it must be measured
+      // rather than left at the zero height a display:none element reports.
+      row.click();
+      await new Promise(r => setTimeout(r, 120));
+      const cm = document.querySelector('#editor .cm-scroller');
+      const editorReturned = media.hidden
+        && !document.getElementById('editor').hidden
+        && media.childElementCount === 0
+        && !!cm && cm.clientHeight > 0;
 
       const sec = document.querySelector('#outline .node.sec');
       return {
         tag, focused, opened, expanded, binaryFocusable,
+        binaryTakesFocus, binaryPreviewed, editorReturned,
         outlineTag: sec ? sec.tagName : null,
         // A half-claimed ARIA tree owes the reader arrow keys and a roving
         // tabindex; this is a group of buttons and should say so.
@@ -1947,7 +1974,11 @@ async function main() {
     check('a focused row opens its file', rowKeys.opened);
     check('directory rows report their fold state',
       rowKeys.expanded === 'true' || rowKeys.expanded === 'false', String(rowKeys.expanded));
-    check('binary rows stay focusable and right-clickable', rowKeys.binaryFocusable);
+    check('binary rows are focusable and not announced as unavailable',
+      rowKeys.binaryFocusable && rowKeys.binaryTakesFocus);
+    // The whole point of the change: a figure used to be a dead row.
+    check('clicking a binary previews it in the editor pane', rowKeys.binaryPreviewed);
+    check('opening a text file brings the measured editor back', rowKeys.editorReturned);
     check('outline headings are focusable buttons too',
       rowKeys.outlineTag === 'BUTTON', rowKeys.outlineTag);
     check('no ARIA tree pattern is claimed without arrow keys', !rowKeys.claimsTree);
@@ -1994,6 +2025,75 @@ async function main() {
       made.refused);
     check('a path that climbs out of the project is refused',
       /not a usable/i.test(made.escape), made.escape);
+
+    // Markdown is text, and it is not TeX. Both halves matter: it has to open
+    // and edit like any source file, and it must not be handed the LaTeX layer
+    // — stex colours prose as if every word were a command, and the completion
+    // list opens on the way through.
+    const md = await cdp.evaluate(`(async () => {
+      const app = window.__reveryTexApp, T = window.__reveryTexTest;
+      const open = (label) => {
+        document.getElementById('newfile').click();
+        [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+          .find(b => new RegExp(label, 'i').test(b.textContent)).click();
+      };
+      const type = (v) => {
+        const i = document.querySelector('.dlg input[type="text"]');
+        i.value = v; i.dispatchEvent(new Event('input', { bubbles: true }));
+        [...document.querySelectorAll('.dlg-foot button')]
+          .find(b => !/cancel/i.test(b.textContent)).click();
+      };
+      const spans = () => document.querySelector('#editor .cm-line').childElementCount;
+
+      open('new file');
+      type('notes/prose.md');
+      await new Promise(r => setTimeout(r, 80));
+      const opened = document.getElementById('editortitle').textContent === 'notes/prose.md';
+
+      // The same text in both files. In a .tex it is a command and gets marked
+      // up; in the .md it is one run of plain text and gets nothing.
+      const SRC = '\\\\section{Hi} and \\\\emph{there}';
+      app.setBuffer('notes/prose.md', SRC);
+      await new Promise(r => setTimeout(r, 80));
+      const mdSpans = spans();
+
+      // Typed for real, through a transaction, so the buffer goes dirty the way
+      // an edit does rather than the way setBuffer does.
+      const v = T.view();
+      v.dispatch({ changes: { from: v.state.doc.length, insert: '\\ntyped' } });
+      await new Promise(r => setTimeout(r, 80));
+      const dirtyAfterTyping = /modified/.test(document.getElementById('dirty').textContent);
+      const kept = v.state.doc.toString().endsWith('typed');
+
+      // …and the same text in a .tex, for the comparison to mean anything.
+      open('new file');
+      type('notes/compare.tex');
+      await new Promise(r => setTimeout(r, 80));
+      app.setBuffer('notes/compare.tex', SRC);
+      await new Promise(r => setTimeout(r, 80));
+      const texSpans = spans();
+
+      // Put the editor back where the next block expects to find it. It renames
+      // notes/draft.tex and asserts the title follows, which says nothing at
+      // all if the title was never on that file to begin with.
+      [...document.querySelectorAll('#filetree .node')]
+        .find(r => r.dataset.path === 'notes/draft.tex').click();
+      await new Promise(r => setTimeout(r, 80));
+
+      return { opened, mdSpans, texSpans, dirtyAfterTyping, kept,
+               restored: document.getElementById('editortitle').textContent };
+    })()`, true);
+    check('a markdown file opens in the editor', md.opened);
+    check('markdown edits go dirty like any other source file',
+      md.dirtyAfterTyping && md.kept);
+    check('a .tex is marked up by the LaTeX layer', md.texSpans > 0,
+      `${md.texSpans} spans`);
+    // The bundle carries no markdown mode — see build_tools/cm_entry_tex.js —
+    // so plain is the honest answer, not stex over prose.
+    check('markdown is left as plain text', md.mdSpans === 0,
+      `${md.mdSpans} spans vs ${md.texSpans} in the .tex`);
+    check('the editor is back on notes/draft.tex for the rename below',
+      md.restored === 'notes/draft.tex', md.restored);
 
     const renamed = await cdp.evaluate(`(async () => {
       const row = [...document.querySelectorAll('#filetree .node')]
