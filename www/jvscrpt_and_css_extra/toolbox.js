@@ -18,7 +18,9 @@ import { openPicker } from './picker.js';
 import { renderMath, mathSource, shrinkToFit } from './math_preview.js';
 import * as settings from './settings.js';
 // One MIME map for the app: thumbnails here, the editor-pane preview there.
-import { MIME } from './media_view.js';
+// showImageBytes is shared for the same reason — a thumbnail and the preview
+// must survive the same content policies.
+import { MIME, showImageBytes } from './media_view.js';
 
 /**
  * Whether references should be inserted as cleveref's `\cref`.
@@ -143,8 +145,10 @@ function paintThumb(project, path, mount, blobUrl) {
   const img = document.createElement('img');
   img.loading = 'lazy';
   img.alt = path;
-  img.src = blobUrl(file.content, MIME[ext] || 'application/octet-stream');
-  img.onerror = () => { mount.classList.add('picker-noimage'); mount.textContent = ext.toUpperCase(); };
+  showImageBytes(img, file.content, MIME[ext] || 'application/octet-stream', {
+    blobUrl,
+    onFail: () => { mount.classList.add('picker-noimage'); mount.textContent = ext.toUpperCase(); }
+  });
   mount.appendChild(img);
 }
 

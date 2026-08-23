@@ -27,6 +27,16 @@ This project arrived as a zip.
 `;
 const CHAPTER = 'Text from a subdirectory, which proves paths survived the zip.\n';
 
+// A real 1x1 PNG — CRC-clean, so a browser that refuses to paint it is refusing
+// for a reason outside the bytes. The only image this suite had before was
+// `enc.encode('not really a png')`, which is *supposed* to fail, so nothing
+// here ever proved a figure renders at all. That is how the deployed site
+// shipped with every preview and every thumbnail blank: the site sends a CSP
+// header without blob: in img-src, the page's own <meta> policy allows it, and
+// a page carrying both is held to the intersection.
+const PNG_B64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
 let failures = 0;
 function check(name, ok, detail = '') {
   console.log(`  ${ok ? '✓' : '✗'} ${name}${detail ? `  ${detail}` : ''}`);
@@ -133,7 +143,9 @@ async function main() {
       const bytes = await writeZip([
         { path: 'my-thesis/main.tex', bytes: enc.encode(${JSON.stringify(DOC)}) },
         { path: 'my-thesis/chapters/one.tex', bytes: enc.encode(${JSON.stringify(CHAPTER)}) },
-        { path: 'my-thesis/notes.bib', bytes: enc.encode('@book{x, title={T}}') }
+        { path: 'my-thesis/notes.bib', bytes: enc.encode('@book{x, title={T}}') },
+        { path: 'my-thesis/figures/dot.png',
+          bytes: Uint8Array.from(atob(${JSON.stringify(PNG_B64)}), c => c.charCodeAt(0)) }
       ]);
       const file = new File([bytes], 'my-thesis.zip', { type: 'application/zip' });
       const dt = new DataTransfer();
@@ -164,6 +176,64 @@ async function main() {
     // and #engine do.
     check('main file identified', /\bmain\.tex\b/.test(loaded.docname), loaded.docname);
     check('Export now available', !loaded.exportDisabled);
+
+    /* ── a figure actually paints, under the deployed CSP ───────────── */
+    // Both of these read naturalWidth rather than "is there a child element".
+    // The blank-preview bug produced a child every time — the
+    // "PNG — could not be displayed" card — so a structural assertion is
+    // exactly the one that misses it.
+    const figure = await cdp.evaluate(`(async () => {
+      const settle = async (test) => {
+        for (let i = 0; i < 80 && !test(); i++) await new Promise(r => setTimeout(r, 25));
+        return test();
+      };
+      const shown = (img) => !!img && img.complete && img.naturalWidth > 0;
+
+      const row = document.querySelector('#filetree .node[data-path="figures/dot.png"]');
+      if (!row) return { found: false };
+      row.click();
+
+      const media = document.getElementById('mediaview');
+      await settle(() => shown(media.querySelector('img')));
+      const previewImg = media.querySelector('img');
+      const preview = {
+        painted: shown(previewImg),
+        scheme: previewImg ? previewImg.src.split(':')[0] : '',
+        note: (media.querySelector('.media-card-note') || {}).textContent || ''
+      };
+
+      document.getElementById('toolbox').click();
+      const item = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /^insert figure/i.test(b.textContent.trim()));
+      if (!item) return { found: true, preview, picker: { opened: false } };
+      item.click();
+
+      const panel = document.querySelector('.dlg.picker');
+      const thumb = () => panel && panel.querySelector('.picker-thumb img');
+      await settle(() => shown(thumb()));
+      const picker = {
+        opened: !!panel,
+        cards: panel ? panel.querySelectorAll('.picker-card').length : 0,
+        painted: shown(thumb()),
+        scheme: thumb() ? thumb().src.split(':')[0] : '',
+        // What the thumbnail falls back to when the image is refused.
+        placeholder: panel ? panel.querySelectorAll('.picker-thumb.picker-noimage').length : 0
+      };
+
+      // Leave the app as it was found: no modal, and a text file in the editor.
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      document.querySelector('#filetree .node[data-path="main.tex"]').click();
+      await settle(() => document.getElementById('mediaview').hidden);
+
+      return { found: true, preview, picker };
+    })()`, true);
+
+    check('the image row is in the tree', figure.found);
+    check('a real PNG paints in the preview', !!figure.preview && figure.preview.painted,
+      figure.preview ? `${figure.preview.scheme}: ${figure.preview.note}` : 'no preview');
+    check('the figure picker paints its thumbnail',
+      !!figure.picker && figure.picker.painted,
+      figure.picker ? `${figure.picker.cards} card(s), ${figure.picker.placeholder} placeholder(s)` : 'no picker');
 
     /* ── edit, save into browser storage, and read it back ──────────── */
     const saved = await cdp.evaluate(`(async () => {
@@ -675,8 +745,17 @@ async function main() {
     // supposed to fail — that failure is how the app knows it is not on a dev
     // server. It shows up in the console of every real deployment, which is
     // untidy but is the price of one code path instead of two.
+    //
+    // The img-src violation is the same kind of thing: the first image of the
+    // session probes `blob:` and is refused by the deployed policy, which is
+    // how the app learns to use data: for the rest. Exactly one is expected —
+    // if this ever needs widening to allow many, the latch in media_view.js has
+    // stopped latching.
     const expected = /favicon|\/api\/projects/i;
-    const real = pageErrors.filter(e => !expected.test(e));
+    const cspImg = pageErrors.filter(e => /img-src/.test(e) && /blob:/.test(e));
+    check('the blob: refusal is probed once, not once per image',
+      cspImg.length <= 1, `${cspImg.length} violations`);
+    const real = pageErrors.filter(e => !expected.test(e) && !cspImg.includes(e));
     check('no unexpected page errors', real.length === 0, real.slice(0, 3).join(' | '));
     check('dialogs were answered, not left hanging', dialogs.length > 0,
       `beforeunload etc: ${dialogs.map(d => d.type).join(', ') || 'none fired'}`);

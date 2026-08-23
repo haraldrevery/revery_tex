@@ -75,7 +75,10 @@ async function main() {
   }
 
   startServer('fixtures :8777', {});
-  startServer('static :8778', { REVERY_TEX_STATIC: '1', PORT: '8778' });
+  // REVERY_TEX_CSP=site serves the policy the deployed host really sends. The
+  // static server exists to be a real host; serving it without the real headers
+  // is how the blob:-image failure reached production unnoticed.
+  startServer('static :8778', { REVERY_TEX_STATIC: '1', PORT: '8778', REVERY_TEX_CSP: 'site' });
   await waitFor('http://localhost:8777/api/projects', 'fixture server');
   await waitFor('http://localhost:8778/www/index.html', 'static server');
 

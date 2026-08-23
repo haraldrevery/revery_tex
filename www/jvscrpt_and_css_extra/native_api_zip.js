@@ -16,7 +16,7 @@
 // the app says plainly where the work lives.
 
 import { readZip, normalizeZipEntries } from './zip_core.js';
-import { staleBackups, readBackupRecords } from './backup_rules.js';
+import { staleBackups, readBackupRecords, writeBackupRecord } from './backup_rules.js';
 
 const DB_NAME = 'revery_tex_zip';
 const FILES = 'files';
@@ -319,10 +319,18 @@ export const webZipImpl = {
      survives the kind of shutdown an async write does not. */
   async writeBackup(path, content) {
     if (!projectId) return;          // no identity yet, so nowhere safe to put it
-    try {
-      localStorage.setItem(`revery_tex_zipbackup:${projectId}:${path}`,
-        JSON.stringify({ path, saved: Date.now(), content }));
-    } catch { /* quota — a backup is best effort, never fatal */ }
+    const prefix = `revery_tex_zipbackup:${projectId}:`;
+    // See the web-fs backend: the quota failure is reported rather than
+    // swallowed, and room is made from other projects' oldest records first.
+    // It matters more here than there — this store *is* the project, so a
+    // backup is not a second copy of something already on a disk somewhere.
+    const ok = writeBackupRecord(
+      localStorage, `${prefix}${path}`,
+      JSON.stringify({ path, saved: Date.now(), content }),
+      prefix,
+      (victim) => console.warn(`dropped an old crash backup to make room: ${victim}`)
+    );
+    if (!ok) throw new Error('browser storage is full');
   },
 
   /** Backups worth offering back. The rule lives in backup_rules.js. */
