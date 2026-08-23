@@ -194,3 +194,116 @@ test('a project that adopts an id stores it', () => {
   assert.ok(!/projectId = \(await getMeta\('id'\)[\s\S]*?\)\s*\|\|\s*newProjectId/.test(boot[0]),
     'currentRoot must not mint an id it never stores');
 });
+
+/* ── making room when the quota refuses ──────────────────────────────── */
+//
+// Nothing pruned localStorage but `discardBackup`, and that only runs for the
+// project currently open. Every folder and every zip ever opened left its
+// records behind, and once the origin's few megabytes filled, `setItem` threw
+// into a `catch {}` that meant "best effort" — so crash backups silently
+// stopped being written for every project at once. These pin the two halves of
+// the fix: room is made from *other* projects only, oldest first, and a write
+// that still cannot fit says so rather than returning quietly.
+
+/** A localStorage stand-in with a byte budget, so the quota can actually fire. */
+function budgetStorage(limit = Infinity) {
+  const map = new Map();
+  const used = () => [...map].reduce((n, [k, v]) => n + k.length + v.length, 0);
+  return {
+    get length() { return map.size; },
+    key(i) { return [...map.keys()][i] ?? null; },
+    getItem(k) { return map.has(k) ? map.get(k) : null; },
+    removeItem(k) { map.delete(k); },
+    setItem(k, v) {
+      const had = map.get(k);
+      map.delete(k);
+      if (used() + k.length + v.length > limit) {
+        if (had !== undefined) map.set(k, had);
+        const e = new Error('QuotaExceededError');
+        e.name = 'QuotaExceededError';
+        throw e;
+      }
+      map.set(k, v);
+    },
+    keys() { return [...map.keys()]; }
+  };
+}
+
+const record = (p, saved, content) => JSON.stringify({ path: p, saved, content });
+
+test('a backup that fits is simply stored', async () => {
+  const { writeBackupRecord } = await load();
+  const s = budgetStorage();
+  const ok = writeBackupRecord(s, 'revery_tex_backup:live:a.tex',
+    record('a.tex', 5, 'work'), 'revery_tex_backup:live:');
+  assert.equal(ok, true);
+  assert.ok(s.getItem('revery_tex_backup:live:a.tex'));
+});
+
+test('a full quota gives up another project\'s oldest backup, not the live one', async () => {
+  const { writeBackupRecord } = await load();
+  const s = budgetStorage(260);
+  // Two dead projects and one of our own, all already stored.
+  s.setItem('revery_tex_backup:old:a.tex', record('a.tex', 1, 'oldest'));
+  s.setItem('revery_tex_zipbackup:mid:b.tex', record('b.tex', 2, 'newer'));
+  s.setItem('revery_tex_backup:live:keep.tex', record('keep.tex', 3, 'ours'));
+
+  const ok = writeBackupRecord(s, 'revery_tex_backup:live:new.tex',
+    record('new.tex', 9, 'the new work'), 'revery_tex_backup:live:');
+
+  assert.equal(ok, true, 'the write should have succeeded after making room');
+  assert.equal(s.getItem('revery_tex_backup:old:a.tex'), null, 'the oldest should be gone');
+  assert.ok(s.getItem('revery_tex_backup:live:keep.tex'),
+    'this project\'s own backup must never be the victim');
+  assert.ok(s.getItem('revery_tex_backup:live:new.tex'));
+});
+
+test('eviction stops as soon as the record fits', async () => {
+  const { writeBackupRecord } = await load();
+  const s = budgetStorage(300);
+  s.setItem('revery_tex_backup:old:a.tex', record('a.tex', 1, 'x'.repeat(80)));
+  s.setItem('revery_tex_backup:old:b.tex', record('b.tex', 2, 'y'.repeat(80)));
+
+  const dropped = [];
+  writeBackupRecord(s, 'revery_tex_backup:live:n.tex', record('n.tex', 9, 'z'.repeat(80)),
+    'revery_tex_backup:live:', (k) => dropped.push(k));
+
+  assert.deepEqual(dropped, ['revery_tex_backup:old:a.tex'],
+    'only as many as needed, oldest first');
+  assert.ok(s.getItem('revery_tex_backup:old:b.tex'), 'the newer one survives');
+});
+
+// The honest failure. Silence here is what the whole change is against.
+test('a record that cannot be made to fit reports failure', async () => {
+  const { writeBackupRecord } = await load();
+  const s = budgetStorage(50);
+  const ok = writeBackupRecord(s, 'revery_tex_backup:live:big.tex',
+    record('big.tex', 9, 'x'.repeat(500)), 'revery_tex_backup:live:');
+  assert.equal(ok, false);
+});
+
+test('settings and other keys are never evicted', async () => {
+  const { writeBackupRecord } = await load();
+  const s = budgetStorage(200);
+  s.setItem('revery_tex_settings', 'x'.repeat(120));
+  const ok = writeBackupRecord(s, 'revery_tex_backup:live:n.tex',
+    record('n.tex', 9, 'y'.repeat(100)), 'revery_tex_backup:live:');
+  assert.equal(ok, false, 'it must fail rather than take the settings');
+  assert.ok(s.getItem('revery_tex_settings'), 'settings are not ours to drop');
+});
+
+// A damaged record has no readable timestamp. It sorts oldest, so it is given
+// up before anything still parseable — which is also the only way it ever
+// leaves storage, since readBackupRecords skips it forever.
+test('an unparseable record is evicted before a readable one', async () => {
+  const { writeBackupRecord } = await load();
+  const s = budgetStorage(160);
+  s.setItem('revery_tex_backup:old:corrupt.tex', '{not json');
+  s.setItem('revery_tex_backup:old:fine.tex', record('fine.tex', 1, 'readable'));
+
+  const dropped = [];
+  writeBackupRecord(s, 'revery_tex_backup:live:n.tex', record('n.tex', 9, 'new work'),
+    'revery_tex_backup:live:', (k) => dropped.push(k));
+
+  assert.equal(dropped[0], 'revery_tex_backup:old:corrupt.tex');
+});

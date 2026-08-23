@@ -80,6 +80,12 @@ let view = null;             // CodeMirror EditorView
 let lastPdf = null;
 let preview = null;
 let backupTimer = null;
+// When the oldest edit still missing from a backup arrived. The debounce below
+// is not allowed to push past it by more than BACKUP_MAX_MS.
+let backupOldestEdit = 0;
+// Reported once per session, not once per keystroke: a full storage quota fires
+// on every attempt, and the log is the thing being relied on to be readable.
+let backupFailureReported = false;
 const syncTex = new SyncTex();
 
 /**
@@ -791,7 +797,18 @@ async function saveAll() {
   if (!pending.length) return;
 
   savingNow = saveAllInner(pending);
-  try { return await savingNow; } finally { savingNow = null; }
+  try {
+    return await savingNow;
+  } finally {
+    // Cleared first, then repainted. `saveAllInner` ends with its own
+    // refreshDirty(), but that one runs while this is still set, so it computes
+    // the Save button as disabled — correct during the run and wrong the
+    // instant it ends. Nothing else repaints until the next keystroke, so a
+    // file left dirty by the run (a conflict answered "Leave it", or one edited
+    // while it was being written) had no working Save button to try again with.
+    savingNow = null;
+    refreshDirty();
+  }
 }
 
 async function saveAllInner(pending) {
@@ -802,6 +819,10 @@ async function saveAllInner(pending) {
   let written = 0;
   let reloaded = 0;
   let skipped = 0;
+  // Files whose text moved on while their write was in flight. They *were*
+  // written — an older version of them reached disk — so they are not failures,
+  // but they are not clean either, and the difference is the whole point below.
+  let raced = 0;
   // Which file the run died on. A save that stops partway has written some of
   // the batch and not the rest, and "✗ save failed" alone said neither how far
   // it got nor where to look — so there was no way to tell a total failure from
@@ -811,8 +832,19 @@ async function saveAllInner(pending) {
     for (const [path, f] of pending) {
       let stamp;
       failedAt = path;
+      // The exact string handed to the backend, captured at the call. `f.content`
+      // is live: the editor's updateListener writes into this very object on
+      // every keystroke, and a write is an await — on the desktop an IPC round
+      // trip, on web-fs a createWritable/close pair, and for the whole length of
+      // a conflict dialog earlier in this same batch. Anything typed in that
+      // window is in `f.content` and *not* in the file, so clearing `dirty`
+      // against it unconditionally is how an edit was marked saved and dropped:
+      // dirtyCount() went to zero, so the close guard said nothing, the Save
+      // button greyed out, scheduleBackup skipped the file for not being dirty,
+      // and discardBackup below deleted the one copy that was left.
+      let sent = f.content;
       try {
-        stamp = await NativeAPI.writeFile(path, f.content, f.stamp || null);
+        stamp = await NativeAPI.writeFile(path, sent, f.stamp || null);
       } catch (err) {
         const msg = String(err && err.message ? err.message : err);
         if (!msg.includes('CONFLICT:')) throw err;
@@ -840,23 +872,37 @@ async function saveAllInner(pending) {
           reloaded++;
           continue;
         }
-        stamp = await NativeAPI.writeFile(path, f.content, null);  // forced
+        sent = f.content;                                          // re-read: the dialog took time too
+        stamp = await NativeAPI.writeFile(path, sent, null);       // forced
         rawLog('wrn', `overwrote ${path}, discarding the version on disk`);
       }
+      // The stamp describes what is on disk, so it is adopted either way: it is
+      // the answer to "has someone else touched this file", and the write just
+      // made it ours. Only `dirty` is conditional.
       f.stamp = stamp || f.stamp;
-      f.dirty = false;
       written++;
-      // The backup exists to cover the window between edits and a save; once
-      // the file is on disk it is noise, and would otherwise be offered for
-      // recovery forever.
-      await NativeAPI.discardBackup?.(path).catch(() => {});
+      if (f.content !== sent) {
+        // Typed into while the write was in flight. Staying dirty is what keeps
+        // every net armed — the close guard, the Save button and the next
+        // scheduleBackup — and the backup below is deliberately *not* discarded,
+        // because it is the only thing covering this text until the next save.
+        raced++;
+        rawLog('wrn', `${path} was edited while it was being saved — still unsaved`);
+      } else {
+        f.dirty = false;
+        // The backup exists to cover the window between edits and a save; once
+        // the file is on disk it is noise, and would otherwise be offered for
+        // recovery forever.
+        await NativeAPI.discardBackup?.(path).catch(() => {});
+      }
       failedAt = null;
     }
     setStatus(
       `saved ${written} file(s)` +
       `${reloaded ? `, ${reloaded} reloaded from disk` : ''}` +
-      `${skipped ? `, ${skipped} left unsaved — changed on disk` : ''}`,
-      (reloaded || skipped) ? 'warn' : 'ok');
+      `${skipped ? `, ${skipped} left unsaved — changed on disk` : ''}` +
+      `${raced ? `, ${raced} edited while saving — save again` : ''}`,
+      (reloaded || skipped || raced) ? 'warn' : 'ok');
     if (settings.settings.autoCompile) await compile();
   } catch (err) {
     setStatus(`✗ saved ${written} of ${pending.length} — ${failedAt} failed: ${err}`, 'err');
@@ -913,18 +959,55 @@ async function resolveConflict(path, msg) {
 //
 // `saveAll` discards a file's backup as it writes it, so this set is the
 // unsaved work and stays small.
+//
+// **Debounced, but with a ceiling.** A plain debounce is the wrong shape for a
+// crash net: `clearTimeout` on every keystroke means the timer only ever fires
+// once someone stops, so it starves for exactly as long as they keep writing —
+// which is when the unsaved work is piling up fastest. Measured, one edit every
+// 300 ms (slower than an average typist) produced zero backups across twelve
+// seconds; the first landed only after a full two-second pause. Waiting for a
+// gap that may not come is not a net.
+//
+// So the idle delay still coalesces a burst, and BACKUP_MAX_MS bounds how long
+// any single edit can sit unwritten regardless of what follows it.
+const BACKUP_IDLE_MS = 2000;
+const BACKUP_MAX_MS = 10000;
+
 function scheduleBackup() {
   if (!project?.onDisk || !NativeAPI.writeBackup) return;
+  const now = Date.now();
+  // Set by the first edit after a backup ran, and cleared by the next one, so
+  // the deadline is measured from the oldest edit not yet on record rather than
+  // from the most recent — which is the one a debounce keeps chasing.
+  if (!backupOldestEdit) backupOldestEdit = now;
   clearTimeout(backupTimer);
-  backupTimer = setTimeout(async () => {
-    if (!project) return;
-    for (const [path, f] of project.files) {
-      // Binaries are not backed up: they are written at drop time and never
-      // edited here, so there is no unsaved version of one to lose.
-      if (!f.dirty || f.binary || typeof f.content !== 'string') continue;
-      try { await NativeAPI.writeBackup(path, f.content); } catch { /* best effort */ }
+  const wait = Math.max(0, Math.min(BACKUP_IDLE_MS, backupOldestEdit + BACKUP_MAX_MS - now));
+  backupTimer = setTimeout(runBackup, wait);
+}
+
+async function runBackup() {
+  // Cleared before the writes, not after: an edit arriving while they are in
+  // flight is a new oldest-unwritten edit and starts its own deadline.
+  backupOldestEdit = 0;
+  if (!project) return;
+  for (const [path, f] of project.files) {
+    // Binaries are not backed up: they are written at drop time and never
+    // edited here, so there is no unsaved version of one to lose.
+    if (!f.dirty || f.binary || typeof f.content !== 'string') continue;
+    try {
+      await NativeAPI.writeBackup(path, f.content);
+    } catch (err) {
+      // Best effort per file, but no longer silent. A backend now throws only
+      // when it could not make room for the record at all, and a crash net that
+      // has stopped working is precisely the thing a user must not find out
+      // about afterwards.
+      if (!backupFailureReported) {
+        backupFailureReported = true;
+        rawLog('err', `crash backups are not being written: ${err.message || err}`);
+        setStatus('⚠ crash backups are not being saved — save your work', 'err');
+      }
     }
-  }, 2000);
+  }
 }
 
 /**
@@ -3081,7 +3164,33 @@ async function compile() {
     rawLog('hdr', `— ${project.key} · ${project.main} · ${engineName} · ${engineHost.source}`);
     // A system TeX reads the real files, so unsaved edits would compile the
     // previous version without saying so.
-    if (engineHost.source === 'system' && dirtyCount()) await saveAll();
+    //
+    // Never while a save is already running, and that guard is not an
+    // optimisation — it is the one thing keeping this out of a deadlock.
+    // `saveAllInner` ends with `if (autoCompile) await compile()`, and
+    // `saveAll()` hands back the in-flight `savingNow` rather than starting a
+    // second run. Reached from there, this line would await the very promise
+    // that is waiting on this call. Nothing settles: `compiling` and
+    // `savingNow` both stay set for the life of the page, which disables the
+    // Save button, turns every later Ctrl+S into a no-op on the dead promise
+    // and makes `if (compiling) return` swallow every later compile — the app
+    // silently stops saving. The deterministic way in is the conflict dialog's
+    // "Leave it", which leaves a file dirty on purpose, so `dirtyCount()` is
+    // guaranteed non-zero when the post-save compile starts.
+    //
+    // Skipping is also the right answer on the merits: arriving from a save
+    // means everything that could be written just was. What is still dirty was
+    // refused by the user or edited mid-write, and a second pass would refuse
+    // it again. Said out loud, because compiling a stale file quietly is
+    // exactly what the check above exists to prevent.
+    if (engineHost.source === 'system' && dirtyCount()) {
+      if (savingNow) {
+        rawLog('wrn', `${dirtyCount()} file(s) are still unsaved — ` +
+                      `compiling the versions currently on disk`);
+      } else {
+        await saveAll();
+      }
+    }
     setStatus('compiling…', 'warn');
 
     const files = [...project.files].map(([path, f]) => ({ path, content: f.content }));

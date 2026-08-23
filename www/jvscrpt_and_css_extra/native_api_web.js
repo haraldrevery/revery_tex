@@ -9,7 +9,7 @@
 // A browser tab is *more* likely to hit this than a desktop app, not less —
 // people leave tabs open for days.
 
-import { staleBackups, readBackupRecords } from './backup_rules.js';
+import { staleBackups, readBackupRecords, writeBackupRecord } from './backup_rules.js';
 
 const FS_DB = 'revery_tex_fs';
 const HANDLE_KEY = 'root';
@@ -314,10 +314,20 @@ export const webFsImpl = {
   /* Crash backups live in localStorage: small, synchronous, and survives a tab
      crash. Same shape as the desktop backups so the recovery UI is shared. */
   async writeBackup(path, content) {
-    const key = `revery_tex_backup:${rootId || ''}:${path}`;
-    try {
-      localStorage.setItem(key, JSON.stringify({ path, saved: Date.now(), content }));
-    } catch { /* quota — a backup is best effort, never fatal */ }
+    const prefix = `revery_tex_backup:${rootId || ''}:`;
+    // Throws rather than swallowing, and that is the change: the old `catch {}`
+    // meant a full quota stopped every backup for every project with nothing
+    // said, which is the one failure this feature cannot afford to hide.
+    // `writeBackupRecord` first tries the write, then gives up other projects'
+    // oldest records to fit — never this project's — and only reports failure
+    // once there is nothing left to give.
+    const ok = writeBackupRecord(
+      localStorage, `${prefix}${path}`,
+      JSON.stringify({ path, saved: Date.now(), content }),
+      prefix,
+      (victim) => console.warn(`dropped an old crash backup to make room: ${victim}`)
+    );
+    if (!ok) throw new Error('browser storage is full');
   },
 
   /** Backups worth offering back. The rule lives in backup_rules.js. */

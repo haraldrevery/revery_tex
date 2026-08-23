@@ -22,13 +22,19 @@ const PORT = Number(process.env.PORT) || 8777;
 // thing it will be deployed to — the fixture loader is the one path a real user
 // never takes, and it hid a bug once already.
 const STATIC_ONLY = process.env.REVERY_TEX_STATIC === '1' || process.argv.includes('--static');
-const APPLY_CSP = process.argv.includes('--csp') || process.argv.includes('--csp-site');
+// REVERY_TEX_CSP as well as argv: test/check.js spawns this file with an env
+// and no arguments, so an argv-only switch never reaches the run that matters.
+const CSP_ENV = process.env.REVERY_TEX_CSP || '';
+const APPLY_CSP = process.argv.includes('--csp') || process.argv.includes('--csp-site')
+  || CSP_ENV === 'site' || CSP_ENV === 'prod';
 // --csp-site serves the site's CURRENT policy verbatim (no worker-src), to
 // prove whether the proposed _headers change is actually required.
-const CSP_SITE = process.argv.includes('--csp-site');
+const CSP_SITE = process.argv.includes('--csp-site') || CSP_ENV === 'site';
 
-// Mirrors the /revery_tex/* block proposed for website_reference/_headers.
-// worker-src 'self' blob: is the addition the site does not have today.
+// Mirrors the block proposed for the app's own path. The deployed app is at
+// /revery_tex/www/*, not /revery_tex/* — that prefix is the Jekyll README page.
+// Two things here the site-wide policy below does not have: worker-src
+// 'self' blob:, and blob: in img-src.
 const PROD_CSP = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
@@ -43,12 +49,27 @@ const PROD_CSP = [
   "frame-ancestors 'self'"
 ].join('; ');
 
-// Verbatim from website_reference/_headers as deployed today.
+// Verbatim from the header haraldrevery.com actually sends, re-read from the
+// live response on 2026-08-23:
+//
+//   curl -sI https://haraldrevery.com/revery_tex/www/index.html | grep -i content-security
+//
+// It is the whole site's policy, not this app's — it names Tailwind's CDN and
+// cdnjs — and **img-src has no blob:**. A page carrying both a header and a
+// <meta> policy is held to the intersection of the two, so every object URL in
+// an <img> is refused there while index.html's own policy says it is fine.
+// That is what blanked the media preview and the figure picker's thumbnails.
+//
+// The previous transcription of this constant said `img-src 'self' data: blob:`
+// and so could never reproduce it. If the live header changes, re-read it with
+// the command above rather than editing this from memory.
 const SITE_CSP =
-  "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
-  "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; " +
-  "font-src 'self' data:; media-src 'self' data: blob:; connect-src 'self'; " +
-  "object-src 'none'; base-uri 'self'; frame-ancestors 'self'";
+  "default-src 'self'; " +
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://static.cloudflareinsights.com " +
+  "https://cdn.tailwindcss.com https://cdnjs.cloudflare.com; " +
+  "style-src 'self' 'unsafe-inline'; font-src 'self' data:; " +
+  "img-src 'self' data: https:; " +
+  "connect-src 'self'; media-src 'self' data: blob:;";
 
 const ACTIVE_CSP = () => (CSP_SITE ? SITE_CSP : PROD_CSP);
 

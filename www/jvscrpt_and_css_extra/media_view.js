@@ -32,6 +32,85 @@ export const MIME = {
 /** Extensions an <img> can actually decode. `.pdf` is in MIME but not here. */
 const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'svg', 'avif', 'ico']);
 
+/**
+ * The same bytes as a base64 `data:` URL.
+ *
+ * Chunked rather than one `String.fromCharCode(...bytes)`: spreading a
+ * multi-megabyte array over the argument list overflows the stack, and a figure
+ * that size is ordinary.
+ */
+export function dataUrl(bytes, type) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return `data:${type};base64,${btoa(s)}`;
+}
+
+/**
+ * Whether this page's content policy refuses `blob:` in an <img>.
+ *
+ * Latched from the violation event and not from `img.onerror`, which is the
+ * distinction that matters: a figure with corrupt bytes also fires `onerror`,
+ * and treating that as "blob: is blocked" would push every later image onto the
+ * 33%-larger data: path because one file was damaged. The event says which it
+ * was; nothing else does, since the effective policy is not readable from JS.
+ *
+ * The `onerror` swap below is still what actually recovers the first image —
+ * this only spares the ones after it. A browser that never fires the event
+ * therefore still works, one blocked attempt at a time.
+ */
+let blobRefused = false;
+if (typeof document !== 'undefined' && document.addEventListener) {
+  document.addEventListener('securitypolicyviolation', (e) => {
+    const directive = e.effectiveDirective || e.violatedDirective || '';
+    if (/^img-src/.test(directive) && /^blob/.test(e.blockedURI || '')) blobRefused = true;
+  });
+}
+
+/**
+ * Point an <img> at image bytes, and keep it working where `blob:` is refused.
+ *
+ * A page carrying both a CSP header and a <meta> CSP is held to the
+ * *intersection* of the two. index.html allows `img-src … blob:`; the policy
+ * the deployed site sends does not — so on the live site every object URL is
+ * blocked and the only symptom is this error handler firing. The preview and
+ * the figure picker both went blank that way, and nothing said why.
+ *
+ * `data:` is on both lists, so it is the fallback. Not the default: base64 is
+ * ~33% larger than the bytes, and holding that for a 64 MB drop is exactly what
+ * the object URL exists to avoid. First failure swaps; only a second one gives
+ * up, so a file that really is corrupt still reports itself.
+ *
+ * `blobUrl` is a parameter because the callers own revocation differently —
+ * this module keeps one URL at a time, the picker keeps a list until close.
+ *
+ * @param {HTMLImageElement} img
+ * @param {Uint8Array} bytes
+ * @param {string} type  content type for the blob
+ * @param {{blobUrl: (bytes: Uint8Array, type: string) => string,
+ *          onFail: () => void, onLog?: (msg: string, kind?: string) => void}} opts
+ */
+export function showImageBytes(img, bytes, type, { blobUrl, onFail, onLog = () => {} }) {
+  // Once the policy has refused one, it will refuse the rest. Skipping straight
+  // to data: keeps a picker full of thumbnails from logging a console violation
+  // per card — and, more to the point, from painting the placeholder first and
+  // the image a moment later.
+  if (blobRefused) {
+    img.onerror = onFail;
+    img.src = dataUrl(bytes, type);
+    return;
+  }
+  let swapped = false;
+  img.onerror = () => {
+    if (swapped) { onFail(); return; }
+    swapped = true;
+    onLog('preview: blob: images are refused by this page\'s content policy — using data: URLs', 'warn');
+    img.src = dataUrl(bytes, type);
+  };
+  img.src = blobUrl(bytes, type);
+}
+
 export const extOf = (path) => (String(path).split('.').pop() || '').toLowerCase();
 
 /**
@@ -106,14 +185,19 @@ export async function showMedia(container, path, file, { onLog = () => {} } = {}
     // loaded this way do not run, which is the whole reason `.svg` is allowed
     // to be previewed at all — a project's figures come from wherever the
     // project came from.
-    url = URL.createObjectURL(new Blob([bytes], { type: MIME[ext] || 'application/octet-stream' }));
-    img.src = url;
+    //
     // Same fallback the figure picker uses: a file that claims to be a PNG and
     // is not should say so rather than show a broken-image glyph.
-    img.onerror = () => {
-      container.textContent = '';
-      card(container, path, `${ext.toUpperCase()} — could not be displayed`);
-    };
+    showImageBytes(img, bytes, MIME[ext] || 'application/octet-stream', {
+      // Assigning the module-level `url` is what lets clearMedia take it back.
+      // Still assigned when the data: fallback wins, and still revoked then.
+      blobUrl: (b, type) => (url = URL.createObjectURL(new Blob([b], { type }))),
+      onFail: () => {
+        container.textContent = '';
+        card(container, path, `${ext.toUpperCase()} — could not be displayed`);
+      },
+      onLog
+    });
     container.appendChild(img);
     return;
   }
