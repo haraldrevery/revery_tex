@@ -34,6 +34,35 @@ at all, because it cannot write back to the folder a project came from — the
 missing method is what makes the UI offer Import instead of a Save that would
 not have worked. Any new backend must omit what it cannot do rather than throw.
 
+Four backends implement that surface and **nothing used to hold them to the same
+behaviour**, so two of them drifted silently. `test/native_api_parity.test.js`
+now diffs the two desktop impls (the only documented divergence is
+`onCloseRequested`), and `test/backup_staleness.test.js` holds all four to the
+crash-backup rule below.
+
+### A crash backup is discarded only when it is safe to
+
+**A file that cannot be read counts as stale, and its backup is offered.** Never
+the reverse. Both browser backends had this inverted — they skipped the backup
+when the read failed — which threw the work away in exactly the case the backup
+exists for: the file is gone and this copy is the only one left. Deleting a file
+after typing into it, or revoking the folder permission, lost the edits with
+nothing said, and the recovery dialog's "this backup is the only copy" branch
+could never fire outside the desktop.
+
+The rule lives once, in `www/jvscrpt_and_css_extra/backup_rules.js`. The desktop
+backends are in Node and Rust and cannot import it, so they are held to it by
+test instead — `fs_core.js` reads into `''` on catch, `main.rs` uses
+`unwrap_or_default()`.
+
+Backups are also keyed on a **project identity, never a project name**. Two
+folders — or two zips — called `thesis` are two different projects; keyed on the
+name, one project's unsaved text was offered as recovery for the other's, and
+accepting it overwrote the file with no conflict, because the stamp belonged to
+the file that was really open. web-fs uses `identify()`/`rootId`, the zip backend
+a generated `projectId` stored in IndexedDB, and the desktop shells hash the
+absolute path.
+
 ## `www/` contains only what ships
 
 Every shell loads that folder, and **Tauri embeds all of it into the binary**
@@ -51,9 +80,9 @@ Two packagers independently excluding the same thing is not a strategy.
 
 ## The subprocess layer
 
-`tauri/src/tex_run.rs` and `electron/tex_run.js` are the only code that starts a
-process, and they run on a directory the user may have downloaded. Do not
-loosen any of this without a reason written down:
+`tauri/src/tex_run.rs` and `electron/tex_run.js` run compilers **on a directory
+the user may have downloaded**, so what they may run is the whole question. Do
+not loosen any of this without a reason written down:
 
 - **`latexmk` is not on the allowlist and must not be added.** It executes
   `latexmkrc` from the working directory as Perl.
@@ -68,6 +97,49 @@ loosen any of this without a reason written down:
 The two implementations must stay identical — a test compares their argv and
 allowlists, because a document that compiles in one shell and not the other is
 undiagnosable.
+
+### The one other place a process is started
+
+`launch_file_manager` in `tauri/src/main.rs` and `launchFileManager` in
+`electron/fs_core.js` — behind the `open_containing_folder` command, which is
+the file panel's **Open containing folder** row. Not governed by the allowlist
+above, and it does not need to be, because it is a different problem: it runs
+**one program named as a literal in that file** (`xdg-open` / `explorer.exe` /
+`open`) on **one absolute path the backend computed**, and reads nothing back.
+Nothing in a project directory can be reached by it, which is the property the
+allowlist exists to give `tex_run`.
+
+What it must keep:
+
+- **The path is decided by `containing_dir`, never by the renderer**, which
+  sends a project-relative path and nothing else. `containing_dir` goes through
+  `safe_path_inside`, so a symlink out of the project is refused before anything
+  launches. That split also exists so the decision is testable — the launch is
+  the one function in the tree a test must never call, because it would open a
+  file manager on whatever machine ran the suite.
+- **No shell, no inherited stdio, and no reading of the exit status.**
+  `explorer.exe` returns 1 on success; a file manager may take seconds to
+  appear. Only failure to *launch* is reported.
+- **The child is disowned, never awaited.** Waiting on the caller's thread would
+  block the webview until the user closed their file manager. Rust reaps it on a
+  thread of its own, because dropping a `Child` unwaited leaves a zombie for the
+  life of the app; Node gets the same effect from `detached` + `unref()`. Node
+  reports a missing program on the `error` event and success on `spawn`, which
+  is why neither shell has to wait for an exit code to tell the two apart.
+
+**Electron spawns rather than using its own `shell` module, and that is not an
+oversight.** `shell.openPath()` returns a promise that never settles on a Linux
+desktop — measured, headed and headless: six seconds, no resolution, no file
+manager — so an awaited call hangs the IPC reply forever, which is exactly how
+this shipped broken the first time. `shell.showItemInFolder()` does work but
+*selects* the item, which for a folder row opens its parent instead. Spawning
+gives both shells the same behaviour and no hang. If you are tempted back to
+`shell`, measure it first.
+
+**No Tauri capability is granted for any of this** — `capabilities/default.json`
+stays shut and the reveal is reachable only through our own validating command.
+Adding `tauri-plugin-opener` instead would put URL-opening in the binary; see
+the licence section below for why that is not a free change.
 
 ## Generated files — never edit directly
 
@@ -98,6 +170,16 @@ things follow that are easy to break by accident:
   test, which is how it went unnoticed once already. The Legal page spells every
   URL out as text for the same reason. `test/run_electron.js` checks this in the
   shell where it actually matters.
+
+  Note the exact shape of that rule, because **Open containing folder** looks
+  like a counter-example and is not. The app will show you a folder; it still
+  will not open a browser. The reveal hands one validated path to a file
+  manager through the main process, and can neither navigate the webview nor
+  give a URL to anything. This is why that feature is a hand-written command
+  rather than `tauri-plugin-opener`: the plugin exists to "open files **and
+  URLs**", and pulling it in would put into the binary the one capability the
+  Legal page's whole design assumes is absent. A test asserts it is not in
+  `tauri/Cargo.toml`.
 - **The arm's-length boundary in `tex_engine_wasm.js` is a licence boundary too.**
   The GPL TeX engines stay outside the licence calculation only because they are
   separate programs across a Worker message boundary. Linking them differently

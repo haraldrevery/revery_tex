@@ -9,6 +9,8 @@
 // A browser tab is *more* likely to hit this than a desktop app, not less —
 // people leave tabs open for days.
 
+import { staleBackups, readBackupRecords } from './backup_rules.js';
+
 const FS_DB = 'revery_tex_fs';
 const HANDLE_KEY = 'root';
 
@@ -318,20 +320,17 @@ export const webFsImpl = {
     } catch { /* quota — a backup is best effort, never fatal */ }
   },
 
+  /** Backups worth offering back. The rule lives in backup_rules.js. */
   async listStaleBackups() {
     if (!rootHandle || !rootId) return [];
-    const prefix = `revery_tex_backup:${rootId}:`;
-    const out = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (!key || !key.startsWith(prefix)) continue;
-      let v;
-      try { v = JSON.parse(localStorage.getItem(key)); } catch { continue; }
-      if (!v || !handles.has(v.path)) continue;
-      const onDisk = await requireHandle(v.path).getFile().then(f => f.text()).catch(() => null);
-      if (onDisk !== null && onDisk !== v.content) out.push(v);
-    }
-    return out;
+    return staleBackups(
+      readBackupRecords(localStorage, `revery_tex_backup:${rootId}:`),
+      // requireHandle throws for a path the directory walk never saw — which is
+      // what a deleted file looks like, since deleteFile prunes that map.
+      // staleBackups treats the throw as "nothing there", so the backup is
+      // offered rather than dropped.
+      async (path) => (await requireHandle(path).getFile()).text()
+    );
   },
 
   async discardBackup(path) {

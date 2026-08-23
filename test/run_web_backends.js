@@ -94,6 +94,7 @@ async function main() {
     const shell = await cdp.evaluate(`(() => ({
       backend: window.NativeAPI.env,
       canOpenFolder: !!window.NativeAPI.openFolder,
+      canReveal: !!window.NativeAPI.openContainingFolder,
       canImport: !!window.NativeAPI.importZip,
       openVisible: getComputedStyle(document.getElementById('open')).display !== 'none',
       importVisible: getComputedStyle(document.getElementById('importzip')).display !== 'none',
@@ -106,6 +107,10 @@ async function main() {
     check('backend is web-zip', shell.backend === 'web-zip', shell.backend);
     check('no openFolder method', !shell.canOpenFolder,
       shell.canOpenFolder ? 'present — the UI would promise a save it cannot do' : '');
+    // A browser has no folder to show, and the menu row keys off this method
+    // alone. Present-and-throwing would put a row here that cannot work.
+    check('no openContainingFolder method', !shell.canReveal,
+      shell.canReveal ? 'present — the menu would offer a folder there is none of' : '');
     check('Open folder button hidden', !shell.openVisible);
     check('Import zip button shown', shell.importVisible && shell.canImport);
     check('Export disabled with no project', shell.exportDisabled);
@@ -311,6 +316,185 @@ async function main() {
     check('a remembered main document from another folder is ignored',
       chosenMain !== 'chapters/one.tex',
       `planted chapters/one.tex for key ${planted.key}; main is ${chosenMain}`);
+
+    /* ── crash backups belong to one project, not to a filename ────── */
+    //
+    // Two zips both called thesis.zip are two different projects. Keyed on the
+    // name, the first one's unsaved text was offered as recovery for the
+    // second's same-named file — and, once accepted, saved over it with no
+    // conflict, because the stamp belonged to the file that was really open.
+    // Sequential, not concurrent, which is what made it easy to miss: importZip
+    // clears the store, so the two never coexist.
+    const backups = await cdp.evaluate(`(async () => {
+      const { writeZip } = await import('./jvscrpt_and_css_extra/zip_core.js');
+      const enc = new TextEncoder();
+      const zip = async (body) => new File(
+        [await writeZip([{ path: 'main.tex', bytes: enc.encode(body) }])],
+        'thesis.zip', { type: 'application/zip' });
+
+      // Project A, with an unsaved edit stranded in a backup.
+      await window.NativeAPI.importZip(await zip(${JSON.stringify(DOC)}));
+      await window.NativeAPI.writeBackup('main.tex', 'PROJECT A UNSAVED WORK');
+      const aOffered = (await window.NativeAPI.listStaleBackups()).map(b => b.content);
+
+      // A different project, same filename.
+      await window.NativeAPI.importZip(await zip('% a completely different document\\n'));
+      const bOffered = (await window.NativeAPI.listStaleBackups()).map(b => b.content);
+
+      // …and B's own backup must still work, so this is not passing by
+      // breaking recovery altogether.
+      await window.NativeAPI.writeBackup('main.tex', 'PROJECT B UNSAVED WORK');
+      const bOwn = (await window.NativeAPI.listStaleBackups()).map(b => b.content);
+
+      // A file that is gone entirely: the backup is the only copy left, and
+      // used to be dropped precisely here.
+      await window.NativeAPI.writeBackup('deleted.tex', 'THE ONLY COPY');
+      const orphan = (await window.NativeAPI.listStaleBackups()).map(b => b.content);
+
+      return { aOffered, bOffered, bOwn, orphan };
+    })()`, true);
+
+    check("a project's own backup is offered back",
+      backups.aOffered.includes('PROJECT A UNSAVED WORK'), backups.aOffered.join(' | '));
+    check('another project of the same name does not get it',
+      !backups.bOffered.includes('PROJECT A UNSAVED WORK'), backups.bOffered.join(' | '));
+    check('and recovery still works for the project that is open',
+      backups.bOwn.includes('PROJECT B UNSAVED WORK'), backups.bOwn.join(' | '));
+    // The data-loss bug: a backup whose file is gone is the one case it exists
+    // for, and it was the one case the browser backends threw away.
+    check('a backup for a file that is gone is still offered',
+      backups.orphan.includes('THE ONLY COPY'), backups.orphan.join(' | '));
+
+    /* ── a project imported before ids existed ─────────────────────── */
+    //
+    // The id is minted on the boot path for a store that has none. If it is not
+    // *stored*, every reload mints a fresh one and the previous session's crash
+    // backups become unreachable — every reload, forever, for any project never
+    // re-imported. That is worse than the collision the id was added to fix:
+    // before it, these projects keyed on the stable name and recovery worked.
+    //
+    // Needs two real reloads, because projectId is a module variable cached by
+    // the first currentRoot() call of each boot.
+    const MARK = 'LEGACY PROJECT UNSAVED WORK';
+    const MARK2 = 'LEGACY PROJECT SECOND BOOT';
+
+    await cdp.evaluate(`(async () => {
+      const { writeZip } = await import('./jvscrpt_and_css_extra/zip_core.js');
+      const enc = new TextEncoder();
+      // The same file set the compile and export checks below expect: this
+      // block reloads the page, so the app re-reads the store and whatever is
+      // in it becomes the project for everything that follows.
+      const bytes = await writeZip([
+        { path: 'legacy/main.tex', bytes: enc.encode(${JSON.stringify(DOC)}) },
+        { path: 'legacy/chapters/one.tex', bytes: enc.encode(${JSON.stringify(CHAPTER)}) },
+        { path: 'legacy/notes.bib', bytes: enc.encode('@book{x, title={T}}') }
+      ]);
+      await window.NativeAPI.importZip(new File([bytes], 'legacy.zip', { type: 'application/zip' }));
+
+      // Make it look like a store written before ids existed.
+      const db = await new Promise((res, rej) => {
+        const r = indexedDB.open('revery_tex_zip');
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      });
+      await new Promise((res, rej) => {
+        const tx = db.transaction('meta', 'readwrite');
+        tx.objectStore('meta').delete('id');
+        tx.oncomplete = res;
+        tx.onerror = () => rej(tx.error);
+      });
+      db.close();
+      return true;
+    })()`, true);
+
+    // Boot 1: the store has no id, so one is adopted here.
+    await cdp.send('Page.reload', {});
+    await sleep(600);
+    await cdp.waitFor('!!window.__reveryTexApp && window.__reveryTexApp.ready',
+      { what: 'the legacy project after its first reload', timeoutMs: 60000 });
+
+    const firstBoot = await cdp.evaluate(`(async () => {
+      await window.NativeAPI.writeBackup('main.tex', ${JSON.stringify(MARK)});
+      const keys = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith('revery_tex_zipbackup:')
+            && (localStorage.getItem(k) || '').includes(${JSON.stringify(MARK)})) keys.push(k);
+      }
+      return {
+        keys,
+        offered: (await window.NativeAPI.listStaleBackups()).map(b => b.content)
+      };
+    })()`, true);
+
+    check('a legacy store adopts an id and writes its backup under it',
+      firstBoot.keys.length === 1 && firstBoot.offered.includes(MARK),
+      firstBoot.keys.join(' | '));
+
+    // Boot 2: the assertion. A minted-but-unstored id changes here, and the
+    // backup written a moment ago becomes unreachable.
+    //
+    // Deliberately *not* waiting on __reveryTexApp.ready first. revery_tex_app.js
+    // ends with a top-level `await loadProjects()` and assigns
+    // window.__reveryTexApp below it, so while the recovery prompt is open the
+    // module is still evaluating and that object does not exist yet. Any
+    // reload-with-a-pending-backup test that waits for `ready` before answering
+    // the prompt waits forever. window.NativeAPI is a different module and is
+    // available throughout, which is what this reads instead.
+    await cdp.send('Page.reload', {});
+    await sleep(600);
+
+    const secondBoot = await cdp.evaluate(`(async () => {
+      // Settle one way or the other: the prompt appears, or boot finishes
+      // without one. Bounded, so a regression fails rather than hangs.
+      const deadline = Date.now() + 10000;
+      while (Date.now() < deadline
+             && !document.querySelector('.dlg')
+             && !(window.__reveryTexApp && window.__reveryTexApp.ready)) {
+        await new Promise(r => setTimeout(r, 100));
+      }
+
+      // The prompt opening at all is the backup having been found under the
+      // same id — the thing being tested, before anything else is asked.
+      const asked = !!document.querySelector('.dlg');
+      const offered = (await window.NativeAPI.listStaleBackups()).map(b => b.content);
+
+      // A *fresh* backup, so its key carries the id this boot is actually
+      // using. Re-reading the key written last boot would compare a stale
+      // string with itself and could never fail.
+      await window.NativeAPI.writeBackup('notes.bib', ${JSON.stringify(MARK2)});
+      const keys = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith('revery_tex_zipbackup:')
+            && (localStorage.getItem(k) || '').includes(${JSON.stringify(MARK2)})) keys.push(k);
+      }
+
+      for (const b of document.querySelectorAll('.dlg-foot button')) {
+        if (/not now/i.test(b.textContent)) { b.click(); break; }
+      }
+      await new Promise(r => setTimeout(r, 200));
+
+      // Leave nothing behind for the checks after this one.
+      await window.NativeAPI.discardBackup('main.tex');
+      await window.NativeAPI.discardBackup('notes.bib');
+      return { asked, offered, keys, dialogGone: !document.querySelector('.dlg') };
+    })()`, true);
+
+    // The whole point: same id, so the same prefix, so the backup is still found.
+    const idOf = (k) => (k || '').split(':')[1];
+    check('the adopted id survives a reload',
+      secondBoot.keys.length === 1 && idOf(secondBoot.keys[0]) === idOf(firstBoot.keys[0]),
+      `${idOf(firstBoot.keys[0])} → ${idOf(secondBoot.keys[0]) || 'nothing'}`);
+    check("and the previous session's backup is still offered",
+      secondBoot.offered.includes(MARK), secondBoot.offered.join(' | ') || 'nothing offered');
+    check('recovery is actually prompted for it', secondBoot.asked);
+    check('the recovery prompt is left closed', secondBoot.dialogGone);
+
+    // Answering the prompt lets the module finish evaluating, so the driver
+    // object exists again for everything after this.
+    await cdp.waitFor('!!window.__reveryTexApp && window.__reveryTexApp.ready',
+      { what: 'the legacy project once the recovery prompt is answered', timeoutMs: 60000 });
 
     /* ── a bad import must not destroy the project ─────────────────── */
     // The store *is* the project on this backend — no folder behind it, no

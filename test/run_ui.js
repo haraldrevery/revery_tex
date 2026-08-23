@@ -2118,6 +2118,13 @@ async function main() {
     })()`, true);
     check('right-clicking a file offers rename and delete',
       ['Rename…', 'Delete…'].every(l => renamed.labels.includes(l)), renamed.labels.join(' | '));
+    // The browser half of the feature-detection contract. Chrome has no
+    // openContainingFolder, so the row must not be here — a row that appeared
+    // and then failed on click is the exact thing presence-gating prevents.
+    // Its presence on the desktop is asserted in test/run_electron.js, which is
+    // the only shell where clicking it could work.
+    check('and does not offer a file manager in a browser',
+      !renamed.labels.some(l => /containing folder/i.test(l)), renamed.labels.join(' | '));
     check('rename moves the file and the editor follows it',
       renamed.gone && renamed.there && renamed.title === 'notes/renamed.tex',
       `${renamed.prefilled} → ${renamed.title}`);
@@ -2480,6 +2487,35 @@ async function main() {
     check('and clears when a drag is cancelled instead',
       !glow.afterCancel.panel && glow.afterCancel.rows === 0 && glow.afterCancel.dragging === 0,
       JSON.stringify(glow.afterCancel));
+
+    // Dropping a file the app cannot read as UTF-8 must be refused, not
+    // repaired. `file.text()` decodes leniently, so a Latin-1 .tex came back
+    // with every accented byte replaced by U+FFFD — and the import writes text
+    // files straight out with dirty:false, so the mangled version was on disk
+    // before anyone had a chance to look at it.
+    const latin1 = await cdp.evaluate(`(async () => {
+      const tree = document.getElementById('filetree');
+      const before = document.querySelectorAll('#filetree .node[data-path]').length;
+
+      // 0xE9 is é in Latin-1 and is not valid UTF-8 on its own.
+      const bytes = new Uint8Array([0x25, 0x20, 0x63, 0x61, 0x66, 0xe9, 0x0a]);
+      const dt = new DataTransfer();
+      dt.items.add(new File([bytes], 'latin1.tex', { type: 'text/plain' }));
+      tree.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
+      tree.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+      await new Promise(r => setTimeout(r, 400));
+
+      const paths = [...document.querySelectorAll('#filetree .node[data-path]')]
+        .map(n => n.dataset.path);
+      return {
+        added: paths.length - before,
+        present: paths.includes('latin1.tex'),
+        status: document.getElementById('status').textContent
+      };
+    })()`, true);
+    check('a file that is not UTF-8 is refused rather than mangled',
+      !latin1.present && latin1.added === 0, latin1.status);
+    check('and the refusal says why', /UTF-8/i.test(latin1.status), latin1.status);
 
     // Moving a file that something \include's breaks the reference, and LaTeX
     // only *warns* about a missing \include — so the document still compiles,

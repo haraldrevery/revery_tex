@@ -171,6 +171,21 @@ handle('fs:writeFile', (p, c, expect) => core.writeFile(requireRoot(), p, c, exp
 handle('fs:writeBinaryFile', (p, b64) => core.writeBinaryFile(requireRoot(), p, b64));
 handle('fs:deleteFile', (p) => core.deleteFile(requireRoot(), p));
 handle('fs:renameFile', (from, to) => core.renameFile(requireRoot(), from, to));
+
+// The one place this app reaches outside itself, and it reaches a file manager
+// rather than a browser. `setWindowOpenHandler` and the `will-navigate` block
+// above govern the *webview*; this goes out through the main process, so it is
+// not a hole in either — the app still refuses to become a browser, which is
+// what keeps `Source code` copying its URL rather than opening it.
+//
+// The renderer names a project-relative path and nothing else. Which directory
+// that means, and whether it is inside the project at all, is decided by
+// core.containingDir — never here, and never by the page.
+//
+// Note this does not use Electron's `shell`: openPath never settles on a Linux
+// desktop and showItemInFolder means something else. See launchFileManager.
+handle('fs:openContainingFolder', (p) =>
+  core.launchFileManager(core.containingDir(p, requireRoot())));
 handle('fs:writeBackup', (p, c) => core.writeBackup(backupDir(), requireRoot(), p, c));
 handle('fs:listStaleBackups', () => core.listStaleBackups(backupDir(), requireRoot()));
 handle('fs:discardBackup', (p) => core.discardBackup(backupDir(), requireRoot(), p));

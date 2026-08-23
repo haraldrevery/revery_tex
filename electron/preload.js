@@ -27,6 +27,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   writeBinaryFile: (path, b64) => call('fs:writeBinaryFile', path, b64),
   deleteFile: (path) => call('fs:deleteFile', path),
   renameFile: (from, to) => call('fs:renameFile', from, to),
+  // Takes a path, never a program and never a flag: what gets launched, and on
+  // which directory, is decided in the main process.
+  openContainingFolder: (path) => call('fs:openContainingFolder', path),
   writeBackup: (path, content) => call('fs:writeBackup', path, content),
   listStaleBackups: () => call('fs:listStaleBackups'),
   discardBackup: (path) => call('fs:discardBackup', path),

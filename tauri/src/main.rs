@@ -109,12 +109,32 @@ fn get_root(state: &State<'_, RootPath>) -> Result<PathBuf, String> {
 
 /* ── atomic write ────────────────────────────────────────────────────── */
 
+/// Should a failed rename fall back to copy-then-delete?
+///
+/// Gated per OS, because `raw_os_error()` is an errno on Unix and a Win32 code
+/// on Windows and the two ranges collide. Ungated, this matched 17 and 32 on
+/// Linux as well — where they are `EEXIST` and `EPIPE`, not the Windows codes
+/// intended — so a rename refused because the destination was a non-empty
+/// directory was routed into the snapshot-and-copy fallback and surfaced as a
+/// misleading "cannot create backup".
+///
+/// The sets are also chosen to *mean* the same thing as the Electron twin's
+/// (`EXDEV || EBUSY || EPERM` in fs_core.js) rather than merely to overlap with
+/// it: Node maps ERROR_SHARING_VIOLATION to EBUSY and ERROR_ACCESS_DENIED to
+/// EPERM, so each arm below is that condition spelled in the local dialect.
+/// Falling back to a copy is safe in all of them because tmp and dest are always
+/// on the same filesystem.
+#[cfg(unix)]
 fn is_cross_device_err(e: &std::io::Error) -> bool {
-    // 18 = EXDEV (Unix). 17 = ERROR_NOT_SAME_DEVICE (Windows).
-    // 32 = ERROR_SHARING_VIOLATION (Windows: antivirus or a sync agent briefly
-    //      holding the destination). Safe to fall back to a copy here because
-    //      tmp and dest are always on the same filesystem.
-    matches!(e.raw_os_error(), Some(18) | Some(17) | Some(32))
+    // EXDEV(18), EBUSY(16) — a mountpoint or a busy target, EPERM(1).
+    matches!(e.raw_os_error(), Some(18) | Some(16) | Some(1))
+}
+
+#[cfg(windows)]
+fn is_cross_device_err(e: &std::io::Error) -> bool {
+    // ERROR_NOT_SAME_DEVICE(17), ERROR_SHARING_VIOLATION(32) — antivirus or a
+    // sync agent briefly holding the destination — and ERROR_ACCESS_DENIED(5).
+    matches!(e.raw_os_error(), Some(17) | Some(32) | Some(5))
 }
 
 #[inline]
@@ -209,10 +229,25 @@ fn atomic_write_file(tmp: &Path, dest: &Path, content: &[u8]) -> Result<(), Stri
     Ok(())
 }
 
+/// The scratch file an atomic write builds before renaming it over `dest`.
+///
+/// Unique per call, not just per destination. `<dest>.revery_tmp` assumed one
+/// process per project, and this app can have two on the same folder — the
+/// Tauri and Electron shells, or two instances of either. Both would build
+/// their scratch file at the same path, and the loser's half-written bytes
+/// could be renamed over the file by the winner.
+///
+/// The pid distinguishes processes and the counter distinguishes writes within
+/// one, so two saves racing in the same millisecond still cannot collide.
 fn tmp_for(dest: &Path) -> PathBuf {
+    use std::sync::atomic::AtomicU64;
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::SeqCst);
     dest.with_file_name(format!(
-        "{}.revery_tmp",
-        dest.file_name().unwrap_or_default().to_string_lossy()
+        "{}.{}.{}.revery_tmp",
+        dest.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id(),
+        n
     ))
 }
 
@@ -476,6 +511,76 @@ fn delete_file(path: String, state: State<'_, RootPath>) -> Result<(), String> {
     delete_file_impl(&path, &get_root(&state)?)
 }
 
+/* ── showing a folder to the user ────────────────────────────────────── */
+//
+// The second place in this binary that starts a process, and deliberately not
+// governed by tex_run.rs's allowlist — see the note in CLAUDE.md. The two are
+// different problems: tex_run runs compilers *on a directory the user may have
+// downloaded*, so what it may run is the whole question. This runs one fixed
+// program named below, on one absolute path this file computed, and reads
+// nothing back from it. Nothing here is reachable from a document.
+
+/// The folder to open for `raw`: itself if it is a directory, else its parent.
+///
+/// Split from the launch so the deciding half is a pure function. Handing a
+/// path to a file manager is the one thing the test suite cannot exercise — it
+/// would open a window on whatever machine ran it — so every refusal lives here,
+/// where a test can reach it.
+///
+/// safe_path_inside canonicalises, so a symlink pointing out of the project is
+/// refused exactly as it is for a write, and the result is absolute — which is
+/// also what stops it being read as an option by the program launched below.
+fn containing_dir(raw: &str, root: &Path) -> Result<PathBuf, String> {
+    let abs = safe_path_inside(&root.join(raw).to_string_lossy(), root)?;
+    if abs.is_dir() {
+        return Ok(abs);
+    }
+    // A path that no longer exists resolves to its parent, which is the useful
+    // answer for a file deleted out from under the tree rather than an error.
+    abs.parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| format!("No containing folder for: {}", abs.display()))
+}
+
+/// Hand one absolute directory to the platform's file manager.
+///
+/// No shell, and the program is a literal in this file rather than anything
+/// resolved from the environment or named by the caller.
+fn launch_file_manager(dir: &Path) -> Result<(), String> {
+    // explorer.exe returns exit code 1 even when it succeeds, and a file manager
+    // can take seconds to appear, so nothing here waits for or reads a status.
+    // Failing to *launch* — no such program — is the only reportable failure.
+    #[cfg(target_os = "windows")]
+    let program = "explorer.exe";
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let program = "xdg-open";
+
+    let child = std::process::Command::new(program)
+        .arg(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Cannot open the file manager ({program}): {e}"))?;
+
+    // Reaped on a thread of its own. Dropping the Child without waiting leaves a
+    // zombie for the life of the app, and waiting here would block the webview
+    // until the user closed their file manager.
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn open_containing_folder(path: String, state: State<'_, RootPath>) -> Result<(), String> {
+    let dir = containing_dir(&path, &get_root(&state)?)?;
+    launch_file_manager(&dir)
+}
+
 #[tauri::command]
 fn rename_file(from: String, to: String, state: State<'_, RootPath>) -> Result<(), String> {
     rename_file_impl(&from, &to, &get_root(&state)?)
@@ -695,6 +800,7 @@ fn main() {
             write_binary_file,
             delete_file,
             rename_file,
+            open_containing_folder,
             write_backup,
             list_stale_backups,
             discard_backup,
@@ -742,6 +848,18 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// Scratch files left behind in `dir`.
+    ///
+    /// Asserted by scanning rather than by name: tmp_for is unique per call, so
+    /// rebuilding the name in a test would check a path that never existed and
+    /// pass whatever happened.
+    fn leftover_scratch(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir).unwrap().flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains("revery_tmp") || n.contains("revery_bak"))
+            .collect()
+    }
+
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
             "revery-tex-test-{tag}-{}",
@@ -787,6 +905,83 @@ mod tests {
         fs::remove_dir_all(&outside).ok();
     }
 
+    /* ── the folder handed to a file manager ─────────────────────────── */
+    //
+    // Only the deciding half is tested here. launch_file_manager is the one
+    // function in this binary a test cannot call: it would open a file manager
+    // window on whatever machine ran the suite. That is precisely why the
+    // decision lives in containing_dir, where it can be reached.
+
+    #[test]
+    #[ignore = "opens a real file manager window; run explicitly with --ignored"]
+    fn launch_file_manager_actually_launches() {
+        let root = tmpdir("launch");
+        fs::create_dir(root.join("figures")).unwrap();
+        let dir = containing_dir("figures", &root).unwrap();
+        launch_file_manager(&dir).expect("should launch");
+        // Give the reaper thread a moment; a zombie would show as a defunct
+        // child of this test process.
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn containing_dir_gives_a_dir_itself_and_a_file_its_parent() {
+        let root = tmpdir("containing");
+        fs::create_dir(root.join("chapters")).unwrap();
+        fs::write(root.join("chapters/one.tex"), b"x").unwrap();
+        fs::write(root.join("main.tex"), b"x").unwrap();
+        let real = root.canonicalize().unwrap();
+
+        assert_eq!(containing_dir("chapters", &root).unwrap(), real.join("chapters"));
+        assert_eq!(
+            containing_dir("chapters/one.tex", &root).unwrap(),
+            real.join("chapters")
+        );
+        assert_eq!(containing_dir("main.tex", &root).unwrap(), real);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A file deleted out from under the tree still has a folder worth opening,
+    /// which is more useful than refusing.
+    #[test]
+    fn containing_dir_resolves_a_missing_path_to_its_parent() {
+        let root = tmpdir("containing-gone");
+        fs::create_dir(root.join("figures")).unwrap();
+        assert_eq!(
+            containing_dir("figures/gone.png", &root).unwrap(),
+            root.canonicalize().unwrap().join("figures")
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Showing a folder is a small power, but the path still came from the
+    /// renderer, so it is held to the same containment as a write.
+    #[test]
+    fn containing_dir_refuses_to_leave_the_project() {
+        let root = tmpdir("containing-escape");
+        fs::write(root.join("in.tex"), b"x").unwrap();
+        assert!(containing_dir("../../etc/passwd", &root).is_err());
+        assert!(containing_dir("/etc", &root).is_err());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn containing_dir_refuses_a_symlink_out_of_the_project() {
+        let root = tmpdir("containing-symlink");
+        let outside = tmpdir("containing-symlink-outside");
+        fs::write(outside.join("figure.png"), b"x").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("out")).unwrap();
+
+        // Refused before anything is launched — both the link itself and a path
+        // reached through it.
+        assert!(containing_dir("out", &root).is_err());
+        assert!(containing_dir("out/figure.png", &root).is_err());
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
     #[test]
     fn allows_creating_nonexistent_nested_path() {
         let root = tmpdir("create");
@@ -811,6 +1006,32 @@ mod tests {
         fs::remove_dir_all(&outside).ok();
     }
 
+    /// `raw_os_error()` is an errno on Unix and a Win32 code on Windows, and the
+    /// two ranges collide. Ungated, this function matched 17 and 32 on Linux —
+    /// EEXIST and EPIPE — because those are the Windows codes it wanted. A
+    /// rename refused because the destination was a non-empty directory was then
+    /// routed into the snapshot-and-copy fallback and reported as a confusing
+    /// "cannot create backup".
+    #[cfg(unix)]
+    #[test]
+    fn cross_device_check_does_not_claim_unix_errnos_it_did_not_mean() {
+        use std::io::{Error, ErrorKind};
+        let err = |n| Error::from_raw_os_error(n);
+
+        assert!(is_cross_device_err(&err(18)), "EXDEV is the whole point");
+        assert!(is_cross_device_err(&err(16)), "EBUSY, as the Electron twin accepts");
+        assert!(is_cross_device_err(&err(1)), "EPERM, likewise");
+
+        // The regression: these are the Windows codes, and mean something else here.
+        assert!(!is_cross_device_err(&err(17)), "EEXIST is not a cross-device rename");
+        assert!(!is_cross_device_err(&err(32)), "EPIPE is not a cross-device rename");
+
+        assert!(!is_cross_device_err(&err(2)), "ENOENT");
+        assert!(!is_cross_device_err(&err(13)), "EACCES");
+        // An error carrying no OS code at all must not fall into the fallback.
+        assert!(!is_cross_device_err(&Error::new(ErrorKind::Other, "no errno")));
+    }
+
     #[test]
     fn atomic_write_overwrites_and_cleans_up() {
         let root = tmpdir("atomic");
@@ -819,7 +1040,7 @@ mod tests {
 
         atomic_write_file(&tmp_for(&dest), &dest, b"new content").unwrap();
         assert_eq!(fs::read_to_string(&dest).unwrap(), "new content");
-        assert!(!tmp_for(&dest).exists(), "temp file must not survive");
+        assert!(leftover_scratch(&root).is_empty(), "temp file must not survive");
         fs::remove_dir_all(&root).ok();
     }
 
@@ -850,7 +1071,7 @@ mod tests {
         assert_eq!(read_text_impl("main.tex", &root).unwrap().content, "edited by the user");
         // Bytes on disk, not just what we read back through our own code.
         assert_eq!(fs::read_to_string(root.join("main.tex")).unwrap(), "edited by the user");
-        assert!(!root.join("main.tex.revery_tmp").exists(), "temp must not survive");
+        assert!(leftover_scratch(&root).is_empty(), "temp must not survive");
         fs::remove_dir_all(&root).ok();
     }
 
@@ -874,7 +1095,7 @@ mod tests {
         let png: [u8; 10] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff];
         write_binary_impl("fig/logo.png", &STANDARD.encode(png), &root).unwrap();
         assert_eq!(fs::read(root.join("fig/logo.png")).unwrap(), png);
-        assert!(!root.join("fig/logo.png.revery_tmp").exists(), "temp must not survive");
+        assert!(leftover_scratch(&root.join("fig")).is_empty(), "temp must not survive");
         fs::remove_dir_all(&root).ok();
     }
 
@@ -1001,10 +1222,7 @@ mod tests {
         }
         assert_eq!(read_text_impl("main.tex", &root).unwrap().content, "revision 4");
         // No .revery_tmp or .revery_bak left lying around after five writes.
-        let junk: Vec<_> = fs::read_dir(&root).unwrap().flatten()
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .filter(|n| n.contains("revery_tmp") || n.contains("revery_bak"))
-            .collect();
+        let junk = leftover_scratch(&root);
         assert!(junk.is_empty(), "left behind: {junk:?}");
         fs::remove_dir_all(&root).ok();
     }

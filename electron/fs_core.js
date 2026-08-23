@@ -11,6 +11,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { spawn } = require('child_process');
 
 /* ── path safety ─────────────────────────────────────────────────────── */
 
@@ -70,6 +71,69 @@ function safePathInside(raw, root) {
   return check;
 }
 
+/**
+ * The folder to open for `raw`: itself if it is a directory, else its parent.
+ *
+ * Separate from the launch on purpose. Handing a file manager a path is the one
+ * thing in this app the test suite cannot exercise — it would open a window on
+ * whatever machine ran it — so the half that decides *which* path is a pure
+ * function with no side effect, and that half is where every refusal lives.
+ *
+ * safePathInside does the work: it canonicalises, so a symlink pointing out of
+ * the project is refused here exactly as it is for a write, and the result is
+ * absolute — which is also what keeps it from being read as an option by the
+ * program that is eventually handed it.
+ */
+function containingDir(raw, root) {
+  const abs = safePathInside(raw, root);
+  // A path that no longer exists resolves to its parent, which is the useful
+  // answer for a file deleted out from under the tree rather than an error.
+  return fs.existsSync(abs) && fs.statSync(abs).isDirectory() ? abs : path.dirname(abs);
+}
+
+/**
+ * The program that shows a folder, per platform.
+ *
+ * A literal per branch, never anything resolved from the environment or named
+ * by the renderer — the same rule tex_run.js follows, for the same reason.
+ */
+function fileManagerProgram(platform = process.platform) {
+  if (platform === 'win32') return 'explorer.exe';
+  if (platform === 'darwin') return 'open';
+  return 'xdg-open';
+}
+
+/**
+ * Hand one absolute directory to the platform's file manager.
+ *
+ * Spawned rather than handed to Electron's `shell`, which is the surprise here
+ * and is load-bearing. `shell.openPath()` returns a promise that **never
+ * settles** on this Linux desktop — measured, not assumed: six seconds with no
+ * resolution and no file manager, in a headed window as well as a headless one.
+ * An awaited call would therefore hang the IPC reply forever. The other
+ * candidate, `shell.showItemInFolder()`, does work, but it *selects* the item,
+ * which for a folder row means opening its parent — a different feature in the
+ * shell people are least likely to be running when it is checked.
+ *
+ * So both shells run the same program on the same computed directory, and the
+ * Rust twin in tauri/src/main.rs is `launch_file_manager`. Keep them in step.
+ */
+function launchFileManager(dir) {
+  const program = fileManagerProgram();
+  return new Promise((resolve, reject) => {
+    // detached + ignored stdio: the file manager outlives us and we never read
+    // from it. Nothing waits for it to exit — explorer.exe returns 1 even on
+    // success, and a file manager stays open as long as the user wants it.
+    const child = spawn(program, [dir], { detached: true, stdio: 'ignore' });
+    // 'spawn' fires once the process is actually running, 'error' on ENOENT —
+    // so a missing program is reported rather than silently swallowed, without
+    // waiting for the window to close.
+    child.once('spawn', () => { child.unref(); resolve(); });
+    child.once('error', (err) =>
+      reject(new Error(`Cannot open the file manager (${program}): ${err.message}`)));
+  });
+}
+
 /* ── atomic write ────────────────────────────────────────────────────── */
 
 const isCrossDeviceErr = (e) => e && (e.code === 'EXDEV' || e.code === 'EBUSY' || e.code === 'EPERM');
@@ -84,7 +148,23 @@ function syncParentDir(filePath) {
   } catch { /* best effort */ }
 }
 
-const tmpFor = (dest) => path.join(path.dirname(dest), path.basename(dest) + '.revery_tmp');
+/**
+ * The scratch file an atomic write builds before renaming it over `dest`.
+ *
+ * Unique per call, not just per destination. `<dest>.revery_tmp` assumed one
+ * process per project, and this app can have two on the same folder — the
+ * Electron and Tauri shells, or two instances of either. Both would build their
+ * scratch file at the same path, and the loser's half-written bytes could be
+ * renamed over the file by the winner.
+ *
+ * The pid distinguishes processes and the counter distinguishes writes within
+ * one, matching tmp_for in tauri/src/main.rs. Callers must not assume the name:
+ * it is returned, never reconstructed.
+ */
+let tmpSeq = 0;
+const tmpFor = (dest) =>
+  path.join(path.dirname(dest),
+    `${path.basename(dest)}.${process.pid}.${tmpSeq++}.revery_tmp`);
 
 /** Write `content` to `dest` atomically: temp file, fsync, rename. */
 function atomicWriteFile(dest, content) {
@@ -298,7 +378,9 @@ function discardBackup(backupDir, root, rel) {
 }
 
 module.exports = {
-  safePath, safePathInside, isInside, atomicWriteFile, isCrossDeviceErr, tmpFor,
+  safePath, safePathInside, isInside, containingDir,
+  fileManagerProgram, launchFileManager,
+  atomicWriteFile, isCrossDeviceErr, tmpFor,
   readDirectory, readTextFile, readBinaryFile, writeFile, writeBinaryFile,
   deleteFile, renameFile, stampOf,
   writeBackup, listStaleBackups, discardBackup, backupKey
