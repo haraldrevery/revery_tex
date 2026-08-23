@@ -747,11 +747,30 @@ function dirtyCount() {
   return n;
 }
 
+/**
+ * The save currently in flight, or null.
+ *
+ * Save is reachable from the button, from Ctrl+S and from compile()'s
+ * force-save, and the button stays enabled throughout a run because the files
+ * are still dirty until each one is written. Two overlapping runs both read
+ * `f.stamp` at the moment of their own write (in saveAllInner) while the new stamp is
+ * written back only *after* the await, so both could send the pre-write stamp
+ * and the second would be told its file had changed on disk — a conflict prompt
+ * about nothing, on a file only this app had touched.
+ *
+ * The writes themselves were never at risk; the stamps saw to that. This is
+ * about not asking the user a question that has no right answer.
+ */
+let savingNow = null;
+
 function refreshDirty() {
   const n = dirtyCount();
   const f = currentPath && project ? project.files.get(currentPath) : null;
   $('dirty').textContent = f && f.dirty ? 'modified' : '';
-  $('save').disabled = !project?.onDisk || n === 0;
+  // …and while a save is running: the files stay dirty until each is written,
+  // so without this the button invites a second click that the guard in
+  // saveAll then has to absorb. Guarding and saying so are different jobs.
+  $('save').disabled = !project?.onDisk || n === 0 || !!savingNow;
   $('save').textContent = n > 1 ? `Save (${n})` : 'Save';
   // Export works from whatever is in the editor, so it needs a project and
   // nothing else — including for the read-only dev-server fixtures.
@@ -763,10 +782,19 @@ function refreshDirty() {
 }
 
 async function saveAll() {
+  // Join the run already in progress rather than starting a second one. The
+  // caller still gets a promise that settles when the save is done, so
+  // compile()'s `await saveAll()` keeps its meaning.
+  if (savingNow) return savingNow;
   if (!project?.onDisk) return;
   const pending = [...project.files].filter(([, f]) => f.dirty && !f.binary);
   if (!pending.length) return;
 
+  savingNow = saveAllInner(pending);
+  try { return await savingNow; } finally { savingNow = null; }
+}
+
+async function saveAllInner(pending) {
   setStatus(`saving ${pending.length} file(s)…`, 'warn');
   // Written, not attempted. Conflict resolution can end with a file *reloaded*
   // from disk — the opposite of saved — and counting the attempt reported
@@ -1618,7 +1646,20 @@ async function importDroppedFiles(fileList, parent) {
     const isText = TEXT_EXT_RE.test(path);
     try {
       if (isText) {
-        const content = await file.text();
+        // Decoded strictly, and refused rather than repaired. `file.text()` is a
+        // *lenient* UTF-8 decode: a Latin-1 .tex comes back with every accented
+        // byte replaced by U+FFFD, and the write below then puts that on disk
+        // with dirty:false — mangled before anyone had a chance to look at it.
+        // Every other refusal in this loop says why and moves on; so does this.
+        let content;
+        try {
+          content = new TextDecoder('utf-8', { fatal: true })
+            .decode(await file.arrayBuffer());
+        } catch {
+          setStatus(`✗ ${file.name} is not UTF-8 text — convert it first`, 'err');
+          refused++;
+          continue;
+        }
         project.files.set(path, { content, binary: false, dirty: true, stamp: null });
         if (canWriteDisk() && NativeAPI.writeFile) {
           const stamp = await NativeAPI.writeFile(path, content, null);
@@ -2183,6 +2224,23 @@ async function stepHistory(back) {
 const undoTree = () => stepHistory(true);
 const redoTree = () => stepHistory(false);
 
+/**
+ * Show one entry's folder in the platform's file manager.
+ *
+ * The path goes across as-is and the backend decides what it means: a directory
+ * opens itself, a file opens its parent. Deliberately not worked out here —
+ * the renderer knowing which is which would put a second copy of that rule on
+ * the side of the boundary that cannot enforce it anyway.
+ */
+async function revealPath(path) {
+  try {
+    await NativeAPI.openContainingFolder(path);
+    setStatus(`opened ${dirOf(path) || project.key} in the file manager`, 'ok');
+  } catch (err) {
+    setStatus(`✗ ${err.message || err}`, 'err');
+  }
+}
+
 async function renameEntry(path, isDir) {
   if (!isDir && path === project.main) {
     setStatus('✗ that is the main document — pick a different one first', 'err');
@@ -2396,6 +2454,26 @@ function treeMenuRows(node) {
     // Renaming is about one path, so it stays singular even inside a selection.
     if (!many) {
       rows.push({ type: 'action', label: 'Rename…', run: () => renameEntry(node.path, node.dir) });
+    }
+    // Presence of the method is the signal, never a check on the environment
+    // name — the browser backends omit it because there is no folder to show.
+    //
+    // Singular like Rename, for the same reason: opening five file managers for
+    // a five-row selection is not what the gesture meant.
+    //
+    // `onDisk` because a fixture or an imported zip has no folder at all, and
+    // the empty-directory test because a folder made in the tree lives only in
+    // `emptyDirs` until something lands in it — there would be nothing on disk
+    // to point a file manager at, and the backend would refuse a moment later.
+    if (!many && project?.onDisk && NativeAPI.openContainingFolder
+        && !(node.dir && filesUnder(node.path).length === 0)) {
+      rows.push({
+        type: 'action',
+        label: 'Open containing folder',
+        title: node.dir ? 'Show this folder in the file manager'
+                        : 'Show the folder this file is in',
+        run: () => revealPath(node.path)
+      });
     }
     rows.push({
       type: 'action',
@@ -3671,6 +3749,14 @@ window.__reveryTexApp = {
   },
   /** The bytes the Export button would download — a click gives the driver nothing. */
   async exportBytes() { return project ? (await buildExportZip()).bytes : null; },
+  /**
+   * The Save button's action, callable directly.
+   *
+   * Exposed so a driver can start two at once — the button disables itself
+   * during a run, so clicking it twice cannot reach the overlap this guards
+   * against. See savingNow.
+   */
+  saveAll() { return saveAll(); },
   setBuffer(path, text) {
     const f = project?.files.get(path);
     if (!f) return false;

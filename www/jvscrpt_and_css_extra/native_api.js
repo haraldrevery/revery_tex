@@ -52,6 +52,11 @@ const tauriImpl = {
   deleteFile: (path) => invoke('delete_file', { path }),
   renameFile: (from, to) => invoke('rename_file', { from, to }),
 
+  // Shows a project folder in the platform's file manager. Desktop only, and
+  // absent rather than throwing on the three browser backends: there is no
+  // folder there to show. The caller checks for the method, never for a shell.
+  openContainingFolder: (path) => invoke('open_containing_folder', { path }),
+
   writeBackup: (path, content) => invoke('write_backup', { path, content }),
   listStaleBackups: () => invoke('list_stale_backups'),
   discardBackup: (path) => invoke('discard_backup', { path }),
@@ -125,6 +130,7 @@ const electronImpl = isElectron ? {
   writeBinaryFile: (path, bytes) => window.electronAPI.writeBinaryFile(path, bytesToB64(bytes)),
   deleteFile: (path) => window.electronAPI.deleteFile(path),
   renameFile: (from, to) => window.electronAPI.renameFile(from, to),
+  openContainingFolder: (path) => window.electronAPI.openContainingFolder(path),
 
   writeBackup: (path, content) => window.electronAPI.writeBackup(path, content),
   listStaleBackups: () => window.electronAPI.listStaleBackups(),

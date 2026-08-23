@@ -16,6 +16,7 @@
 // the app says plainly where the work lives.
 
 import { readZip, normalizeZipEntries } from './zip_core.js';
+import { staleBackups, readBackupRecords } from './backup_rules.js';
 
 const DB_NAME = 'revery_tex_zip';
 const FILES = 'files';
@@ -63,13 +64,64 @@ function run(store, mode, fn) {
   }));
 }
 
+/**
+ * The stored project id, creating and storing one if this project has none.
+ *
+ * Get and conditional put in a **single** transaction. Two tabs booting the
+ * same store would otherwise each mint an id, and whichever lost the race would
+ * spend the session writing crash backups under a prefix nothing reads again.
+ * IndexedDB serialises readwrite transactions on a store, so the second tab's
+ * `get` sees the first tab's `put`.
+ *
+ * Not built on `run()`: that helper ends with `req.onsuccess = …` to capture a
+ * result, which would silently replace the handler this needs on the `get` to
+ * decide whether to put at all.
+ */
+function ensureProjectId(name) {
+  return open().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(META, 'readwrite');
+    const made = newProjectId(name);
+    let id = made;
+    const got = tx.objectStore(META).get('id');
+    got.onsuccess = () => {
+      if (got.result === undefined) tx.objectStore(META).put(made, 'id');
+      else id = got.result;
+    };
+    // On complete, never on the request: the id is not the project's until the
+    // transaction commits, and the next boot has to read back what this wrote.
+    tx.oncomplete = () => resolve(id);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('storage transaction aborted'));
+  }));
+}
+
 const getFile = (path) => run(FILES, 'readonly', (s) => s.get(path));
 const allFiles = () => run(FILES, 'readonly', (s) => s.getAll());
 const getMeta = (key) => run(META, 'readonly', (s) => s.get(key));
 
-/* ── the backend ─────────────────────────────────────────────────────── */
+/* ── which project this is ───────────────────────────────────────────── */
+//
+// The zip's *filename* is not an identity. Two archives both called `thesis.zip`
+// are two different projects, and crash backups keyed on the name meant one
+// project's unsaved text was offered as recovery for the other's same-named
+// file — and, once accepted, saved over it with no conflict, because the stamp
+// belonged to the file that was actually open.
+//
+// Sequential rather than concurrent, which is what made it easy to miss:
+// importZip clears the store, so the two projects never coexist. Import A, type,
+// crash; import a different thesis.zip; A's text is offered for B.
+//
+// This is the same bug the web-fs backend fixed with identify()/rootId, and the
+// desktop backends never had because they hash an absolute path. There is no
+// folder handle here to ask `isSameEntry`, so the id is simply generated at
+// import and stored beside the name.
 
 let projectName = null;
+let projectId = null;
+
+/** A fresh project id. Same shape as the web-fs one, and unique per import. */
+const newProjectId = (name) =>
+  `${name}-${(globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)).slice(0, 12)}`;
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -110,6 +162,7 @@ export const webZipImpl = {
     }
 
     const name = (blob.name || 'project').replace(/\.zip$/i, '') || 'project';
+    const id = newProjectId(name);
     const now = Date.now();
 
     const db = await open();
@@ -128,9 +181,13 @@ export const webZipImpl = {
       files.clear();
       for (const e of entries) files.put({ path: e.path, bytes: e.bytes, mtime_ms: now });
       tx.objectStore(META).put(name, 'name');
+      // In the same transaction as the files: an id that landed without them,
+      // or files without an id, would key backups against the wrong project.
+      tx.objectStore(META).put(id, 'id');
     });
 
     projectName = name;
+    projectId = id;
     // Without this the browser may evict the project under storage pressure.
     // Best effort: Firefox prompts, Safari grants on engagement, and a refusal
     // is not a reason to fail the import.
@@ -150,6 +207,26 @@ export const webZipImpl = {
     const files = await allFiles().catch(() => []);
     if (!files.length) return null;
     projectName = name;
+    // Adopted *and stored*, on the same reload path that loads the name.
+    //
+    // A project imported before ids existed has none, and gets one here rather
+    // than falling back to the name, because the name is the thing that
+    // collides. Storing it is the whole point: an id that were only minted into
+    // this variable would be different on every boot, so each session's crash
+    // backups would be written under a prefix the next session never looks at —
+    // losing them every reload, forever, for any project never re-imported.
+    // That is worse than the collision the id exists to fix, since before it
+    // these projects keyed on the stable name and recovery worked.
+    //
+    // What *is* deliberately abandoned is narrower: backups written under the
+    // old name-based key, before this project had an id at all. They may belong
+    // to a different project of the same name, which is the bug being fixed.
+    //
+    // A store that cannot be written — quota, a private window — still opens
+    // its project. The session gets an id held only in memory, so its backups
+    // are unreachable next boot, and that is strictly better than refusing to
+    // load the project at all.
+    projectId = await ensureProjectId(name).catch(() => newProjectId(name));
     return name;
   },
 
@@ -241,30 +318,32 @@ export const webZipImpl = {
      desktop window. localStorage rather than IndexedDB: synchronous, so it
      survives the kind of shutdown an async write does not. */
   async writeBackup(path, content) {
+    if (!projectId) return;          // no identity yet, so nowhere safe to put it
     try {
-      localStorage.setItem(`revery_tex_zipbackup:${projectName}:${path}`,
+      localStorage.setItem(`revery_tex_zipbackup:${projectId}:${path}`,
         JSON.stringify({ path, saved: Date.now(), content }));
     } catch { /* quota — a backup is best effort, never fatal */ }
   },
 
+  /** Backups worth offering back. The rule lives in backup_rules.js. */
   async listStaleBackups() {
-    if (!projectName) return [];
-    const prefix = `revery_tex_zipbackup:${projectName}:`;
-    const out = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (!key || !key.startsWith(prefix)) continue;
-      let v;
-      try { v = JSON.parse(localStorage.getItem(key)); } catch { continue; }
-      if (!v || typeof v.path !== 'string') continue;
-      const rec = await getFile(v.path).catch(() => null);
-      if (rec && decoder.decode(rec.bytes) !== v.content) out.push(v);
-    }
-    return out;
+    if (!projectId) return [];
+    return staleBackups(
+      readBackupRecords(localStorage, `revery_tex_zipbackup:${projectId}:`),
+      // Throwing for a path the store no longer holds is the point: staleBackups
+      // reads that as "nothing there" and offers the backup, where the old
+      // `if (rec && …)` dropped it — in the one case it was the only copy left.
+      async (path) => {
+        const rec = await getFile(path);
+        if (!rec) throw new Error(`${path} is not in this project`);
+        return decoder.decode(rec.bytes);
+      }
+    );
   },
 
   async discardBackup(path) {
-    localStorage.removeItem(`revery_tex_zipbackup:${projectName}:${path}`);
+    if (!projectId) return;
+    localStorage.removeItem(`revery_tex_zipbackup:${projectId}:${path}`);
   }
 };
 

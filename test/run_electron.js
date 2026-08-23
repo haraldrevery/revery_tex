@@ -147,6 +147,7 @@ async function main() {
       backend: window.NativeAPI.env,
       desktop: window.NativeAPI.isDesktop,
       canOpen: !!window.NativeAPI.openFolder,
+      canReveal: typeof window.NativeAPI.openContainingFolder === 'function',
       importVisible: getComputedStyle(document.getElementById('importzip')).display !== 'none',
       noticeShown: !document.getElementById('notice').hidden,
       notice: document.getElementById('notice').textContent,
@@ -156,6 +157,10 @@ async function main() {
     check('electron backend selected', shell.backend === 'electron', shell.backend);
     check('reports itself as desktop', shell.desktop === true);
     check('can open folders', shell.canOpen);
+    // Present here and absent in every browser build, which is what puts the
+    // menu row on the desktop and nowhere else. Never invoked by this suite: it
+    // would open a file manager window on whatever machine ran it.
+    check('can show a folder in the file manager', shell.canReveal);
     check('no zip import offered', !shell.importVisible);
     // By text, not by whether the bar is showing at all. The bar has two
     // callers and on desktop the other one — the system-LaTeX offer — is
@@ -350,6 +355,122 @@ async function main() {
       console.log('  · no system TeX on this machine — live checks skipped');
     }
 
+    /* ── the row that reaches outside the app ─────────────────────────── */
+    // Checked for presence and for what it acts on, never clicked: clicking it
+    // opens a file manager on the machine running the suite.
+    /* ── two saves at once ─────────────────────────────────────────── */
+    // Save is reachable from the button, from Ctrl+S and from compile()'s
+    // force-save, and the button stays enabled through a run because the files
+    // are still dirty until each is written. Two overlapping runs both read
+    // f.stamp at the moment of their own write while the new stamp is written
+    // back only after the await, so both sent the pre-write stamp and the
+    // second was told its file had changed on disk — a conflict prompt about
+    // nothing, on a file only this app had touched.
+    //
+    // Needs a real project on disk, which is why it lives here: the dev-server
+    // fixtures are onDisk:false and saveAll returns immediately for them.
+    console.log('\n── concurrent saves ────────────────────────────────────────────');
+
+    // main.tex, not chapters/one.tex: the conflict checks above rewrite that
+    // one on disk behind the app's back, so its in-memory stamp is stale by
+    // design and a save there raises a *legitimate* conflict.
+    const concurrent = await cdp.evaluate(`(async () => {
+      const app = window.__reveryTexApp;
+      // Still a valid document: nothing after this compiles today, and a test
+      // added later should not inherit a broken main.tex.
+      const BODY = '\\\\documentclass{article}\\n\\\\begin{document}\\n'
+        + '% edited once, saved twice\\n\\\\end{document}\\n';
+      app.setBuffer('main.tex', BODY);
+      await new Promise(r => setTimeout(r, 50));
+
+      // The app asks about a conflict with its own in-page dialog, not
+      // window.confirm — so the harness's javascriptDialogOpening handler
+      // cannot answer it and an unexpected prompt would hang this evaluate
+      // forever, which reads as a dead suite rather than a failed check.
+      // Bounded, and the dialog counted, so the failure states its own name.
+      let asked = 0;
+      const watch = new MutationObserver(() => {
+        if (document.querySelector('.dlg')) asked++;
+      });
+      watch.observe(document.body, { childList: true, subtree: true });
+
+      // Count the writes at the boundary rather than reading the status line:
+      // autoCompile is on by this point, so saveAll awaits a compile and the
+      // status has moved on by the time it resolves. One write is the claim.
+      const realWrite = window.NativeAPI.writeFile;
+      let writes = 0;
+      window.NativeAPI.writeFile = (...a) => { writes++; return realWrite.apply(null, a); };
+
+      const both = Promise.allSettled([app.saveAll(), app.saveAll()]);
+      const timedOut = await Promise.race([
+        both.then(() => false),
+        new Promise(r => setTimeout(() => r(true), 8000))
+      ]);
+      watch.disconnect();
+      window.NativeAPI.writeFile = realWrite;
+
+      // Leave nothing open behind us, whatever happened.
+      for (const b of document.querySelectorAll('.dlg-foot button')) {
+        if (/not now|cancel|leave/i.test(b.textContent)) { b.click(); break; }
+      }
+      await new Promise(r => setTimeout(r, 150));
+
+      const settled = timedOut ? [] : await both;
+      return {
+        timedOut,
+        asked,
+        settled: settled.every(x => x.status === 'fulfilled'),
+        writes,
+        status: document.getElementById('status').textContent,
+        saveDisabled: document.getElementById('save').disabled,
+        stillDirty: document.getElementById('dirty').textContent
+      };
+    })()`, true);
+    check('two overlapping saves both settle without hanging',
+      !concurrent.timedOut && concurrent.settled,
+      concurrent.timedOut ? 'timed out — something asked a question' : '');
+    // The bug: both runs read f.stamp before either wrote its new one, so the
+    // second was told its file had changed on disk — about a file only this app
+    // had touched.
+    check('and neither raises a conflict prompt',
+      concurrent.asked === 0, `${concurrent.asked} dialog(s): ${concurrent.status}`);
+    check('the file is written once, not twice',
+      concurrent.writes === 1, `${concurrent.writes} write(s)`);
+    check('and nothing is left dirty afterwards',
+      concurrent.saveDisabled && concurrent.stillDirty === '',
+      `save disabled=${concurrent.saveDisabled} dirty="${concurrent.stillDirty}"`);
+    check('the edit reached the disk once, intact',
+      /edited once, saved twice/.test(fs.readFileSync(path.join(project, 'main.tex'), 'utf8'))
+        && !/saved twice[\s\S]*saved twice/.test(fs.readFileSync(path.join(project, 'main.tex'), 'utf8')),
+      JSON.stringify(fs.readFileSync(path.join(project, 'main.tex'), 'utf8').slice(0, 60)));
+
+    console.log('\n── open containing folder ──────────────────────────────────────');
+
+    const reveal = await cdp.evaluate(`(async () => {
+      const rowFor = (p) => [...document.querySelectorAll('#filetree .node')]
+        .find(r => r.dataset.path === p);
+      const menuOn = (el) => {
+        const r = el.getBoundingClientRect();
+        el.dispatchEvent(new MouseEvent('contextmenu',
+          { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 5 }));
+        const labels = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+          .map(b => b.textContent.trim());
+        document.body.click();
+        return labels;
+      };
+      const file = menuOn(rowFor('chapters/one.tex'));
+      const dir = menuOn(document.querySelector('#filetree .node[data-dir]'));
+      return { file, dir };
+    })()`);
+    const ROW = 'Open containing folder';
+    check('a file row offers it', reveal.file.includes(ROW), reveal.file.join(' | '));
+    check('a folder row offers it too', reveal.dir.includes(ROW), reveal.dir.join(' | '));
+    // Destructive rows stay last, so a mis-aimed click lands on something
+    // recoverable rather than on Delete.
+    check('it sits above Delete',
+      reveal.file.indexOf(ROW) < reveal.file.indexOf('Delete…'),
+      `${reveal.file.indexOf(ROW)} < ${reveal.file.indexOf('Delete…')}`);
+
     /* ── the source offer, in a shell that refuses to open a browser ──── */
     // This is the one check that has to run here rather than in Chrome. The
     // Legal page's links are inert in this shell by design — main.js denies
@@ -357,6 +478,11 @@ async function main() {
     // depended on clicking a link would be silently broken on the desktop and
     // perfectly fine in every browser test. AGPL section 6 asks for the offer to
     // accompany the binary, so it has to be recoverable *here*.
+    //
+    // Note what that rule is and is not, now that the row above exists: this
+    // shell will show you a folder, and it will still not open a browser. The
+    // reveal goes out through the main process to a file manager; nothing here
+    // can navigate the webview or hand a URL to anything.
     console.log('\n── the source offer ────────────────────────────────────────────');
 
     const offer = await cdp.evaluate(`(async () => {
