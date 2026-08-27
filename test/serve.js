@@ -13,10 +13,18 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+// The containment rule, not a second copy of it. fs_core.js is pure Node.
+const { isInside } = require('../electron/fs_core.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const PROJECTS_DIR = path.resolve(ROOT, '..', 'latex_project_tests');
 const PORT = Number(process.env.PORT) || 8777;
+// Loopback, not 0.0.0.0. `listen(PORT, cb)` binds every interface, so this dev
+// server — which serves the whole repo, not just www/ — was reachable from the
+// rest of the network for as long as it ran. Nothing in the suite needs more
+// than localhost; HOST is here for the one case that does (driving the app from
+// a phone on the same wifi), and has to be asked for.
+const HOST = process.env.HOST || '127.0.0.1';
 // A plain static host has no /api/* at all. Setting this makes the dev server
 // refuse those routes, so the browser build can be exercised on exactly the
 // thing it will be deployed to — the fixture loader is the one path a real user
@@ -466,7 +474,12 @@ const server = http.createServer((req, res) => {
 
   let rel = pathname === '/' ? '/test/engine_smoke.html' : pathname;
   const filePath = path.join(ROOT, rel);
-  if (!filePath.startsWith(ROOT)) return send(res, 403, 'forbidden', 'text/plain');
+  // By segment, through the same helper the shells use. This was
+  // `filePath.startsWith(ROOT)`, which also passes for a *sibling* whose name
+  // merely begins with the root's — `/…/revery_tex_notes` against
+  // `/…/revery_tex` — the exact prefix bug fs_core.js and electron/main.js
+  // document as fixed everywhere. It was still here.
+  if (!isInside(ROOT, filePath)) return send(res, 403, 'forbidden', 'text/plain');
 
   fs.stat(filePath, (err, stat) => {
     if (err || !stat.isFile()) return send(res, 404, `not found: ${rel}`, 'text/plain');
@@ -479,7 +492,7 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   console.log(`revery_tex dev server  http://localhost:${PORT}/`);
   console.log(`  root     ${ROOT}`);
   console.log(`  projects ${PROJECTS_DIR}`);

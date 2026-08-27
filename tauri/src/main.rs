@@ -603,11 +603,21 @@ fn backup_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
 /// Absolute path hashed to a flat filename: project paths are arbitrarily long
 /// and contain separators, neither of which survives as a filename.
+///
+/// SHA-256, truncated to 16 hex characters — the Electron twin's
+/// `createHash('sha256').digest('hex').slice(0, 16)`, spelled the same way. This
+/// was `DefaultHasher`, whose algorithm std documents as **not** stable across
+/// releases: a toolchain upgrade would have silently re-keyed every backup, so
+/// nothing written before it could be discarded again and the same unsaved work
+/// would be offered on every open with no way to dismiss it. Nothing about a
+/// filename needs a cryptographic hash; it needs a *fixed* one.
+///
+/// `discard_backup` below therefore sweeps by the record's own `abs` as well,
+/// which is what clears anything a previous build keyed differently.
 fn backup_key(abs: &Path) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    abs.to_string_lossy().hash(&mut h);
-    format!("{:016x}", h.finish())
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(abs.to_string_lossy().as_bytes());
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[tauri::command]
@@ -658,15 +668,44 @@ fn list_stale_backups(app: tauri::AppHandle, state: State<'_, RootPath>) -> Resu
             out.push(v);
         }
     }
+
+    // One offer per file, newest wins. A record keyed by an older build's
+    // `backup_key` sits beside the current one for the same path, and two
+    // dialogs about the same file — one of them holding superseded text — is a
+    // way to restore the wrong copy. See backup_key.
+    out.sort_by_key(|v| std::cmp::Reverse(v.get("saved").and_then(|x| x.as_u64()).unwrap_or(0)));
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|v| seen.insert(v.get("abs").and_then(|x| x.as_str()).unwrap_or("").to_string()));
+
     Ok(out)
 }
 
+/// Discard by *identity*, not only by current key.
+///
+/// The keyed filename is removed first — that is the whole job in the normal
+/// case. The sweep after it exists because a record's identity is its `abs`,
+/// while its filename is only however `backup_key` happened to hash that path
+/// in the build that wrote it. Without the sweep, changing the key scheme (as
+/// this tree just did, off `DefaultHasher`) leaves a file that Discard cannot
+/// reach and `list_stale_backups` keeps finding, so the dialog returns on every
+/// open and the button that is supposed to end it does nothing.
 #[tauri::command]
 fn discard_backup(app: tauri::AppHandle, path: String, state: State<'_, RootPath>) -> Result<(), String> {
     let root = get_root(&state)?;
     let abs = safe_path_inside(&root.join(&path).to_string_lossy(), &root)?;
-    let dest = backup_dir(&app)?.join(format!("{}.json", backup_key(&abs)));
-    let _ = fs::remove_file(dest);
+    let dir = backup_dir(&app)?;
+    let _ = fs::remove_file(dir.join(format!("{}.json", backup_key(&abs))));
+
+    let target = abs.to_string_lossy();
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for e in entries.flatten() {
+            let Ok(text) = fs::read_to_string(e.path()) else { continue };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+            if v.get("abs").and_then(|x| x.as_str()) == Some(target.as_ref()) {
+                let _ = fs::remove_file(e.path());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -870,6 +909,33 @@ mod tests {
         ));
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// The key is pinned to a literal, because that is the whole point of it.
+    ///
+    /// This replaces `backup_key_is_stable_and_distinct`, which asserted only
+    /// `backup_key(a) == backup_key(a)` — true of every hash ever written,
+    /// including the unstable one it was guarding. "Stable" across a *process*
+    /// was never the property at risk.
+    ///
+    /// A hash that changes when the toolchain changes strands every backup
+    /// written before the upgrade. std says DefaultHasher may do exactly that,
+    /// so this asserts the *value*, not merely that hashing happens — a test
+    /// that recomputed the hash would agree with any algorithm at all.
+    ///
+    /// The two literals are what `crypto.createHash('sha256').update(abs)
+    /// .digest('hex').slice(0, 16)` returns in the Electron twin for the same
+    /// paths, so the shells are also spelled the same way.
+    #[test]
+    fn backup_key_is_stable_and_matches_the_electron_twin() {
+        assert_eq!(backup_key(Path::new("/home/u/proj/main.tex")), "60f470bd4075a790");
+        assert_eq!(backup_key(Path::new("/tmp/a.tex")), "2e820f753d4209a3");
+        assert_eq!(backup_key(Path::new("/tmp/a.tex")).len(), 16);
+        assert_ne!(
+            backup_key(Path::new("/tmp/a.tex")),
+            backup_key(Path::new("/tmp/b.tex")),
+            "two paths must not share a filename"
+        );
     }
 
     #[test]
@@ -1293,11 +1359,4 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    #[test]
-    fn backup_key_is_stable_and_distinct() {
-        let a = Path::new("/tmp/p/main.tex");
-        let b = Path::new("/tmp/p/other.tex");
-        assert_eq!(backup_key(a), backup_key(a));
-        assert_ne!(backup_key(a), backup_key(b));
-    }
 }

@@ -140,6 +140,72 @@ test('all four backends treat an unreadable file as stale', () => {
 });
 
 /**
+ * The same rule one level up, and the one place it was still inverted.
+ *
+ * Electron resolved the project root with `fs.realpathSync` *inside* the loop,
+ * so a root that no longer exists threw ENOENT out of the whole function — not
+ * one backup skipped, all of them, and `offerRecovery` swallows the rejection.
+ * The file-level case below it was already right; this is the folder-level one,
+ * which is strictly worse because it is the state where every backup in the
+ * project is the only copy left.
+ *
+ * Called for real rather than read as source: the shape assertions above cannot
+ * see a throw.
+ */
+test('Electron still lists backups when the project folder itself is gone', () => {
+  const core = require('../electron/fs_core.js');
+  const os = require('node:os');
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'revery-stale-root-'));
+  const backups = fs.mkdtempSync(path.join(os.tmpdir(), 'revery-stale-bk-'));
+  try {
+    fs.writeFileSync(path.join(root, 'main.tex'), 'what is on disk');
+    core.writeBackup(backups, root, 'main.tex', 'the unsaved work');
+
+    assert.deepEqual(core.listStaleBackups(backups, root).map(v => v.path), ['main.tex'],
+      'a differing file is stale');
+
+    fs.unlinkSync(path.join(root, 'main.tex'));
+    assert.deepEqual(core.listStaleBackups(backups, root).map(v => v.path), ['main.tex'],
+      'a deleted file is stale — the backup is the only copy');
+
+    fs.rmSync(root, { recursive: true, force: true });
+    assert.deepEqual(core.listStaleBackups(backups, root).map(v => v.path), ['main.tex'],
+      'a deleted project folder must not throw the listing away');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(backups, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A backup belonging to another project is still not offered.
+ *
+ * The containment check above is what stops that, and it is the thing a
+ * too-eager fix to the root resolution would remove.
+ */
+test('a backup from another project is never offered', () => {
+  const core = require('../electron/fs_core.js');
+  const os = require('node:os');
+
+  const mine = fs.mkdtempSync(path.join(os.tmpdir(), 'revery-mine-'));
+  const theirs = fs.mkdtempSync(path.join(os.tmpdir(), 'revery-theirs-'));
+  const backups = fs.mkdtempSync(path.join(os.tmpdir(), 'revery-bk-'));
+  try {
+    fs.writeFileSync(path.join(theirs, 'main.tex'), 'on disk');
+    core.writeBackup(backups, theirs, 'main.tex', 'their unsaved work');
+    assert.deepEqual(core.listStaleBackups(backups, mine), [],
+      'another project\'s backup is not mine to offer');
+
+    fs.rmSync(theirs, { recursive: true, force: true });
+    assert.deepEqual(core.listStaleBackups(backups, mine), [],
+      'still not mine once their folder has gone');
+  } finally {
+    for (const d of [mine, theirs, backups]) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+/**
  * Backups are keyed per project, never per project *name*.
  *
  * Two zips both called thesis.zip are two different projects. Keyed on the name,

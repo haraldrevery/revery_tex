@@ -354,17 +354,29 @@ function writeBackup(backupDir, root, rel, content) {
   );
 }
 
-/** Backups whose content differs from disk — unsaved work from a crashed run. */
+/**
+ * Backups whose content differs from disk — unsaved work from a crashed run.
+ *
+ * The root is resolved **once, and never fatally**. This was
+ * `fs.realpathSync(root)` inside the loop, which throws ENOENT when the project
+ * folder itself has gone — taking the whole listing with it, so the shell
+ * offered nothing at all. That is the same inversion the per-file read below
+ * was fixed for, one level up: a root that cannot be resolved is a reason to
+ * fall back to the path we were given, not to throw the backups away. The Rust
+ * twin never had it, because `Path::starts_with` compares segments without
+ * touching the disk.
+ */
 function listStaleBackups(backupDir, root) {
   if (!fs.existsSync(backupDir)) return [];
+  let real = root;
+  try { real = fs.realpathSync(root); } catch { }
   const out = [];
   for (const name of fs.readdirSync(backupDir)) {
     if (!name.endsWith('.json')) continue;
     let v;
     try { v = JSON.parse(fs.readFileSync(path.join(backupDir, name), 'utf8')); } catch { continue; }
     if (!v || typeof v.abs !== 'string') continue;
-    const rel = path.relative(fs.realpathSync(root), v.abs);
-    if (rel.startsWith('..') || path.isAbsolute(rel)) continue;   // other project
+    if (!isInside(real, v.abs)) continue;                         // other project
     let onDisk = '';
     try { onDisk = fs.readFileSync(v.abs, 'utf8'); } catch { }
     if (onDisk !== v.content) out.push(v);
