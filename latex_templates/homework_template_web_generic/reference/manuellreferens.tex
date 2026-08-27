@@ -1,0 +1,55 @@
+% ============================================================
+%  MANUAL BIBLIOGRAPHY
+%
+%  Tip: let a reference manager (Zotero, JabRef, ...) produce the
+%  formatted entry in whatever style your course asks for, and paste
+%  it after the \bibitem key.
+%
+%  This approach is fine up to roughly ten sources.  Past that, the
+%  ordering below has to be maintained by hand, and it is worth
+%  switching to \bibliography{reference/references} instead — see the
+%  commented Option B block in main.tex.  Classic BibTeX runs in the
+%  browser engine; biber does not.
+%
+%  \bibitem{key} defines the key; \cite{key} in any chapter refers to
+%  it.  Entries are numbered in the order they appear here.
+% ============================================================
+
+% thebibliography prints its heading as a *starred* section, and starred
+% sections are neither numbered nor listed — so without these two lines the
+% references are missing from the table of contents.  \phantomsection gives
+% hyperref an anchor to jump to, \addcontentsline puts the entry in the TOC,
+% and the \label lets you write \cref{References_toc} in the text.
+\phantomsection
+\addcontentsline{toc}{section}{References}
+\label{References_toc}
+
+\begin{thebibliography}{9}
+
+	\bibitem{strogatz}
+	Strogatz SH. Nonlinear dynamics and chaos: with applications to physics,
+	biology, chemistry, and engineering. 3rd ed. Boca Raton: CRC Press; 2024.
+
+	\bibitem{numrecipes}
+	Press WH, Teukolsky SA, Vetterling WT, Flannery BP. Numerical recipes: the
+	art of scientific computing. 3rd ed. Cambridge: Cambridge University Press;
+	2007.
+
+	\bibitem{fay1989}
+	Fay TH. The butterfly curve. The American Mathematical Monthly.
+	1989;96(5):442--443. https://doi.org/10.2307/2325155.
+
+	\bibitem{rossler1976}
+	R\"ossler OE. An equation for continuous chaos. Physics Letters A.
+	1976;57(5):397--398. https://doi.org/10.1016/0375-9601(76)90101-8.
+
+	\bibitem{hofstadter1976}
+	Hofstadter DR. Energy levels and wave functions of Bloch electrons in
+	rational and irrational magnetic fields. Physical Review B.
+	1976;14(6):2239--2249. https://doi.org/10.1103/PhysRevB.14.2239.
+
+	\bibitem{lamport1994}
+	Lamport L. LaTeX: a document preparation system. 2nd ed. Reading, MA:
+	Addison-Wesley; 1994.
+
+\end{thebibliography}

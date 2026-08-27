@@ -1,0 +1,76 @@
+% ============================================================
+%  chapter/examples.tex — Text patterns & citation showcase
+%
+%  A grab-bag of the devices books actually use: quotations, verse,
+%  epigraphs, footnote-dense prose, and every common way to cite.
+% ============================================================
+\chapter{Text Patterns}\label{ch:patterns}
+
+\section{Quotations}
+Short quotations stay inline \enquote{like this one}; anything worth
+its own lines uses the quotation environment:
+
+\begin{quotation}
+\noindent\itshape
+Typography exists to honour content.\index{typography!purpose}
+\end{quotation}
+\begin{flushright}
+--- \citeauthor{bringhurst2004}, \citeyear{bringhurst2004}
+\end{flushright}
+
+A displayed extract from another work keeps its original lineation
+in the \texttt{verse} environment:
+
+\begin{verse}
+To see a World in a Grain of Sand\\
+And a Heaven in a Wild Flower\\
+\hspace*{2em}Hold Infinity in the palm of your hand\\
+\hspace*{2em}And Eternity in an hour
+\end{verse}
+
+\section{Epigraphs}
+Chapter openings often carry a short attributed line above the
+first heading. There is no package for that here --- just a styled
+block before the first section:
+
+\begin{quote}
+\small\itshape\color{AccentColor}
+The form of a book must be answerable to the energy of its contents.
+\end{quote}
+
+\section{Citations, every common flavour}\label{sec:cites}
+Biblatex offers one command per rhetorical situation, all reading
+the same \texttt{reference.bib}. In running prose, name the source:
+\textcite{knuth1984} designed TeX;
+\textcite{lamport1994} put LaTeX on top of it. Parenthetical
+asides take \parencite{mittal2005}; multiple sources collapse into
+one bracket \parencite{knuth1984,lamport1994,mittal2005}.
+
+When the year matters, write \textcite{texgyre}
+(\citeyear{texgyre}); when the title itself is quoted,
+\emph{\citetitle{knuth1984}} does the job. For a note at the bottom
+of the page, use a footnote citation\footcite{bringhurst2004} ---
+the full entry prints below the line without interrupting the
+paragraph, a favourite in humanities and history
+titles.\index{citations}
+
+Every cited work lands automatically in the back-matter
+bibliography, numbered in order of first appearance because the
+template sets \texttt{sorting=none}.\index{bibliography}
+
+\section{Footnotes in numbers}
+Dense scholarly prose leans on notes.\footnote{Like this. Notes are
+per-chapter here, resetting with each \texttt{\textbackslash chapter}.} They
+should carry evidence,\footnote{Or the source, as footnotes do.}
+qualification,\footnote{Or a polite disagreement.} or a joke too
+good to cut\footnote{This one, arguably.} --- but never the argument
+itself. If a reader must open your note to follow the sentence, the
+sentence is in the wrong place.
+
+\section{An index-rich close}
+Everything a reader might hunt for belongs in the index, nested
+where it helps:\index{book design}\index{book design!margins}%
+\index{book design!grids}\index{page layout|seealso{book design}}
+this closing section demonstrates sub-entries under a shared head,
+and a \emph{see also} redirect. Compile, check
+\texttt{main.ind}, and trust nothing you have not seen on a page.

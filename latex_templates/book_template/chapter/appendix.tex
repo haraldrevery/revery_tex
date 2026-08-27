@@ -1,0 +1,30 @@
+% ============================================================
+%  chapter/appendix.tex — Appendix
+%
+%  Loaded after \appendix in main.tex, so this chapter is numbered
+%  "Appendix A" automatically.
+% ============================================================
+\chapter{Notation}\label{app:notation}
+
+Appendices hold reference material: notation tables, worked proofs,
+glossaries, long source listings. A compact notation table makes a
+good first appendix:
+
+\begin{center}
+  \begin{tabular}{ll}
+    \toprule
+    Symbol & Meaning\\
+    \midrule
+    $\mathbb{N}$   & natural numbers\\
+    $\mathbb{Z}$   & integers\\
+    $\mathbb{R}$   & real numbers\\
+    $\in$          & element of\\
+    $\subseteq$    & subset of (possibly equal)\\
+    $\sum_{k=1}^{n} a_k$ & the sum $a_1 + a_2 + \cdots + a_n$\\
+    \bottomrule
+  \end{tabular}
+\end{center}
+
+\noindent
+Terms that readers may hunt for later belong in the index as well as
+in the text:\index{notation}\index{appendix}.

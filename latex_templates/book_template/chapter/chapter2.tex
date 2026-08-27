@@ -1,0 +1,156 @@
+% ============================================================
+%  chapter/chapter2.tex — Figures & tables stress test
+%
+%  Real artwork goes into graphs/ and illustrations/.  Until then
+%  the \placeholder boxes show where images will sit.
+% ============================================================
+\chapter{Figures and Tables}\label{ch:figures}
+
+\section{Figures}
+Drop your plots into \texttt{graphs/} and load them with
+\texttt{\textbackslash includegraphics}; the placeholder below shows the frame the
+finished figure will occupy.
+
+\begin{figure}[ht]
+  \centering
+  % Real plot: \includegraphics[width=0.8\linewidth]{graphs/plot1.jpg}
+  \placeholder[AccentColor!12]{0.8\linewidth}{55mm}
+  \caption{A placeholder for a data plot. Replace the
+    \texttt{\textbackslash placeholder} line with an
+    \texttt{\textbackslash includegraphics} pointing at
+    \texttt{graphs/plot1.jpg}.}
+  \label{fig:plot1}
+\end{figure}
+
+Figure~\ref{fig:plot1} floats to the top of a page when that helps
+the layout; \texttt{[ht]} lets LaTeX choose between ``here'' and
+``top''. Side-by-side sub-figures work too:
+
+\begin{figure}[ht]
+  \centering
+  \begin{subfigure}{0.48\linewidth}
+    \centering
+    \placeholder{0.9\linewidth}{35mm}
+    \caption{First panel.}
+  \end{subfigure}\hfill
+  \begin{subfigure}{0.48\linewidth}
+    \centering
+    \placeholder{0.9\linewidth}{35mm}
+    \caption{Second panel.}
+  \end{subfigure}
+  \caption{Two sub-figures sharing one number.}
+  \label{fig:panels}
+\end{figure}
+
+\section{Tables}
+Booktabs rules (no vertical lines) are the professional standard:
+
+\begin{table}[ht]
+  \centering
+  \caption{A small comparison table.}
+  \label{tab:compare}
+  \begin{tabular}{lcc}
+    \toprule
+    Format & Trim size & Typical use\\
+    \midrule
+    A4       & 210 × 297 mm & review drafts\\
+    B5       & 176 × 250 mm & digest editions\\
+    US Trade & 152 × 229 mm & trade paperback\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Table~\ref{tab:compare} uses fixed columns; for text-heavy tables
+that must fit the measure exactly, use \texttt{tabularx}:
+
+\begin{table}[ht]
+  \centering
+  \caption{A tabularx table — the X column absorbs the spare width.}
+  \label{tab:x}
+  \begin{tabularx}{\linewidth}{lX}
+    \toprule
+    Term & Meaning\\
+    \midrule
+    Verso & The left-hand, even-numbered page of a spread.\\
+    Recto & The right-hand, odd-numbered page of a spread.\\
+    Folio & The page number itself, printed on the outer edge here.\\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\section{A wrapped side figure}
+Narrow figures can sit beside the running text instead of floating
+away from it --- useful for portraits and small diagrams:
+
+\begin{wrapfigure}{r}{0.42\linewidth}
+  \centering
+  % Real portrait: \includegraphics{illustrations/portrait.jpg}
+  \placeholder{0.9\linewidth}{34mm}
+  \caption{A figure wrapped by the text.}
+  \label{fig:wrap}
+\end{wrapfigure}
+
+Figure~\ref{fig:wrap} occupies the right of the measure while these
+paragraphs flow around it. Keep wrapped figures narrow --- about a
+third to two-fifths of the text width --- so the remaining lines stay
+long enough to read comfortably. Two or three paragraphs is the most
+text that should share a column with a wrapfigure; beyond that the
+page starts to look pinched. Note how the wrapping has now finished:
+a section heading should never have to share its lines with a
+floating column, so leave enough prose after the figure to close the
+wrap before the next heading arrives.
+
+\section{Spanning tables and grouped rows}
+Two table problems come up constantly: cells that span several rows,
+and tables longer than a page. The first is \texttt{multirow}'s job,
+shown in Table~\ref{tab:grouped} --- which, unlike the tables so
+far, is \emph{not} a float: it is set exactly here with
+\texttt{\textbackslash captionof}, so it can never drift away from
+the sentence that introduces it. Use this for small tables whose
+position matters; let everything else float.
+
+% A non-floating table: \captionof (from the caption package) keeps
+% the numbering and the List of Tables entry without any floating.
+\begin{center}
+  \captionof{table}{Rows grouped under spanning cells.}
+  \label{tab:grouped}
+  \begin{tabular}{llr}
+    \toprule
+    Family & Face & Weights\\
+    \midrule
+    \multirow{3}{*}{TeX Gyre} & Pagella & regular, bold, italic\\
+                              & Heros   & regular, bold\\
+                              & Termes  & regular, bold, italic\\
+    \addlinespace
+    \multirow{2}{*}{Latin Modern} & Roman & regular, bold\\
+                                  & Sans  & regular, bold\\
+    \bottomrule
+  \end{tabular}
+\end{center}
+
+The second problem --- a table that outgrows the page --- belongs to
+\texttt{longtable}, which breaks across pages and repeats its header
+on every continuation:
+
+\begin{longtable}{@{}p{28mm}p{\dimexpr\linewidth-28mm-12pt\relax}@{}}
+  \caption{A long table that spans pages.}\label{tab:long}\\
+  \toprule
+  Term & Definition\\
+  \midrule
+  \endfirsthead
+  \multicolumn{2}{@{}l}{\small\itshape Table~\ref{tab:long}, continued}\\
+  \toprule
+  Term & Definition\\
+  \midrule
+  \endhead
+  \bottomrule
+  \endfoot
+  Ascender   & The part of a letter that rises above the x-height, as in b, d, k.\\
+  Baseline   & The invisible line on which letters appear to sit.\\
+  Descender  & The part that drops below the baseline, as in p, q, y.\\
+  Kerning    & Selective adjustment of space between specific letter pairs.\\
+  Ligature   & Two or more letters cast as one glyph, such as fi or fl.\\
+  Serif      & The small finishing stroke at the ends of a letter's main strokes.\\
+  Terminal   & The often-rounded end of a stroke, as in the tail of an a.\\
+  X-height   & The height of the lowercase letters, excluding ascenders.\\
+\end{longtable}

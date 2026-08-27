@@ -1,0 +1,92 @@
+% ============================================================
+%  chapter/chapter1.tex — Mathematics stress test
+% ============================================================
+\chapter{Mathematics}\label{ch:maths}
+
+Inline maths such as $e^{i\pi} + 1 = 0$ sits in the running text;
+display maths gets its own line and number:
+
+\begin{equation}\label{eq:gauss}
+  \int_{-\infty}^{\infty} e^{-x^{2}} \,\mathrm{d}x = \sqrt{\pi}.
+\end{equation}
+
+Equation~\eqref{eq:gauss} is referenced with \texttt{\textbackslash eqref}. Multi-line
+derivations use \texttt{align}:
+
+\begin{align}
+  (a+b)^2 &= a^2 + 2ab + b^2,\\
+  (a-b)^2 &= a^2 - 2ab + b^2,\\
+  (a-b)(a+b) &= a^2 - b^2.
+\end{align}
+
+Matrices and cases work through \texttt{amsmath}:
+
+\begin{equation}
+  A = \begin{pmatrix}
+        a_{11} & a_{12} & \cdots & a_{1n}\\
+        a_{21} & a_{22} & \cdots & a_{2n}\\
+        \vdots & \vdots & \ddots & \vdots\\
+        a_{m1} & a_{m2} & \cdots & a_{mn}
+      \end{pmatrix},
+  \qquad
+  f(x) = \begin{cases}
+           x^{2}, & x \geq 0,\\
+           -x,    & x < 0.
+         \end{cases}
+\end{equation}
+
+Theorem-like statements can be built with the classic
+\texttt{amsthm} machinery if your book needs it; for most trade
+books the styled paragraph below is enough.
+
+\section{Symbols in the index}
+Technical terms should reach the index as you introduce them: the
+Euler identity\index{Euler identity}, Gaussian
+integrals\index{Gaussian integral} and
+matrices\index{matrix|see{linear algebra}} all appear above.
+
+\section{Statements and proofs}
+Formal books state, then prove. The environments come from
+\emph{amsthm}, styled in this template's navy-and-sans scheme:
+
+\begin{definition}\label{def:prime}
+A natural number $p > 1$ is \emph{prime} if its only positive
+divisors are $1$ and $p$ itself.
+\end{definition}
+
+\begin{theorem}[Euclid]\label{thm:primes}
+There are infinitely many primes.
+\end{theorem}
+
+\begin{proof}
+Suppose $p_1, p_2, \dots, p_n$ were all the primes and consider
+$N = p_1 p_2 \cdots p_n + 1$. No $p_i$ divides $N$, since each
+leaves remainder~$1$; yet $N > 1$ has a prime factor by
+Definition~\ref{def:prime}. Contradiction.
+\end{proof}
+
+\begin{example}
+The first few primes are $2, 3, 5, 7, 11, 13$;
+by Theorem~\ref{thm:primes} the list never ends.\index{prime number}
+\end{example}
+
+\begin{note}
+Unnumbered remarks use the starred \texttt{note} environment ---
+useful for asides that would clutter the numbering.
+\end{note}
+
+\section{More display mathematics}
+Fractions, binomials and named operators behave as usual:
+\begin{equation}\label{eq:binom}
+  \binom{n}{k} = \frac{n!}{k!\,(n-k)!},
+  \qquad \sum_{k=0}^{n} \binom{n}{k} = 2^{n},
+  \qquad \lim_{x \to 0} \frac{\sin x}{x} = 1.
+\end{equation}
+Text belongs inside maths through \texttt{\textbackslash text},
+which keeps the surrounding font:
+\begin{equation*}
+  f(x) = x^{2} \quad \text{for all } x \in \mathbb{R}.
+\end{equation*}
+Both numbered forms cross-reference: combine
+\eqref{eq:gauss} with \eqref{eq:binom} and you have most of a
+first calculus course.\index{binomial coefficient}
