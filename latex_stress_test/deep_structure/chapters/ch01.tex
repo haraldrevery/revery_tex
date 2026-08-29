@@ -1,0 +1,23 @@
+% Chapter 1 of 40.
+\chapter{Chapter 1}
+\label{ch:1}
+\section{Opening of chapter 1}
+This chapter exists to give the include graph real length. It refers
+forward to Chapter~\ref{ch:2} and back to the leaf
+at \ref{deep:leaf}, so a broken cross-reference shows up as a warning.
+
+\subsection{Some mathematics}
+\begin{equation}
+  \int_0^{1} x^{2} \, \mathrm{d}x = \frac{1^{3}}{3}
+\end{equation}
+
+\begin{itemize}
+  \item Item 1 of chapter 1, \stressterm{emphasised}.
+  \item Item 2 of chapter 1, \stressterm{emphasised}.
+  \item Item 3 of chapter 1, \stressterm{emphasised}.
+  \item Item 4 of chapter 1, \stressterm{emphasised}.
+\end{itemize}
+
+% The one place the deep chain is pulled in.
+\input{deep/level01/level02/level03/level04/level05/level06/level07/level08/level09/level10/level11/level12/level13/level14/level15/level16/level17/level18/level19/level20/leaf}
+\input{modules/notes with spaces}

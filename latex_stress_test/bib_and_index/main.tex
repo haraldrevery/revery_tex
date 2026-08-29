@@ -1,0 +1,62 @@
+% Bibliography and index stress fixture — biblatex on bibtex8, plus makeindex.
+%
+% Two things are being stressed at once, because they share a failure mode: both
+% need a *second* tool run between LaTeX passes, and both write a file the next
+% pass reads back (.bbl and .ind).
+%
+% backend=bibtex, not biber. biber is Perl and no WASM build has it, so a
+% biblatex document asking for biber cannot build its bibliography in the
+% browser at all. bibtex8 ships in the bundle and builds this one everywhere.
+%
+% **This project ships no .bbl and no .ind on purpose.** Both are build output:
+% bibtex8 and makeindex rebuild them on every compile, so a committed copy can
+% only go stale — and a stale .bbl written by a different biblatex is rejected
+% outright, which makes every citation come out undefined. That is not
+% hypothetical; it is the bug that was live in the old fixtures.
+\documentclass[11pt]{article}
+
+% lmodern before fontenc, and this is a bundle constraint rather than a
+% preference: [T1]{fontenc} on pdflatex reaches for cm-super, whose
+% cm-super-t1.enc is not in the slim texmf the app ships. Without this line
+% every one of these fixtures dies with "cannot open encoding file" on the
+% bundled engine while compiling perfectly on a full system TeX Live.
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{makeidx}
+\usepackage[backend=bibtex]{biblatex}
+\usepackage{hyperref}
+
+\addbibresource{references.bib}
+\makeindex
+
+\title{Bibliography and Index Stress Fixture}
+\author{Revery TeX test suite}
+
+\begin{document}
+\maketitle
+
+\section{Citations}
+\label{sec:citations}
+
+A single citation~\cite{knuth1984}, and a multiple one~\cite{lamport1994,mittelbach2004}.
+Diacritics in an author name must survive the style~\cite{unicodecite2020}, as must a
+slashed vowel~\cite{report2019}.
+
+\index{citation}\index{bibliography!biblatex}\index{bibliography!bibtex8}
+
+\section{Index entries}
+\label{sec:index}
+
+This section exists to give \texttt{makeindex} something to sort.
+\index{index!nested entry}\index{index!another entry}\index{sorting}
+Entries appear here\index{page reference} and are collected at the end.
+
+\subsection{Repeated terms}
+The term appears again\index{sorting}, so the index must merge the two page
+references rather than listing the term twice.
+
+\printbibliography
+\printindex
+
+\end{document}

@@ -1,0 +1,9 @@
+% A file that is NOT UTF-8.
+%
+% Deliberately latin-1, so the "not UTF-8 text - convert it first" refusal has
+% something real to refuse. Never \input by main.tex: this fixture must still
+% compile, and the point of this file is that the *app* rejects it before the
+% engine ever sees it.
+%
+% The bytes below are 0xE5 0xE4 0xF6 - aao in latin-1, invalid as UTF-8.
+\section{Latin-1: едц}

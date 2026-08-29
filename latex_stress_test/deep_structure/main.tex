@@ -1,0 +1,62 @@
+% Structural stress fixture — nesting, file count and include chains.
+%
+% Everything here is authored to be asserted on: the chapter count, the
+% nesting depth and the include chain are all fixed numbers that
+% test/stress_fixtures.test.js checks. Nothing about this document depends
+% on font metrics, so it cannot drift the way a page count does.
+%
+% Compiles with pdflatex on the bundled engine. No system fonts, no EPS,
+% no shell-escape, no bibliography — those are other fixtures.
+\documentclass[11pt]{report}
+\input{preamble/packages}
+\input{preamble/macros}
+
+\title{Structural Stress Fixture}
+\author{Revery TeX test suite}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\include{chapters/ch01}
+\include{chapters/ch02}
+\include{chapters/ch03}
+\include{chapters/ch04}
+\include{chapters/ch05}
+\include{chapters/ch06}
+\include{chapters/ch07}
+\include{chapters/ch08}
+\include{chapters/ch09}
+\include{chapters/ch10}
+\include{chapters/ch11}
+\include{chapters/ch12}
+\include{chapters/ch13}
+\include{chapters/ch14}
+\include{chapters/ch15}
+\include{chapters/ch16}
+\include{chapters/ch17}
+\include{chapters/ch18}
+\include{chapters/ch19}
+\include{chapters/ch20}
+\include{chapters/ch21}
+\include{chapters/ch22}
+\include{chapters/ch23}
+\include{chapters/ch24}
+\include{chapters/ch25}
+\include{chapters/ch26}
+\include{chapters/ch27}
+\include{chapters/ch28}
+\include{chapters/ch29}
+\include{chapters/ch30}
+\include{chapters/ch31}
+\include{chapters/ch32}
+\include{chapters/ch33}
+\include{chapters/ch34}
+\include{chapters/ch35}
+\include{chapters/ch36}
+\include{chapters/ch37}
+\include{chapters/ch38}
+\include{chapters/ch39}
+\include{chapters/ch40}
+
+\end{document}

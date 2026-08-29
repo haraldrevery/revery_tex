@@ -1,0 +1,44 @@
+% UTF-8 text that must survive the round trip.
+%
+% Every path this fixture crosses re-encodes it: the manifest walk decodes to a
+% JS string, the engine's VFS takes bytes back, the editor holds it as UTF-16
+% and a save encodes it again. A mangling anywhere shows up here as a wrong
+% glyph rather than as an error, which is why it is worth pinning.
+%
+% Deliberately no CJK: the slim bundle ships no CJK font, so those glyphs would
+% fail to typeset for a reason that has nothing to do with encoding. What is
+% here is what pdflatex with T1 can actually set.
+\documentclass[11pt]{article}
+
+% lmodern before fontenc, and this is a bundle constraint rather than a
+% preference: [T1]{fontenc} on pdflatex reaches for cm-super, whose
+% cm-super-t1.enc is not in the slim texmf the app ships. Without this line
+% every one of these fixtures dies with "cannot open encoding file" on the
+% bundled engine while compiling perfectly on a full system TeX Live.
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amssymb}
+
+\title{Encoding Stress Fixture}
+\author{Revery TeX test suite}
+
+\begin{document}
+\maketitle
+
+\section{Nordic}
+Swedish: åäö ÅÄÖ. Norwegian and Danish: æøå ÆØÅ. Icelandic: þð ÞÐ.
+
+\section{Continental}
+German: äöüß. French: àâçéèêëîïôùûü. Spanish: ñ¿¡. Polish: ąćęłńóśźż.
+
+\section{Punctuation and symbols}
+Dashes: -- and ---. Quotes: ``curly'' and `single'.
+Guillemets: «these». Ellipsis: \ldots
+
+\section{Mathematics}
+Set in math mode, where the glyphs come from the maths fonts rather than the
+text encoding: $\alpha\beta\gamma\delta$, $\sum_{i=1}^{n} i$, $\int_0^1 x\,dx$,
+$\forall x \in \mathbb{R}$, $\approx$, $\neq$, $\leq$, $\geq$.
+
+\end{document}

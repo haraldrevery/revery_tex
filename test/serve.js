@@ -18,6 +18,12 @@ const { isInside } = require('../electron/fs_core.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const PROJECTS_DIR = path.resolve(ROOT, '..', 'latex_project_tests');
+// The in-tree fixtures. Purpose-built, self-contained and always present —
+// unlike PROJECTS_DIR above, which is a sibling repo, so every test that
+// depends on it is guarded on existsSync and silently skips where it is absent.
+// A spec says which root it belongs to with `root`; PROJECTS_DIR is the default
+// so nothing existing had to change. See latex_stress_test/README.md.
+const STRESS_DIR = path.resolve(ROOT, 'latex_stress_test');
 const PORT = Number(process.env.PORT) || 8777;
 // Loopback, not 0.0.0.0. `listen(PORT, cb)` binds every interface, so this dev
 // server — which serves the whole repo, not just www/ — was reachable from the
@@ -332,6 +338,82 @@ const PROJECTS = {
     rejectLog: "couldn't open style file|I found no \\\\bibdata|Citation .* undefined|LaTeX Warning: There were undefined references",
     note: 'Classic BibTeX: proves plain.bst is in the bundle and citations resolve.'
   }
+  ,
+
+  /* ── the in-tree stress fixtures ───────────────────────────────────────
+     Deliberately NOT in run_phase0.js's ALL. That list is the gate's contract
+     and stays the seven documents it names; these are a second set, run with
+     `npm run gate:stress`.
+
+     Every one of them has `expectPages: null` on purpose. A page count is a
+     function of font metrics and the texmf version rather than of correctness
+     — `homework` above is pinned at 27, records a 28-page reference build in
+     its own comment and currently produces 26 — so these assert the *log*
+     instead, through rejectLog. "No citation came out undefined" survives an
+     engine upgrade; "still 49 pages" does not.
+
+     `broken_on_purpose/` is missing from this list and that is not an
+     oversight: the gate's expectFailure asserts a *missing package* by name,
+     and that fixture fails with an undefined control sequence instead. Its
+     contract is the line number, which test/stress_fixtures.test.js checks
+     without needing an engine at all. */
+
+  'stress-structure': {
+    root: STRESS_DIR,
+    dir: 'deep_structure',
+    main: 'main.tex',
+    engine: 'pdftex',
+    expectPages: null,
+    rerun: true,
+    // 40 chapters that each cross-reference the next, plus the leaf 20
+    // directories down. If any \\include or \\input were dropped, its \\label
+    // never lands and the reference it feeds comes out undefined — which is a
+    // far more direct statement of "the include graph survived" than a count.
+    rejectLog: 'Reference .* undefined|LaTeX Warning: There were undefined references',
+    note: 'Structural: 67 files, 20 directory levels, a 40-chapter include chain.'
+  },
+
+  'stress-bib': {
+    root: STRESS_DIR,
+    dir: 'bib_and_index',
+    main: 'main.tex',
+    engine: 'pdftex',
+    expectPages: null,
+    bibtex: 'bibtex',
+    makeindex: true,
+    rerun: true,
+    // Both tools have to have run: bibtex8 to write the .bbl and makeindex the
+    // .ind. Neither file is committed, so a citation resolving at all is proof
+    // the tool ran rather than proof something stale was lying around.
+    rejectLog: "couldn't open style file|I found no \\\\bibdata|Citation .* undefined|LaTeX Warning: There were undefined references",
+    note: 'biblatex on backend=bibtex (bibtex8) plus makeindex; ships no .bbl or .ind.'
+  },
+
+  'stress-bib-classic': {
+    root: STRESS_DIR,
+    dir: 'bib_classic',
+    main: 'main.tex',
+    engine: 'pdftex',
+    expectPages: null,
+    bibtex: 'bibtex',
+    rerun: true,
+    rejectLog: "couldn't open style file|I found no \\\\bibdata|Citation .* undefined|LaTeX Warning: There were undefined references",
+    note: 'Classic \\bibliography{}, the other branch inferBibTool has to pick.'
+  },
+
+  'stress-encoding': {
+    root: STRESS_DIR,
+    dir: 'encoding',
+    main: 'main.tex',
+    engine: 'pdftex',
+    expectPages: null,
+    // The assertion that matters for this one. "Missing character" is what TeX
+    // says when a glyph is not in the font — the exact symptom of text that
+    // was mangled somewhere between the manifest, the VFS and the engine, and
+    // it never shows up as a failed compile or a changed page count.
+    rejectLog: 'Missing character',
+    note: 'UTF-8 across Nordic, continental, punctuation and maths.'
+  }
 };
 
 function applyPatches(spec, rel, text) {
@@ -371,7 +453,7 @@ function buildManifest(key) {
     };
   }
 
-  const dir = path.join(PROJECTS_DIR, spec.dir);
+  const dir = path.join(spec.root || PROJECTS_DIR, spec.dir);
   const files = [];
   const patchLog = [];
   let skipped = 0;
