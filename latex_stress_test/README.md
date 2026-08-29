@@ -49,9 +49,13 @@ sources. That is how the sibling repo ended up with a tracked `main.pdf` and
 
 **Assert on invariants you authored, not on what a compile happens to produce.**
 A page count is a function of font metrics and the texmf version, not of
-correctness. `homework` in the sibling repo is pinned at 27, its own comment
-records a 28-page reference build, and it currently produces 26 — three numbers,
-none of them wrong, none of them a bug. So nothing here is pinned by page count.
+correctness. `homework` in the sibling repo was pinned at 27, its own comment
+recorded a 28-page reference build, and it produces 26 — three numbers, none of
+them wrong, none of them a bug, and one red gate. It is unpinned now, and the
+cause is worth knowing because it is the general case: a figure was deleted from
+`chapter/problem_5.tex` without its prose, so three `\cref`s point at labels
+nothing defines. The page count was the *symptom*; no page count could have said
+that. So nothing here is pinned by page count.
 What is asserted instead: file counts, nesting depth, include-chain length,
 which bibliography tool is inferred, whether a citation resolved, and which
 *line* a diagnostic points at.

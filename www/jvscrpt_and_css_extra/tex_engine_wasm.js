@@ -72,6 +72,16 @@ export class WasmTexEngine {
     this._manifest = null;
     this._assets = null;
     this._busy = false;
+    /**
+     * Which compile owns this engine.
+     *
+     * `_busy` alone said *that* a compile was running, never *which*, so the
+     * `finally` below cleared it on behalf of whichever run happened to finish
+     * — including one that had already been cancelled and superseded. That run
+     * then reset `_busy` and `onLog` under a live compile's feet. Same fix, and
+     * the same reasoning, as `_run` in tex_engine_native.js.
+     */
+    this._run = 0;
 
     this.capabilities = {
       engines: [],          // filled by init() from what is actually present
@@ -148,7 +158,18 @@ export class WasmTexEngine {
     } = opts;
 
     if (this._busy) throw new Error('a compile is already running');
+    // Captured before the first await: init() below is seconds long and
+    // cancel() can land inside it.
+    const run_ = ++this._run;
+    const owns = () => run_ === this._run;
     if (!this._runner) await this.init();
+    // Cancelled while init() was running. That is a real window, not a
+    // theoretical one: init downloads the texmf data packages and takes
+    // seconds. Leaving here *before* `_busy` is claimed is what matters — a run
+    // that claimed it and then failed the `owns()` test in the finally would
+    // never hand it back, and every later compile would throw "a compile is
+    // already running" for the life of the page.
+    if (!owns()) throw new Error('compile cancelled');
     if (!this.capabilities.engines.includes(engine)) {
       throw new Error(`engine "${engine}" unavailable; this bundle has: ${this.capabilities.engines.join(', ')}`);
     }
@@ -264,20 +285,30 @@ export class WasmTexEngine {
         diagnostics: [...limits, ...parseDiagnostics(log)]
       };
     } finally {
-      this._busy = false;
-      this.onLog = prevOnLog;
+      // Only if this run still owns the engine. A cancelled run reaching here
+      // after a newer compile has started would otherwise clear that compile's
+      // `_busy` and restore an `onLog` belonging to nobody — cancel() has
+      // already done the tidying on this run's behalf.
+      if (owns()) {
+        this._busy = false;
+        this.onLog = prevOnLog;
+      }
     }
   }
 
   get busy() { return this._busy; }
 
   async cancel() {
+    // The token moves whether or not there is a worker to kill: a compile
+    // cancelled during init() has no runner yet and must still be stopped from
+    // claiming the engine when init finishes.
+    this._run++;
+    this._busy = false;
     // The underlying pipeline has no cooperative cancel; terminating the worker
     // is the only way to stop a runaway compile. Next compile re-initialises.
     if (!this._runner) return;
     this._runner.terminate();
     this._runner = null;
-    this._busy = false;
     this._log('warn', 'compile cancelled — engine worker terminated');
   }
 
@@ -287,6 +318,8 @@ export class WasmTexEngine {
   }
 
   async dispose() {
+    this._run++;                 // as in cancel(): a run in flight owns nothing now
+    this._busy = false;
     if (this._runner) this._runner.terminate();
     this._runner = null;
   }

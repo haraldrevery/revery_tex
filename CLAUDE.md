@@ -15,9 +15,16 @@ change having broken something.
 
 ## The invariant
 
-`npm run serve &` then `npm run gate` must pass **5/5**. It compiles four real
-LaTeX projects and asserts exact page counts, plus one that must *fail* by name.
-Any change that breaks it is wrong. Run it before claiming anything works.
+`npm run serve &` then `npm run gate` must pass **7/7**. It compiles six real
+LaTeX projects, plus one that must *fail* by name. Any change that breaks it is
+wrong. Run it before claiming anything works.
+
+**Three of the six are pinned to an exact page count and three are not**, and
+that split is deliberate rather than unfinished. A page count is a function of
+font metrics and the texmf version, so it is only worth pinning where the
+document is stable enough for a change in it to mean something. `homework` is
+the reason the rule exists — see its comment in `test/serve.js`, and
+`latex_stress_test/README.md` § The rules.
 
 ## Two abstractions — do not leak past them
 

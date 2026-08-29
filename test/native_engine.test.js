@@ -172,3 +172,109 @@ test('an engine that is not installed fails by name rather than running somethin
   assert.match(r.error, /xelatex is not installed/);
   assert.equal(api.calls.length, 0, 'nothing may be run when the engine is absent');
 });
+
+/* ── cancelling ───────────────────────────────────────────────────────── */
+//
+// `cancel()` had no test at all, and the thing it got wrong needed two compiles
+// to show: `_cancelled` was one flag on the instance, reset at the top of every
+// compile(), while engine_host.js hands the *same* instance to every compile.
+// The app clears `compiling` synchronously before it awaits engineHost.cancel(),
+// so a new compile can start while the cancelled one is still parked in
+// `await api.runTex(...)` — and starting it un-cancelled the old one, which then
+// ran biber and its remaining passes alongside the new compile, in the same
+// directory, interleaving writes to one .aux.
+//
+// A stub whose runTex parks until the test says so is what makes that overlap
+// reachable; with an immediate stub the two runs never coexist.
+
+const tick = () => new Promise(r => setImmediate(r));
+
+/** A fakeApi whose runTex parks until `release()` is called. */
+function pausingApi({ tools, disk = {} }) {
+  const calls = [];
+  let waiters = [];
+  return {
+    calls,
+    /** Let every parked runTex return. */
+    release() { const w = waiters; waiters = []; for (const r of w) r(); },
+    /**
+     * Release repeatedly so both runs reach their end, however many passes each
+     * turns out to want.
+     *
+     * Bounded, and that is the point: the first version awaited the live
+     * compile directly, and against the *old* engine the abandoned run stole
+     * the releases and the await never settled — so the test hung instead of
+     * failing. A hang reads as a broken suite rather than a broken engine,
+     * which is the one thing a regression test must not do.
+     */
+    async drain(rounds = 12) { for (let i = 0; i < rounds; i++) { this.release(); await tick(); } },
+    detectTex: async () => tools.map(name => ({ name, path: `/usr/bin/${name}`, version: name })),
+    runTex: async (tool, mainFile) => {
+      calls.push({ tool, mainFile });
+      await new Promise((resolve) => waiters.push(resolve));
+      return { tool, code: 0, stdout: 'Output written on main.pdf (1 page).', stderr: '', timedOut: false };
+    },
+    readBinaryFile: async (p) => {
+      if (!(p in disk)) throw new Error(`ENOENT: ${p}`);
+      return disk[p];
+    }
+  };
+}
+
+test('a cancelled compile stops after the pass already running', { timeout: 10000 }, async () => {
+  const api = pausingApi({ tools: ['pdflatex', 'biber'], disk: { 'main.pdf': PDF } });
+  const { eng } = await makeEngine(api);
+
+  const running = eng.compile({ mainFile: 'main.tex', engine: 'pdftex', bibtex: 'biber' });
+  await tick();
+  assert.deepEqual(api.calls.map(c => c.tool), ['pdflatex'], 'pass 1 should be in flight');
+
+  eng.cancel();
+  await api.drain();
+  const r = await running;
+
+  assert.equal(r.success, false);
+  assert.equal(r.error, 'cancelled');
+  assert.deepEqual(api.calls.map(c => c.tool), ['pdflatex'],
+    'nothing may run after the cancel — biber and pass 2 must be skipped');
+});
+
+test('a later compile cannot revive a cancelled one', { timeout: 10000 }, async () => {
+  // The regression this file was missing. Both runs are live at once, which is
+  // exactly the state cancelCompile() leaves the app in: it frees the button
+  // before the engine has stopped.
+  // Both stems, because the artefact is read as `<stem>.pdf`: a missing entry
+  // would fail the live compile for the wrong reason and hide what is asserted.
+  const api = pausingApi({ tools: ['pdflatex', 'biber'], disk: { 'old.pdf': PDF, 'new.pdf': PDF } });
+  const { eng } = await makeEngine(api);
+
+  const abandoned = eng.compile({ mainFile: 'old.tex', engine: 'pdftex', bibtex: 'biber' });
+  await tick();
+  eng.cancel();
+
+  // A second compile on the same instance, while the first is still parked.
+  const current = eng.compile({ mainFile: 'new.tex', engine: 'pdftex', bibtex: 'biber' });
+  await tick();
+  await api.drain();
+
+  const first = await abandoned;
+  assert.equal(first.error, 'cancelled', 'the abandoned run must stay cancelled');
+  // The assertion that actually catches it: with a shared flag the abandoned
+  // run ran biber for old.tex too.
+  assert.deepEqual(
+    api.calls.filter(c => c.mainFile === 'old.tex').map(c => c.tool), ['pdflatex'],
+    'the cancelled run ran a second tool — a later compile reset its cancel flag');
+  assert.ok(api.calls.some(c => c.mainFile === 'new.tex' && c.tool === 'biber'),
+    'the live compile must still run its own passes');
+  assert.equal((await current).success, true, 'the live compile must finish normally');
+});
+
+test('cancel and dispose are safe when nothing is running', async () => {
+  const api = fakeApi({ tools: ['pdflatex'], disk: { 'main.pdf': PDF } });
+  const { eng } = await makeEngine(api);
+  eng.cancel();
+  eng.dispose();
+  // A compile started afterwards is a new run and must not inherit the cancel.
+  const r = await eng.compile({ mainFile: 'main.tex', engine: 'pdftex' });
+  assert.equal(r.success, true, 'a fresh compile after an idle cancel must still run');
+});

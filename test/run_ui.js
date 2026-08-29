@@ -4240,6 +4240,72 @@ async function main() {
     check('About dismisses too',
       await cdp.evaluate(`!document.querySelector('.legal-dlg')`));
 
+
+    /* ── LAST: switching project while a compile is running ──────────────
+     *
+     * Deliberately the final block in this file, and it must stay last.
+     * Switching project reloads the fixture from the dev server, which
+     * *discards every buffer edit the tests above have accumulated* — and
+     * several of them depend on those edits. Placed mid-file it took the
+     * gutter-marker checks down with it: they need diagnostics carrying line
+     * numbers, a pristine `book` compile produces none, and a reload is what
+     * throws away the errors earlier tests had typed in.
+     *
+     * Nothing may be appended after this that assumes a particular project.
+     */
+    /* ── switching project while a compile is running ───────────────── */
+    // The save path had `projectEpoch` and the compile path had nothing, so a
+    // compile that finished after a project switch went on to paint: it wrote
+    // the old project's log and diagnostics into the new project's panel,
+    // `showPdf` put the old project's pages on screen under the new project's
+    // name, and `lastPdf` handed those bytes to Download. On a system TeX it was
+    // worse than display — NativeTexEngine reads the real files, and the
+    // backend resolves every path against the root that is open *when the call
+    // lands*, so the remaining passes compiled in the new project's folder.
+    //
+    // `__reveryTexApp.compile(key)` is the switch: it loads the project first
+    // and compiles second, which is the exact path the Project drop-down takes.
+    // Starting it while `book` is still compiling is therefore the real
+    // interleaving, not a simulation of one.
+    await cdp.waitFor(`!window.__reveryTexApp.compiling`,
+      { what: 'the engine to be idle', timeoutMs: 180000 });
+    const midSwitch = await cdp.evaluate(`(async () => {
+      window.__reveryTexApp.compile('book');          // 49 pages — deliberately not awaited
+      await new Promise(r => setTimeout(r, 600));
+      const wasRunning = window.__reveryTexApp.compiling;
+      // Switching to a 2-page project. The loader cancels the book compile.
+      const r = await window.__reveryTexApp.compile('cv');
+      return { wasRunning, key: window.__reveryTexApp.projectKey, ...r };
+    })()`, true);
+    check('a project switch abandons the compile that was running',
+      midSwitch.wasRunning && midSwitch.key === 'cv',
+      `wasRunning=${midSwitch.wasRunning} key=${midSwitch.key}`);
+    check('the switched-to project compiles as itself',
+      midSwitch.ok && midSwitch.pages === 2,
+      `pages=${midSwitch.pages} · ${midSwitch.status}`);
+
+    // The window in which the abandoned run would have landed. Its page count
+    // is the tell: 49 canvases under the `cv` project is precisely the bug.
+    await sleep(3000);
+    const afterSwitchCompile = await cdp.evaluate(`(() => ({
+      key: window.__reveryTexApp.projectKey,
+      compiling: window.__reveryTexApp.compiling,
+      pages: document.querySelectorAll('#pdf canvas.pdfpage').length,
+      status: document.getElementById('status').textContent
+    }))()`, true);
+    check('the abandoned compile never paints over the new project',
+      afterSwitchCompile.key === 'cv' && afterSwitchCompile.pages === 2 &&
+      afterSwitchCompile.compiling === false,
+      `key=${afterSwitchCompile.key} canvases=${afterSwitchCompile.pages} ` +
+      `compiling=${afterSwitchCompile.compiling} · ${afterSwitchCompile.status}`);
+    // The wedge this fix had to avoid: a staler that moved `compileRun` without
+    // freeing the UI leaves `compiling` true for the life of the page, and
+    // `if (compiling) return` then swallows every later compile in silence.
+    const buttonFree = await cdp.evaluate(
+      `document.getElementById('compile').textContent.trim() === 'Compile' &&
+       !document.getElementById('compile').hasAttribute('data-compiling')`, true);
+    check('and the compile button is not left stuck on Cancel', buttonFree);
+
     await cdp.send('Emulation.clearDeviceMetricsOverride');
 
     const expected = /favicon|\/api\/projects/i;

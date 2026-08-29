@@ -222,14 +222,32 @@ const PROJECTS = {
     dir: 'homework_template',
     main: 'main.tex',
     engine: 'xetex',
-    // The committed main.pdf is 28 pages, built with Times New Roman. Swapping
-    // to Latin Modern changes the text metrics and the document reflows to 27.
-    // Verified not to be content loss: both builds include the same 18 unique
-    // graphics (21 inclusions) and carry the same two pre-existing undefined
-    // references (alg:generic, lst:p5_full).
-    expectPages: 27,
-    referencePages: 28,
-    expectPagesWhy: 'Latin Modern reflows the document; the 28-page reference used Times New Roman',
+    // **Deliberately not pinned by page count**, which is the rule
+    // latex_stress_test/README.md states and the reason it states it: a page
+    // count is a function of font metrics and the texmf version, not of
+    // correctness.
+    //
+    // This one is the worked example. It was pinned at 27 against a comment
+    // claiming a 28-page reference build, and it produces 26 — three numbers,
+    // none of them a bug in the app. The 27 described a version of
+    // homework_template that exists nowhere: `chapter/problem_5.tex` once had a
+    // third, stacked three-panel figure, and it was deleted without its prose.
+    // Line 104 still reads `\cref{fig:stacked_a}, \cref{fig:stacked_b} and
+    // \cref{fig:stacked_c}` with nothing defining those labels, and the gap it
+    // left is at lines 100-103. That single deletion accounts for all of it:
+    // three fewer graphics inclusions (18, not the 21 the old comment claimed),
+    // three new undefined references on top of the two pre-existing ones
+    // (alg:generic, lst:p5_full), and the missing page.
+    //
+    // The fixture's own repository has one commit and its committed main.pdf is
+    // already 26 pages, so it has never been in the state the pin described.
+    // Re-pinning to 26 would only move the same trap one number along — the
+    // sibling repo is not versioned with this file, so the next edit to it
+    // breaks the gate again with no commit here to explain why. What is still
+    // asserted is what this fixture is actually *for*: that a real-world
+    // document with proprietary fonts and an EPS logo compiles at all, on the
+    // bundled engine, after the in-flight patches below.
+    expectPages: null,
     rerun: true,
     note: 'Requires the EPS->PNG logo and Latin Modern font tweaks.',
     // Applied in-flight so latex_project_tests/ stays pristine. These are the

@@ -15,9 +15,9 @@
 //
 // **Nothing here is pinned by page count.** A page count is a function of font
 // metrics and the texmf version, not of correctness: `homework` in the sibling
-// repo is pinned at 27, its own comment records a 28-page reference build, and
-// it currently produces 26. Three numbers, none of them wrong, none of them a
-// bug, and one red test. What is asserted instead is what the fixture *author*
+// repo was pinned at 27, its own comment recorded a 28-page reference build, and
+// it produces 26. Three numbers, none of them wrong, none of them a bug, and one
+// red gate — it is unpinned now. What is asserted instead is what the fixture *author*
 // decided: file counts, nesting depth, include-chain length, tool inference,
 // and which line a diagnostic must point at.
 

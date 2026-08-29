@@ -438,7 +438,7 @@ curl -L https://github.com/TeXlyre/texlyre-busytex/releases/download/assets-v1.2
 node build_tools/extract_traces.js            # logs → texmf_trace.json
 node build_tools/build_slim_texmf.js --report # dry run: sizes, no writes
 node build_tools/build_slim_texmf.js          # writes www/engine/dist/
-npm run gate                                  # must still pass 5/5
+npm run gate                                  # must still pass 7/7
 ```
 
 The repacker reads the LZ4 chunk format using **the engine's own MiniLZ4 codec,
@@ -459,7 +459,7 @@ Individually, when you want the detail:
 
 ```bash
 npm run serve &                                  # required by the gate
-npm run gate                                     # the invariant: must stay 5/5
+npm run gate                                     # the invariant: must stay 7/7
 npm test                                         # fs_core (18) + zip_core (13)
 cargo test --manifest-path tauri/Cargo.toml      # tauri/src/main.rs (19)
 

@@ -3186,6 +3186,18 @@ async function exportZip() {
  * pdfLaTeX wins: it is faster and needs fewer font files.
  */
 async function loadFromDisk(root) {
+  // Before anything else, and before the long read below: a compile still
+  // running belongs to the project being closed. `cancelCompile` is a no-op
+  // when nothing is running, and it is the one place that performs the whole
+  // ritual — move the token, free the button, tell the engine — so this reuses
+  // it rather than adding a second way to abandon a compile.
+  //
+  // First statement, not next to `setProject`, because the read below is one
+  // IPC round trip per file and a compile can land in that gap. The cost of
+  // being early: if the read then fails, the old project stays open with its
+  // compile already abandoned. That is the honest outcome — the user asked to
+  // leave — but it is worth saying rather than discovering.
+  await cancelCompile();
   setStatus('reading folder…', 'warn');
   try {
     setProject(await readProjectFromDisk(NativeAPI, root, {
@@ -3236,6 +3248,7 @@ async function loadFromDisk(root) {
 }
 
 async function loadProject(key) {
+  await cancelCompile();          // as in loadFromDisk, and for the same reason
   setStatus('loading project…', 'warn');
   const { project: loaded, patchLog } = await readProjectFromFixture(key);
   setProject(loaded);
@@ -3295,6 +3308,16 @@ settings.onChange((key) => {
  * abandoned. Bumping the token is what lets us stop waiting — and, just as
  * importantly, throw away the answer if it ever does arrive, so a cancelled run
  * cannot paint its pages and its diagnostics over a newer one.
+ *
+ * **It answers one question, and a compile has two.** `compileRun` says whether
+ * this run still *owns the UI* — the Compile/Cancel button and the `compiling`
+ * flag. Whether its result is still *about the open project* is a different
+ * question with a different token, `projectEpoch`, and conflating them is a
+ * wedge: the `finally` below frees the UI only for the run that owns it, so a
+ * staler that moved `compileRun` without also freeing it would leave
+ * `compiling` true for the life of the page — the button stuck on Cancel and
+ * `if (compiling) return` swallowing every later compile, silently. See `owns`
+ * and `stale` in compile().
  */
 let compileRun = 0;
 let compiling = false;
@@ -3353,7 +3376,26 @@ async function compile() {
   // the compile" the next would be a bad thing to have under muscle memory.
   if (compiling) return;
   const run = ++compileRun;
-  const stale = () => run !== compileRun;
+  const epoch = projectEpoch;
+  /**
+   * Does this run still own the Compile button? Cancel and a newer compile are
+   * the only two things that take it, and both free the UI themselves.
+   */
+  const owns = () => run === compileRun;
+  /**
+   * Is this run's answer still worth having?
+   *
+   * Superseded *or* about a project nobody is looking at any more. The loaders
+   * cancel a running compile before they swap, so the epoch half is the
+   * backstop for a loader added later that forgets to — the same reason
+   * `saveAllInner` consults it rather than trusting its callers.
+   *
+   * Without it a compile finishing after a project switch wrote the old
+   * project's log, diagnostics and *pages* into the new one: `showPdf` painted
+   * the wrong document, `lastPdf` handed those bytes to Download, and
+   * `syncTex.setProjectFiles` married the old records to the new paths.
+   */
+  const stale = () => !owns() || projectEpoch !== epoch;
   compiling = true;
   setCompileButton(true);
   clearLog();
@@ -3415,6 +3457,11 @@ async function compile() {
       } else {
         await saveAll();
       }
+      // The save is the second long await before any compiling starts, and a
+      // system TeX runs real processes in whatever root is open when they land.
+      // Checked here for the same reason as after acquire(): not to discard an
+      // answer, but to avoid producing one in the wrong folder.
+      if (stale()) return;
     }
     setStatus('compiling…', 'warn');
 
@@ -3490,11 +3537,12 @@ async function compile() {
     rawLog('err', `✗ ${err.message}`);
     showTab('raw');
   } finally {
-    // Only if this run is still the current one. When it is not, either
+    // `owns`, not `stale`. When another run has taken the button, either
     // cancelCompile has already freed the UI or a newer compile now owns it,
     // and re-enabling from here would take the Cancel away from a compile that
-    // is genuinely still running.
-    if (!stale()) { compiling = false; setCompileButton(false); }
+    // is genuinely still running. But a run whose *project* moved underneath it
+    // still owns the button, and it is the only thing that can give it back.
+    if (owns()) { compiling = false; setCompileButton(false); }
   }
 }
 
