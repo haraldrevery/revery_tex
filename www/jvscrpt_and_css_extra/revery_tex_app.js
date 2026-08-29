@@ -16,6 +16,7 @@ import { NativeTexEngine } from './tex_engine_native.js';
 import { createEngineHost } from './engine_host.js';
 import { PdfPreview } from './pdf_preview.js';
 import { NativeAPI } from './native_api.js';
+import * as recents from './recent_projects.js';
 import {
   latexEditingExtensions, setDiagnostics, beginEndInsertion,
   latexCompletionSource, suppressCompletion
@@ -67,6 +68,52 @@ const engineSel = new SelectMenu($('engine'), { empty: 'engine' });
 // pickMain. Before this the guess was final, and the three files it did not
 // pick in a folder like cv_template could not be compiled at all.
 const mainSel = new SelectMenu($('docname'), { empty: 'no document' });
+
+/* ── recently opened projects ──────────────────────────────────────────
+   The list lives in recent_projects.js — one implementation for every shell.
+   These three wrappers are all this file needs to know about it.
+
+   Recorded only where `openFolderPath` exists, which today means the desktop.
+   That is not a shortcut: a recents row that cannot be reopened is worse than
+   no row, and the browser backends have neither a path to reopen nor a way to
+   regain a folder permission without putting a picker in front of the user.
+   The entry is keyed on the canonical absolute path the backend returned —
+   an identity — never on `project.key`, which is only the folder's *name* and
+   so is shared by every `thesis` on the machine. */
+
+const canReopen = () => !!NativeAPI.openFolderPath;
+
+/* The dev fixture server answered /api/projects, so the drop-down is that
+   catalogue and not a recents list. Kept as a flag rather than re-probing,
+   because the two lists mean different things and must not be merged: a
+   fixture `key` is not a path and cannot be reopened by one. */
+let fixtureMode = false;
+
+function recordRecent(root, key) {
+  if (!canReopen()) return;
+  recents.record(localStorage, { id: root, label: key, root, env: NativeAPI.env });
+}
+
+/**
+ * Repaint the Project drop-down.
+ *
+ * The current project is always in the list, even before it has been recorded,
+ * so the button never reads "no project" while one is open.
+ */
+function syncProjectSelect() {
+  if (fixtureMode) return;
+  if (!canReopen()) {
+    projectSel.setOptions(project ? [{ label: project.key, value: project.root || project.key }] : []);
+    if (project) projectSel.value = project.root || project.key;
+    return;
+  }
+  const rows = recents.labelled(recents.list(localStorage, NativeAPI.env));
+  // allowNone: on a fresh launch the list is populated before anything is open,
+  // and a button reading "thesis" while no project is open would be a lie. It
+  // reads "no project" and still drops the list.
+  projectSel.setOptions(rows.map(r => ({ label: r.text, value: r.id })), { allowNone: true });
+  if (project?.root) projectSel.value = project.root;
+}
 
 // ── state ──────────────────────────────────────────────────────────────
 let project = null;          // { key, main, engine, files: Map<path, {content, dirty}> }
@@ -2759,23 +2806,53 @@ async function loadProjects() {
     await showStorageNotice();
     const root = await NativeAPI.currentRoot().catch(() => null);
     if (root) { await loadFromDisk(root); return; }
-    // A browser can remember the folder but cannot re-request permission
-    // without a click, so offer it rather than reopening silently.
-    if (NativeAPI.reopenRemembered) {
-      $('open').textContent = 'Reopen folder';
-      $('open').title = 'Reopen the last folder, or pick a different one';
-    }
-    setStatus(NativeAPI.importZip ? 'import a zip to begin' : 'open a folder to begin');
+    // Nothing open. Offer whatever was open last time, so a desktop launch
+    // lands on a list of the user's projects instead of a disabled button —
+    // neither desktop shell persists a root of its own, and this list is the
+    // only thing that remembers across a quit.
+    syncProjectSelect();
+    const remembered = canReopen() ? recents.list(localStorage, NativeAPI.env).length : 0;
+    setStatus(remembered ? 'pick a recent project, or open a folder'
+      : NativeAPI.importZip ? 'import a zip to begin' : 'open a folder to begin');
     return;
   }
 
+  fixtureMode = true;
   projectSel.setOptions(list.filter(p => !p.expectFailure).map(p => ({ label: p.key, value: p.key })));
-  projectSel.onchange = async (v) => {
-    if (!await confirmDiscard('Switch project')) { projectSel.value = project ? project.key : v; return; }
-    loadProject(v);
-  };
   if (projectSel.value) await loadProject(projectSel.value);
 }
+
+/**
+ * Switching projects from the drop-down.
+ *
+ * Wired once, at module scope, for both the fixture catalogue and the recents
+ * list. It used to be assigned inside the `/api/projects` branch above, so on
+ * every real backend the menu rendered a row that did nothing when picked.
+ *
+ * The restore-on-decline is the part worth keeping intact: SelectMenu has
+ * already moved its value by the time this runs, so a declined switch has to
+ * put it back or the button names a project that is not open.
+ */
+projectSel.onchange = async (v) => {
+  const restore = () => {
+    if (fixtureMode) projectSel.value = project ? project.key : v;
+    else syncProjectSelect();
+  };
+  if (!await confirmDiscard('Switch project')) { restore(); return; }
+  if (fixtureMode) { await loadProject(v); return; }
+  if (!canReopen()) return;                 // nothing else can reopen by id yet
+
+  try {
+    const root = await NativeAPI.openFolderPath(v);
+    await loadFromDisk(root);
+  } catch (err) {
+    // The folder is gone, or moved. Drop the row rather than leaving one that
+    // fails every time it is picked — and say so, rather than pruning silently.
+    recents.forget(localStorage, NativeAPI.env, v);
+    syncProjectSelect();
+    setStatus(`✗ ${err.message || err}`, 'err');
+  }
+};
 
 
 /** Open a real folder through NativeAPI. Desktop only for now. */
@@ -2791,6 +2868,82 @@ async function openFolder() {
   }
   if (!root) return;                      // user cancelled
   await loadFromDisk(root);
+}
+
+/**
+ * The document a new project starts with.
+ *
+ * A project with no files is not a state this app has: `project.main` drives the
+ * tree, the outline, the compile and the Save path, and both readers refuse a
+ * project with no `.tex` in it — readProjectFromDisk with "no .tex files in that
+ * folder", the zip store with "That zip has no .tex file in it". So "empty" here
+ * means one skeleton document rather than nothing at all, which is also the only
+ * empty project you can press Compile on and get a PDF.
+ */
+const NEW_PROJECT_MAIN = '\\documentclass{article}\n\n\\begin{document}\n\n\\end{document}\n';
+
+/**
+ * Start a new project.
+ *
+ * Two shapes, chosen by method presence rather than by shell, because the two
+ * backends differ in what a project *is*. Where there are real files, a project
+ * is a folder, so this picks one and writes the seed into it — no new backend
+ * call is needed, since every write creates missing parents (which is why there
+ * is no mkdir in NativeAPI). The zip store has no folder behind it, so nothing
+ * outside it can bring a project into being and it gets `createProject`.
+ */
+async function newProject() {
+  if (!await confirmDiscard('Start a new project')) return;
+
+  if (NativeAPI.openFolder) {
+    let root;
+    try {
+      root = await NativeAPI.openFolder();
+    } catch (err) {
+      setStatus(`✗ ${err}`, 'err');
+      return;
+    }
+    if (!root) return;                    // user cancelled
+
+    // Refuse a folder that already holds a project rather than dropping a
+    // second main.tex into it. Opening it is what the user wanted anyway, and
+    // is what the Open folder row does — so say so instead of half-doing it.
+    let existing = [];
+    try {
+      existing = await NativeAPI.readDirectory();
+    } catch { /* unreadable: the write below will report it properly */ }
+    if (existing.some(e => e.type === 'file' && /\.tex$/i.test(e.path))) {
+      setStatus('✗ that folder already has a .tex file — use Open folder', 'err');
+      return;
+    }
+
+    try {
+      await NativeAPI.writeFile('main.tex', NEW_PROJECT_MAIN, null);
+    } catch (err) {
+      setStatus(`✗ ${err.message || err}`, 'err');
+      return;
+    }
+    await loadFromDisk(root);
+    setStatus('new project — main.tex');
+    return;
+  }
+
+  if (!NativeAPI.createProject) return;
+  // Destructive in the same way an import is, and for the same reason: this
+  // store *is* the project, so the confirmation has to name what is at stake.
+  if (!await ask('Starting a new project replaces the one in browser storage.'
+    + '\n\nExport it first if you want to keep it. Continue?')) return;
+
+  askName({ title: 'New project', label: 'Name', def: 'project' }, async (raw) => {
+    try {
+      const name = await NativeAPI.createProject(raw, NEW_PROJECT_MAIN);
+      await showStorageNotice();
+      await loadFromDisk(name);
+      setStatus('new project — main.tex');
+    } catch (err) {
+      setStatus(`✗ ${err.message || err}`, 'err');
+    }
+  });
 }
 
 // ── zip import and export ──────────────────────────────────────────────
@@ -2997,7 +3150,8 @@ async function loadFromDisk(root) {
   applyRememberedEmptyDirs();
 
   syncMainSelect();
-  projectSel.setOptions([{ label: project.key, value: project.key }]);
+  recordRecent(project.root || root, project.key);
+  syncProjectSelect();
   chosenEngine = null;              // a new document gets its own inference
   syncEngineSelect();
   renderTree();
@@ -3505,7 +3659,6 @@ function reportInteractivity() {
 
 $('compile').onclick = () => (compiling ? cancelCompile() : compile());
 $('save').onclick = saveAll;
-$('open').onclick = openFolder;
 
 /**
  * The same two chords, from anywhere on the page.
@@ -3558,12 +3711,61 @@ document.addEventListener('keydown', (ev) => {
   ev.preventDefault();
   if (y || ev.shiftKey) redoTree(); else undoTree();
 });
-// Presence of the method is the signal, never a check on the environment name.
-// A shell that cannot open a folder does not get a button that implies it can.
-if (!NativeAPI.openFolder) $('open').style.display = 'none';
-if (!NativeAPI.importZip) $('importzip').style.display = 'none';
+/**
+ * The Folder menu: every way a project comes into being.
+ *
+ * Rows are decided by **method presence, never by environment name** — the rule
+ * at the top of native_api.js. A backend that cannot open a folder does not get
+ * a row implying it can, and the row is absent rather than disabled, because a
+ * disabled row still claims the feature exists somewhere the user could reach.
+ *
+ * Built through attachMenu like the logo, Toolbox and Settings menus, so there
+ * is one answer to what Escape and an outside click do. The spec is re-run on
+ * every open, so "Reopen last folder" reflects the store as it is now.
+ */
+function folderRows() {
+  const rows = [];
+  if (NativeAPI.openFolder) {
+    rows.push({ type: 'action', label: 'Open folder…', run: () => openFolder() });
+  }
+  // A browser can remember a folder handle but cannot re-request permission
+  // without a gesture — this click is that gesture. Before this the presence of
+  // the method only relabelled the Open button, which then threw up the picker
+  // anyway: the row promised a reopen nothing implemented.
+  if (NativeAPI.reopenRemembered) {
+    rows.push({ type: 'action', label: 'Reopen last folder', run: () => reopenRemembered() });
+  }
+  if (NativeAPI.importZip) {
+    rows.push({ type: 'action', label: 'Import zip…', run: () => $('zipinput').click() });
+  }
+  if (NativeAPI.openFolder || NativeAPI.createProject) {
+    if (rows.length) rows.push({ type: 'divider' });
+    rows.push({ type: 'action', label: 'New…', run: () => newProject() });
+  }
+  return rows;
+}
 
-$('importzip').onclick = () => $('zipinput').click();
+// Nothing to offer at all — the capability-free backend. Hidden rather than
+// left as a button that opens an empty menu.
+if (!folderRows().length) $('folder').style.display = 'none';
+attachMenu($('folder'), folderRows, { align: 'left' });
+
+/** Reopen the remembered folder, and fall back to the picker if it is gone. */
+async function reopenRemembered() {
+  if (!await confirmDiscard('Open another folder')) return;
+  let root = null;
+  try {
+    root = await NativeAPI.reopenRemembered();
+  } catch (err) {
+    setStatus(`✗ ${err.message || err}`, 'err');
+    return;
+  }
+  // Permission refused, or the folder is gone. Not an error worth a red status:
+  // the picker is one row up and is what the user would reach for next.
+  if (!root) { setStatus('that folder is no longer available — open it again', 'warn'); return; }
+  await loadFromDisk(root);
+}
+
 $('zipinput').onchange = async (e) => {
   const file = e.target.files[0];
   e.target.value = '';   // or picking the same file twice fires no change event

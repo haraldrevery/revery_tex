@@ -84,6 +84,50 @@ function safePathInside(raw, root) {
  * absolute — which is also what keeps it from being read as an option by the
  * program that is eventually handed it.
  */
+/**
+ * Vet a folder the renderer asks to reopen. The twin of vet_project_root in
+ * tauri/src/main.rs, and it must stay the twin — a folder that reopens in one
+ * desktop shell and not the other is undiagnosable.
+ *
+ * Split out of main.js for the reason containingDir is split out of the launch:
+ * the deciding half is a pure function a test can reach.
+ *
+ * This is the one place the renderer gets to *name* a root. Until recents
+ * existed, only the OS folder dialog could set one:
+ *
+ *   - realpath resolves symlinks, so the stored root is the real path.
+ *     safePathInside canonicalises everything it checks against this root.
+ *   - It must be a directory that exists. A recents entry for a folder since
+ *     deleted is refused here and pruned by the caller.
+ *   - A filesystem root and the home directory itself are refused. The root is
+ *     not only what the file commands may reach — it is also the working
+ *     directory the compiler runs in. See CLAUDE.md § the subprocess layer.
+ *
+ * @param {string} raw
+ * @param {string|null} home  absolute, already resolved; null to skip the check
+ */
+function vetProjectRoot(raw, home = null) {
+  if (typeof raw !== 'string' || !raw.trim()) throw new Error('No folder given.');
+  let canonical;
+  try {
+    canonical = fs.realpathSync(raw);
+  } catch (err) {
+    throw new Error(`Cannot open that folder: ${err.message}`);
+  }
+  if (!fs.statSync(canonical).isDirectory()) {
+    throw new Error(`Not a folder: ${canonical}`);
+  }
+  // path.dirname('/') === '/', which is how a filesystem root names itself —
+  // the same test Rust spells as `parent().is_none()`.
+  if (path.dirname(canonical) === canonical) {
+    throw new Error('That is a filesystem root, not a project folder.');
+  }
+  if (home && canonical === home) {
+    throw new Error('That is your home directory, not a project folder.');
+  }
+  return canonical;
+}
+
 function containingDir(raw, root) {
   const abs = safePathInside(raw, root);
   // A path that no longer exists resolves to its parent, which is the useful
@@ -390,6 +434,7 @@ function discardBackup(backupDir, root, rel) {
 }
 
 module.exports = {
+  vetProjectRoot,
   safePath, safePathInside, isInside, containingDir,
   fileManagerProgram, launchFileManager,
   atomicWriteFile, isCrossDeviceErr, tmpFor,

@@ -44,6 +44,16 @@ const tauriImpl = {
 
   openFolder: () => invoke('open_folder_dialog'),
   currentRoot: () => invoke('current_root'),
+
+  // Reopen a folder the recents list remembered, without the OS dialog.
+  //
+  // Desktop only, and its *absence* is what tells the frontend a backend cannot
+  // offer recents — the browser backends have no path to reopen and no way to
+  // regain permission without a picker, so they omit it rather than throw. The
+  // backend vets the path (see vet_project_root); this is the one place the
+  // renderer may name a root, and it is deliberately not the same thing as
+  // being trusted with one.
+  openFolderPath: (path) => invoke('open_folder_path', { path }),
   readDirectory: () => invoke('read_directory'),
   readTextFile: (path) => invoke('read_text_file', { path }),
   readBinaryFile: (path) => invoke('read_binary_file', { path }).then(b64ToBytes),
@@ -123,6 +133,7 @@ const electronImpl = isElectron ? {
 
   openFolder: () => window.electronAPI.openFolder(),
   currentRoot: () => window.electronAPI.currentRoot(),
+  openFolderPath: (path) => window.electronAPI.openFolderPath(path),
   readDirectory: () => window.electronAPI.readDirectory(),
   readTextFile: (path) => window.electronAPI.readTextFile(path),
   readBinaryFile: (path) => window.electronAPI.readBinaryFile(path).then(b64ToBytes),

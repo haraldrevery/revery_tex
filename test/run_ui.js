@@ -1539,13 +1539,31 @@ async function main() {
       }
       const paintedEarly = painted();
 
+      // ── the panel must not move while it is being used ──
+      //
+      // The regression this exists for: the panel had no width, only a
+      // min/max band, and no fixed height — so it was sized by its own
+      // contents. Filtering resized it mid-keystroke, and stepping the card
+      // size moved the footer, which is where the − / + buttons are. Pressing
+      // + moved + out from under the pointer.
+      //
+      // Rounded to whole pixels: sub-pixel drift from a scrollbar is not what
+      // is being asserted, and fractional layout differs between engines.
+      const box = () => {
+        const r = panel.getBoundingClientRect();
+        return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)].join(',');
+      };
+      const stillness = { atOpen: box() };
+
       const filterBox = panel.querySelector('.picker-filter');
       filterBox.value = 'zzz-nothing-matches';
       filterBox.dispatchEvent(new Event('input', { bubbles: true }));
+      stillness.filteredToNothing = box();
       const afterFilter = cards.filter(c => !c.hidden).length;
       const countText = panel.querySelector('.picker-count').textContent;
       filterBox.value = '';
       filterBox.dispatchEvent(new Event('input', { bubbles: true }));
+      stillness.filterCleared = box();
 
       // A grid that wraps, not a single row scrolled sideways.
       const strip = panel.querySelector('.picker-strip');
@@ -1565,7 +1583,17 @@ async function main() {
       const sizeBtns = [...panel.querySelectorAll('.picker-size button')];
       const cardW = () => cards[0].getBoundingClientRect().width;
       const atOpen = cardW();
+      // Where the + button itself is, before and after it is pressed. This is
+      // the jump the user reported: the stepper lives in the footer, and the
+      // footer used to follow the content height.
+      const plusAt = () => {
+        const r = sizeBtns[1].getBoundingClientRect();
+        return [Math.round(r.left), Math.round(r.top)].join(',');
+      };
+      stillness.plusBefore = plusAt();
       sizeBtns[1].click();
+      stillness.plusAfter = plusAt();
+      stillness.afterStep = box();
       const afterPlus = cardW();
       const colsAfterPlus = getComputedStyle(strip).gridTemplateColumns.split(' ').filter(Boolean).length;
       sizeBtns[0].click(); sizeBtns[0].click();
@@ -1597,7 +1625,7 @@ async function main() {
       URL.createObjectURL = realCreate; URL.revokeObjectURL = realRevoke;
 
       return {
-        opened: true, total: cards.length, paintedEarly, afterFilter, countText,
+        opened: true, total: cards.length, paintedEarly, afterFilter, countText, stillness,
         madeMore, leaked, closed: !document.querySelector('.dlg.picker'),
         grid, atOpen, afterPlus, colsAfterPlus, afterMinus, atFloor, atCeil, chosen, stored,
         labels: cards.slice(0, 3).map(c => c.querySelector('.picker-caption').textContent),
@@ -1622,6 +1650,16 @@ async function main() {
       pick.madeMore > 0 && pick.leaked === 0,
       `${pick.madeMore} created after scrolling, ${pick.leaked} left live`);
     check('Escape closes the picker', pick.closed);
+
+    /* ── the picker holds still ─────────────────────────────────────── */
+    const st = pick.stillness || {};
+    check('filtering does not resize the dialog',
+      st.filteredToNothing === st.atOpen && st.filterCleared === st.atOpen,
+      `open ${st.atOpen} → filtered ${st.filteredToNothing} → cleared ${st.filterCleared}`);
+    // The one the user reported: pressing + must not move +.
+    check('stepping the card size does not move the dialog or its buttons',
+      st.afterStep === st.atOpen && st.plusAfter === st.plusBefore,
+      `box ${st.atOpen} → ${st.afterStep}; + at ${st.plusBefore} → ${st.plusAfter}`);
 
     /* ── the grid, and sizing it ────────────────────────────────────── */
     // The point of the dialog is comparing previews, and a single row scrolled

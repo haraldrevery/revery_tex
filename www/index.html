@@ -56,8 +56,19 @@
         <path d="M956.1,98.2v936.8H839.9V605.3H485c-19.2-36-33.5-75.1-42.1-116.2h397V98.2H956.1z"/>
       </svg>
     </button>
-    <button id="open">Open folder</button>
-    <button id="importzip">Import zip</button>
+    <!-- One button for every way a project comes into being: open a folder,
+         import a zip, start a new one. They were three separate controls, of
+         which any given backend showed at most two — Import zip exists only on
+         the Firefox/Safari store, Open folder only where there are real files —
+         so the bar carried width for buttons most users never saw. #topbar-main
+         clips from the right and is already short (Settings and Toolbox vanish
+         below ~1220px), so a menu here buys room the bar actually needs.
+
+         A <button>, not a <div> or <label> wrapper: Electron's drag region is a
+         union and only the elements named in theme.css's -webkit-app-region
+         rule are excluded from it. A wrapper would sit inside the drag region
+         and swallow its own clicks. -->
+    <button id="folder" title="Open, import or start a project">Folder ▾</button>
     <input type="file" id="zipinput" accept=".zip,application/zip" hidden>
     <button id="exportzip" disabled title="Download the whole project as a zip">Export zip</button>
     <!-- Buttons, not <select>: a native list draws the OS popup in system fonts,

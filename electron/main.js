@@ -24,6 +24,7 @@ if (!electron || !electron.app) {
 const { app, BrowserWindow, protocol, dialog, ipcMain, net } = electron;
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { pathToFileURL } = require('url');
 const core = require('./fs_core.js');
 const texRun = require('./tex_run.js');
@@ -164,6 +165,19 @@ handle('fs:openFolder', async () => {
   return rootPath;
 });
 handle('fs:currentRoot', () => rootPath);
+// Reopen a folder the frontend remembered, without the OS dialog. The recents
+// list lives in the frontend (recent_projects.js) so the two desktop shells
+// cannot drift over it; this is the only half a browser cannot do. The vetting
+// is in fs_core beside its Rust twin's reasoning — see vetProjectRoot.
+handle('fs:openFolderPath', (p) => {
+  // Resolved first, because vetProjectRoot compares against a real path and
+  // a home directory reached through a symlink would never match. The Rust
+  // twin canonicalises HOME for the same reason.
+  let home = null;
+  try { home = fs.realpathSync(os.homedir()); } catch { /* no home: skip it */ }
+  rootPath = core.vetProjectRoot(p, home);
+  return rootPath;
+});
 handle('fs:readDirectory', () => core.readDirectory(requireRoot()));
 handle('fs:readTextFile', (p) => core.readTextFile(requireRoot(), p));
 handle('fs:readBinaryFile', (p) => core.readBinaryFile(requireRoot(), p));

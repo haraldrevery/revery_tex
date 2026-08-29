@@ -195,6 +195,50 @@ export const webZipImpl = {
     return name;
   },
 
+  /**
+   * Start a new project: one skeleton document, and nothing else.
+   *
+   * Present only here. Every other backend starts a project by writing a file
+   * into a folder the user picked — a write already creates missing parents,
+   * which is why there is no mkdir in this interface — but there is no folder
+   * behind this store, so nothing outside it can bring a project into being.
+   *
+   * Destructive in exactly the way importZip is, for the same reason, and the
+   * app confirms before calling it for the same reason. The seed is written in
+   * the same transaction as the name and the id: files without an id, or an id
+   * without files, would key crash backups against the wrong project.
+   *
+   * @param {string} name
+   * @param {string} seed  the contents of main.tex
+   */
+  async createProject(name, seed) {
+    const clean = String(name || '').trim().replace(/\.zip$/i, '') || 'project';
+    const id = newProjectId(clean);
+    const now = Date.now();
+
+    const db = await open();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction([FILES, META], 'readwrite');
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(new Error(
+        tx.error && tx.error.name === 'QuotaExceededError'
+          ? 'This browser will not store another project for this site'
+          : (tx.error ? tx.error.message : 'storage transaction aborted')
+      ));
+      const files = tx.objectStore(FILES);
+      files.clear();
+      files.put({ path: 'main.tex', bytes: encoder.encode(seed), mtime_ms: now });
+      tx.objectStore(META).put(clean, 'name');
+      tx.objectStore(META).put(id, 'id');
+    });
+
+    projectName = clean;
+    projectId = id;
+    try { await navigator.storage?.persist?.(); } catch { /* not fatal */ }
+    return clean;
+  },
+
   /** Whether the browser has promised not to evict this project. */
   async isPersistent() {
     try { return !!(await navigator.storage?.persisted?.()); } catch { return false; }

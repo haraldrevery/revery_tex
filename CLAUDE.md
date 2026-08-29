@@ -141,6 +141,32 @@ stays shut and the reveal is reachable only through our own validating command.
 Adding `tauri-plugin-opener` instead would put URL-opening in the binary; see
 the licence section below for why that is not a free change.
 
+### The one place the renderer names a root
+
+`open_folder_path` (Tauri) / `fs:openFolderPath` (Electron), behind the Project
+drop-down's recent-projects rows. Until it existed, only the OS folder dialog
+could set a project root; this is the one command that takes a path from the
+renderer and makes it the root.
+
+That matters more than it looks, because **the root is also the working
+directory `tex_run` compiles in**. So the vetting is not tidiness:
+
+- `vet_project_root` in `tauri/src/main.rs` and `vetProjectRoot` in
+  `electron/fs_core.js` are twins and must stay twins — a folder that reopens in
+  one desktop shell and not the other is undiagnosable. Six tests each, in
+  `main.rs`'s own `mod tests` and in `test/fs_core.test.js`.
+- It canonicalises (so `safe_path_inside` keeps comparing real paths), requires
+  a directory that exists, and **refuses a filesystem root and `$HOME` itself**.
+  Do not drop that last one to make some path work.
+
+**The recents list itself is deliberately not persisted here.** It lives in
+`www/jvscrpt_and_css_extra/recent_projects.js`, in shared JS, for the reason the
+parity tests exist: a list implemented once in Rust and once in Node is two
+implementations that drift. The shells supply only the half a browser cannot do.
+Entries are keyed on a **project identity** — the canonical absolute path — never
+on `project.key`, which is only the folder's name; same rule as the crash
+backups, and for the same reason.
+
 ## Generated files — never edit directly
 
 - `www/jvscrpt_and_css_extra/codemirror-bundle.js` → edit `build_tools/cm_entry_tex.js`
