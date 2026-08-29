@@ -254,6 +254,32 @@ fn tmp_for(dest: &Path) -> PathBuf {
 }
 
 /* ── commands ────────────────────────────────────────────────────────── */
+//
+// **Anything that touches the filesystem or starts a process is
+// `#[tauri::command(async)]`; the window commands are not.** That is the whole
+// rule, and it is a rule rather than a case-by-case judgement so a command
+// added later inherits the right answer.
+//
+// Why it matters: a plain `#[tauri::command]` on a non-async fn is
+// `ExecutionContext::Blocking`, and the IPC arrives through WebKitGTK's custom
+// URI scheme handler — which runs on the GTK main loop. So the body executes on
+// the thread that paints the window. `run_tex` alone is up to 180 s per pass and
+// runs up to five of them; `detect_tex` spawns six processes with a 10 s
+// `--version` leash each and is called unawaited during boot. Both froze the
+// window solid, and the second one did it at launch. `(async)` on a sync fn
+// routes the same body through `respond_async_serialized`, which spawns it on
+// the async runtime — off the main thread, with the body unchanged.
+//
+// The window commands stay blocking on purpose: they are microseconds of work
+// against the event loop, and `close_window` in particular stores AGREED_CLOSE
+// for the `CloseRequested` handler to read. A thread hop there buys nothing and
+// adds an ordering question that does not currently exist.
+//
+// **What this changes: commands can now overlap.** Nothing here assumed they
+// could not. `tmp_for` was already unique per call by pid and atomic counter
+// (see its doc), the close-guard flags are atomics, and every command takes one
+// `get_root()` snapshot and validates every path against *that* snapshot — so a
+// root that moves mid-command cannot widen what an in-flight command may reach.
 
 #[tauri::command]
 async fn open_folder_dialog(app: tauri::AppHandle, state: State<'_, RootPath>) -> Result<Option<String>, String> {
@@ -324,7 +350,7 @@ fn vet_project_root(raw: &str, home: Option<&Path>) -> Result<PathBuf, String> {
 ///
 /// The recents list itself lives in the frontend — see recent_projects.js for
 /// why it is not persisted separately here and in Electron.
-#[tauri::command]
+#[tauri::command(async)]
 fn open_folder_path(path: String, state: State<'_, RootPath>) -> Result<String, String> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -337,7 +363,7 @@ fn open_folder_path(path: String, state: State<'_, RootPath>) -> Result<String, 
 
 /// Recursive listing, relative to the root. Symlinks are skipped: following them
 /// is how a listing walks out of the project.
-#[tauri::command]
+#[tauri::command(async)]
 fn read_directory(state: State<'_, RootPath>) -> Result<Vec<DirEntry>, String> {
     let root = get_root(&state)?;
     let mut out = Vec::new();
@@ -468,13 +494,13 @@ fn write_file_impl(
     stamp_of(&abs)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn read_text_file(path: String, state: State<'_, RootPath>) -> Result<FileRead, String> {
     read_text_impl(&path, &get_root(&state)?)
 }
 
 /// Base64 so binary assets (images, fonts) survive the IPC boundary intact.
-#[tauri::command]
+#[tauri::command(async)]
 fn read_binary_file(path: String, state: State<'_, RootPath>) -> Result<String, String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let root = get_root(&state)?;
@@ -486,7 +512,7 @@ fn read_binary_file(path: String, state: State<'_, RootPath>) -> Result<String, 
 #[derive(serde::Deserialize)]
 struct ExpectStamp { mtime_ms: u64, size: u64 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn write_file(
     path: String,
     content: String,
@@ -523,7 +549,7 @@ fn write_binary_impl(path: &str, b64: &str, root: &Path) -> Result<FileStamp, St
     stamp_of(&abs)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn write_binary_file(
     path: String,
     content: String,
@@ -576,7 +602,7 @@ fn rename_file_impl(from: &str, to: &str, root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_file(path: String, state: State<'_, RootPath>) -> Result<(), String> {
     delete_file_impl(&path, &get_root(&state)?)
 }
@@ -645,13 +671,13 @@ fn launch_file_manager(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn open_containing_folder(path: String, state: State<'_, RootPath>) -> Result<(), String> {
     let dir = containing_dir(&path, &get_root(&state)?)?;
     launch_file_manager(&dir)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn rename_file(from: String, to: String, state: State<'_, RootPath>) -> Result<(), String> {
     rename_file_impl(&from, &to, &get_root(&state)?)
 }
@@ -690,7 +716,7 @@ fn backup_key(abs: &Path) -> String {
     digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn write_backup(
     app: tauri::AppHandle,
     path: String,
@@ -717,7 +743,7 @@ fn write_backup(
 
 /// Backups whose content differs from what is on disk — i.e. unsaved work from
 /// a session that did not exit cleanly.
-#[tauri::command]
+#[tauri::command(async)]
 fn list_stale_backups(app: tauri::AppHandle, state: State<'_, RootPath>) -> Result<Vec<serde_json::Value>, String> {
     let root = get_root(&state)?;
     let dir = backup_dir(&app)?;
@@ -759,7 +785,7 @@ fn list_stale_backups(app: tauri::AppHandle, state: State<'_, RootPath>) -> Resu
 /// this tree just did, off `DefaultHasher`) leaves a file that Discard cannot
 /// reach and `list_stale_backups` keeps finding, so the dialog returns on every
 /// open and the button that is supposed to end it does nothing.
-#[tauri::command]
+#[tauri::command(async)]
 fn discard_backup(app: tauri::AppHandle, path: String, state: State<'_, RootPath>) -> Result<(), String> {
     let root = get_root(&state)?;
     let abs = safe_path_inside(&root.join(&path).to_string_lossy(), &root)?;
@@ -859,7 +885,7 @@ fn is_fullscreen(window: tauri::Window) -> Result<bool, String> {
 
 /// What the user has installed. Cheap enough to call on demand, and it must be
 /// re-checked rather than cached: people install TeX Live while the app is open.
-#[tauri::command]
+#[tauri::command(async)]
 fn detect_tex() -> Vec<tex_run::ToolInfo> {
     tex_run::detect()
 }
@@ -870,7 +896,7 @@ fn detect_tex() -> Vec<tex_run::ToolInfo> {
 /// arguments. `tex_run` builds argv, and the path here is validated against the
 /// project root exactly as a read or a write would be — a compile is not a
 /// reason to relax containment.
-#[tauri::command]
+#[tauri::command(async)]
 fn run_tex(
     tool: String,
     main_file: String,

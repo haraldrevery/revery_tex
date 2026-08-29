@@ -1,0 +1,27 @@
+# Build output. Never committed here — see README.md § The rules.
+#
+# A committed .bbl is the one that actually broke something: bibtex8 rebuilds it
+# on every compile, so the committed copy only goes stale, and biblatex rejects
+# a .bbl written by a different version outright. Every citation then comes out
+# undefined, and the app reports "this bibliography was built by a different
+# biblatex" instead of the problem the document really has.
+#
+# The gate cannot produce any of this — it compiles in the engine's in-memory
+# VFS. A system-TeX run beside the sources can, which is why this file exists.
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.idx
+*.ilg
+*.ind
+*.lof
+*.log
+*.lot
+*.out
+*.pdf
+*.run.xml
+*.synctex.gz
+*.toc

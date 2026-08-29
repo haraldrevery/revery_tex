@@ -1,0 +1,34 @@
+% Classic BibTeX, not biblatex — the other half of the detection this exercises.
+%
+% inferBibTool has to tell these two apart, and getting it wrong is silent in
+% both directions: biber on a classic document fails, and bibtex on a biblatex
+% one produces a bibliography that is quietly wrong rather than absent. So the
+% pair matters more than either file does alone.
+%
+% No .bbl committed here either, for the same reason as the biblatex fixture.
+\documentclass[11pt]{article}
+
+% lmodern before fontenc, and this is a bundle constraint rather than a
+% preference: [T1]{fontenc} on pdflatex reaches for cm-super, whose
+% cm-super-t1.enc is not in the slim texmf the app ships. Without this line
+% every one of these fixtures dies with "cannot open encoding file" on the
+% bundled engine while compiling perfectly on a full system TeX Live.
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+
+\title{Classic BibTeX Stress Fixture}
+\author{Revery TeX test suite}
+
+\begin{document}
+\maketitle
+
+\section{Citations}
+The classic path uses \verb|\bibliographystyle| and \verb|\bibliography|,
+with no \texttt{biblatex} package anywhere in the file.
+Here is one citation~\cite{classic1986} and another~\cite{classic1993}.
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

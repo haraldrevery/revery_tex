@@ -1,0 +1,36 @@
+% A document that must fail, at a line this fixture names.
+%
+% The point is not that it fails — `missing-pkg` in serve.js already covers a
+% compile that cannot start. The point is *where*: a diagnostic is only useful
+% if the line it reports is the line the mistake is on, and that mapping is the
+% thing most easily broken by an engine upgrade, a log-parser change or an
+% off-by-one in the position tracking.
+%
+% So the error sits below a marker comment, and the test finds the marker rather
+% than hardcoding a number — otherwise adding a line to this header would break
+% the test instead of the behaviour it is about.
+\documentclass[11pt]{article}
+
+% lmodern before fontenc, and this is a bundle constraint rather than a
+% preference: [T1]{fontenc} on pdflatex reaches for cm-super, whose
+% cm-super-t1.enc is not in the slim texmf the app ships. Without this line
+% every one of these fixtures dies with "cannot open encoding file" on the
+% bundled engine while compiling perfectly on a full system TeX Live.
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+
+\begin{document}
+
+\section{A section that is fine}
+
+This paragraph compiles. Everything above this point is valid LaTeX, so a
+failure reported before here means the log parser lost its place.
+
+% STRESS-ERROR-LINE: the next line is the mistake, and the only one.
+\thiscontrolsequencedoesnotexist
+
+This paragraph is after the error. With \texttt{--halt-on-error} the run stops
+above, so nothing here reaches the PDF.
+
+\end{document}

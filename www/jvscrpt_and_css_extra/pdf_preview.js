@@ -119,13 +119,22 @@ export class PdfPreview {
     // pdf.js takes ownership of the buffer it is given and detaches it, which
     // would corrupt the caller's copy (the app keeps the bytes for Download).
     const copy = bytes.slice();
-    this.doc = await pdfjsLib.getDocument({
+    // The token this load belongs to, taken after destroyDoc() has bumped it.
+    const token = this._docToken;
+    const doc = await pdfjsLib.getDocument({
       data: copy,
       cMapUrl: CMAP_URL,
       cMapPacked: true,
       standardFontDataUrl: FONT_URL,
       isEvalSupported: false      // strict CSP: never eval font programs
     }).promise;
+    // Abandoned while pdf.js was parsing. `_renderToken` and `_docToken` already
+    // guarded the render and the link index, but the assignment below was
+    // unguarded — so a destroyDoc() landing in this gap nulled `this.doc` and
+    // this line put the dead document straight back, leaving the pane showing a
+    // file nothing had asked for with `#pdfempty` still hidden.
+    if (token !== this._docToken) { await doc.destroy().catch(() => {}); return 0; }
+    this.doc = doc;
     this.pageCount = this.doc.numPages;
     await this.render();
     this.restoreScroll(keepScroll);

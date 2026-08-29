@@ -1,0 +1,16 @@
+% Bundle-safe only: everything here ships in the slim texmf the app builds.
+% No system fonts and no EPS — both are what made the old homework fixture
+% need in-flight patching in serve.js before it would compile at all.
+% lmodern before fontenc, and this is a bundle constraint rather than a
+% preference: [T1]{fontenc} on pdflatex reaches for cm-super, whose
+% cm-super-t1.enc is not in the slim texmf the app ships. Without this line
+% every one of these fixtures dies with "cannot open encoding file" on the
+% bundled engine while compiling perfectly on a full system TeX Live.
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{longtable}
+\usepackage{hyperref}

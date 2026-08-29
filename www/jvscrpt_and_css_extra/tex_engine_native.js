@@ -37,7 +37,23 @@ export class NativeTexEngine {
       engines: [], bibtex: false, biber: false, makeindex: false,
       synctex: true, shellEscape: false, fullTexlive: true
     };
-    this._cancelled = false;
+    /**
+     * Which compile is current.
+     *
+     * A generation counter, not a boolean, and that is the whole point. This
+     * used to be `_cancelled`, one flag on the instance, reset at the top of
+     * every compile() — while engine_host.js hands the *same* instance to every
+     * compile. cancelCompile() clears `compiling` synchronously before it
+     * awaits engineHost.cancel(), so a new compile can start while the
+     * cancelled one is still parked in `await api.runTex(...)`. The new run
+     * reset the flag, the old one resumed with `_cancelled` false, and it went
+     * on to run biber and passes 2-3 *concurrently with the new compile in the
+     * same directory* — two TeX processes interleaving writes to one .aux.
+     *
+     * A token cannot be un-cancelled by somebody else's run: cancel() moves it,
+     * and a run only continues while the token it captured is still current.
+     */
+    this._run = 0;
   }
 
   /** True where a system TeX could exist at all — desktop with the commands. */
@@ -78,8 +94,15 @@ export class NativeTexEngine {
     return this;
   }
 
-  cancel() { this._cancelled = true; }
-  dispose() { }
+  /**
+   * Abandon whatever is running.
+   *
+   * Moving the token is enough: there is no IPC to kill a child, so the tool
+   * already executing runs to completion and only the passes after it are
+   * skipped. That is what engine_host.js's `cancel` doc promises callers.
+   */
+  cancel() { this._run++; }
+  dispose() { this._run++; }
 
   /**
    * Compile.
@@ -90,7 +113,10 @@ export class NativeTexEngine {
    * would silently compile something different from what the user sees.
    */
   async compile({ mainFile, engine = 'pdftex', passes = true, bibtex = false, makeindex = false, timeoutSecs } = {}) {
-    this._cancelled = false;
+    // Captured, never reset: see `_run`. Reassigning a shared flag here is what
+    // let a later compile revive a cancelled one.
+    const run_ = ++this._run;
+    const cancelled = () => run_ !== this._run;
     const tool = ENGINE_TOOL[engine] || engine;
     if (!this.capabilities.engines.includes(tool)) {
       return this._fail(`${tool} is not installed. Available: ${this.capabilities.engines.join(', ') || 'none'}`);
@@ -98,7 +124,7 @@ export class NativeTexEngine {
 
     const runs = [];
     const run = async (t, label) => {
-      if (this._cancelled) return null;
+      if (cancelled()) return null;
       this.onLog(`— ${label}`, 'hdr');
       const r = await this.api.runTex(t, mainFile, timeoutSecs);
       runs.push(r);
@@ -134,7 +160,7 @@ export class NativeTexEngine {
         last = await run(tool, `${tool} pass 3`) || last;
       }
     }
-    if (this._cancelled) return this._fail('cancelled');
+    if (cancelled()) return this._fail('cancelled');
 
     const log = runs.map(r => r.stdout || '').join('\n');
     // Limits go first here for the same reason as in the WASM engine: the Issues
