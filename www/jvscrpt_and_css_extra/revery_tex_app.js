@@ -27,6 +27,7 @@ import * as settings from './settings.js';
 import { attachMenu, openMenuAt, SelectMenu } from './menus.js';
 import { toolboxRows, contextRows } from './toolbox.js';
 import { openDialog, dialogIsOpen, ask, askChoice } from './dialog.js';
+import { isConflict, conflictDetail } from './conflict_rule.js';
 import { openLegal, copySourceLink } from './legal.js';
 import { openAbout } from './about.js';
 import {
@@ -117,6 +118,32 @@ function syncProjectSelect() {
 
 // ── state ──────────────────────────────────────────────────────────────
 let project = null;          // { key, main, engine, files: Map<path, {content, dirty}> }
+
+/**
+ * How many times the open project has been replaced.
+ *
+ * The same device as `compileRun`, for the same class of bug and named to be
+ * recognised as its twin: work that spans an await must be able to ask whether
+ * the world it started in is still there. `compileRun` stops a finished compile
+ * *painting* over a newer state; this stops an in-flight save *writing* over
+ * one, which is the more expensive half and had no guard at all.
+ *
+ * What that looked like: `saveAllInner` awaits `NativeAPI.writeFile(path, …)`
+ * once per file, and the backend resolves that project-relative path against
+ * whatever root is open **at the moment the call lands**, not the one the batch
+ * started in. `confirmDiscard` asks only whether buffers are dirty — during a
+ * save they all still are, since each is cleared only after its own write — so
+ * the switch was offered, and taking it changed the root out from under the
+ * remaining writes. They then landed in the *new* project: onto a file of the
+ * same name if one existed, and otherwise into a file the write created,
+ * silently, because `writeFile` skips the stamp check for a path that is not
+ * there yet. One project's text, in another project's folder, with no conflict
+ * possible and nothing said.
+ *
+ * Bumped in `setProject`, which is why that exists rather than two bare
+ * assignments.
+ */
+let projectEpoch = 0;
 let currentPath = null;
 // The file the media preview is showing, if any. Never set at the same time as
 // currentPath: the editor pane shows one thing, and the two are how it says
@@ -134,6 +161,18 @@ let backupOldestEdit = 0;
 // on every attempt, and the log is the thing being relied on to be readable.
 let backupFailureReported = false;
 const syncTex = new SyncTex();
+
+/**
+ * Replace the open project.
+ *
+ * The one place `project` is assigned, so `projectEpoch` cannot be bumped in
+ * one path and forgotten in the other — which is exactly how a guard like this
+ * rots. A third loader added later gets the invariant by construction.
+ */
+function setProject(p) {
+  project = p;
+  projectEpoch++;
+}
 
 /**
  * One EditorState per file, so undo cannot leave the file it belongs to.
@@ -875,8 +914,22 @@ async function saveAllInner(pending) {
   // it got nor where to look — so there was no way to tell a total failure from
   // one that had already put nine of ten files safely on disk.
   let failedAt = null;
+  // Files this run never attempted, because the project was swapped underneath
+  // it. Counted rather than silently dropped: they are still unsaved, and the
+  // buffers they belong to are on a project object nothing is showing any more,
+  // so the Save button cannot say so on their behalf.
+  let abandoned = 0;
+  // The project this batch belongs to. See projectEpoch: every path below is
+  // resolved by the backend against the root that is open when the call lands,
+  // so once this stops matching, every remaining write in `pending` would go
+  // into somebody else's folder.
+  const epoch = projectEpoch;
+  const switched = () => projectEpoch !== epoch;
   try {
     for (const [path, f] of pending) {
+      // Before the write, and again after the conflict dialog below, because
+      // those are the two places this loop gives the page back to the user.
+      if (switched()) { abandoned = pending.length - written - reloaded - skipped; break; }
       let stamp;
       failedAt = path;
       // The exact string handed to the backend, captured at the call. `f.content`
@@ -893,11 +946,22 @@ async function saveAllInner(pending) {
       try {
         stamp = await NativeAPI.writeFile(path, sent, f.stamp || null);
       } catch (err) {
-        const msg = String(err && err.message ? err.message : err);
-        if (!msg.includes('CONFLICT:')) throw err;
+        // The one refusal that is a question rather than a failure. Recognised
+        // through conflict_rule.js, which also builds the message every backend
+        // sends — so this cannot drift out of step with the four producers the
+        // way a substring search over their wording did.
+        if (!isConflict(err)) throw err;
         // Someone else changed this file since we opened it. Never silently
         // pick a winner — the other copy may be the one that matters.
-        const choice = await resolveConflict(path, msg);
+        const choice = await resolveConflict(path, err);
+        // The dialog is the longest await in the batch and the page is live
+        // behind it, so this is the likeliest moment for the root to have
+        // moved. Checked before the answer is acted on, because two of the
+        // three act on the *current* root: "reload" would read the new
+        // project's file into this buffer, and "overwrite" sends a null stamp —
+        // no conflict can stop it — which makes it the one write in the app
+        // that must least be aimed at the wrong folder.
+        if (switched()) { abandoned = pending.length - written - reloaded - skipped; break; }
         if (choice === 'cancel') {
           // Leave this one alone and carry on with the rest. Aborting the whole
           // save here was the old behaviour and it punished the wrong files:
@@ -944,13 +1008,20 @@ async function saveAllInner(pending) {
       }
       failedAt = null;
     }
+    if (abandoned) {
+      rawLog('wrn', `project changed while saving — ${abandoned} file(s) were not written`);
+    }
     setStatus(
       `saved ${written} file(s)` +
       `${reloaded ? `, ${reloaded} reloaded from disk` : ''}` +
       `${skipped ? `, ${skipped} left unsaved — changed on disk` : ''}` +
-      `${raced ? `, ${raced} edited while saving — save again` : ''}`,
-      (reloaded || skipped || raced) ? 'warn' : 'ok');
-    if (settings.settings.autoCompile) await compile();
+      `${raced ? `, ${raced} edited while saving — save again` : ''}` +
+      `${abandoned ? `, ${abandoned} not written — the project was closed` : ''}`,
+      (reloaded || skipped || raced || abandoned) ? 'warn' : 'ok');
+    // Not after a switch: `compile()` reads the project that is open now, so
+    // this would compile the new one on the old one's behalf — and, on a system
+    // TeX, force-save it first.
+    if (settings.settings.autoCompile && !switched()) await compile();
   } catch (err) {
     setStatus(`✗ saved ${written} of ${pending.length} — ${failedAt} failed: ${err}`, 'err');
     rawLog('err', `save stopped at ${failedAt} after ${written} file(s): ${err}`);
@@ -975,8 +1046,8 @@ async function saveAllInner(pending) {
  * the buffer stays dirty, and the person can go and look at both versions
  * before deciding. That is the one dismissal maps to.
  */
-async function resolveConflict(path, msg) {
-  const detail = msg.split('CONFLICT:').pop();
+async function resolveConflict(path, err) {
+  const detail = conflictDetail(err);
   rawLog('err', `conflict: ${detail}`);
   showTab('raw');
   return askChoice(
@@ -3117,9 +3188,9 @@ async function exportZip() {
 async function loadFromDisk(root) {
   setStatus('reading folder…', 'warn');
   try {
-    project = await readProjectFromDisk(NativeAPI, root, {
+    setProject(await readProjectFromDisk(NativeAPI, root, {
       onWarn: (msg) => rawLog('wrn', msg)
-    });
+    }));
   } catch (err) {
     setStatus(`✗ ${err.message}`, 'err');
     return;
@@ -3167,7 +3238,7 @@ async function loadFromDisk(root) {
 async function loadProject(key) {
   setStatus('loading project…', 'warn');
   const { project: loaded, patchLog } = await readProjectFromFixture(key);
-  project = loaded;
+  setProject(loaded);
   docStates.clear();                // as in loadFromDisk, and for the same reason
   hideMedia();                      // likewise
   await resetPreview();             // likewise

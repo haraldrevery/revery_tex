@@ -10,6 +10,7 @@
 // people leave tabs open for days.
 
 import { staleBackups, readBackupRecords, writeBackupRecord } from './backup_rules.js';
+import { conflictError } from './conflict_rule.js';
 
 const FS_DB = 'revery_tex_fs';
 const HANDLE_KEY = 'root';
@@ -243,10 +244,7 @@ export const webFsImpl = {
     if (expect) {
       const now = stampOf(await handle.getFile());
       if (now.mtime_ms !== expect.mtime_ms || now.size !== expect.size) {
-        throw new Error(
-          `CONFLICT:${path} changed on disk since it was opened ` +
-          `(was ${expect.size} bytes, now ${now.size} bytes)`
-        );
+        throw conflictError(path, expect.size, now.size, 'disk');
       }
     }
 

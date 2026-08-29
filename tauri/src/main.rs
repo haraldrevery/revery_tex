@@ -417,6 +417,19 @@ fn read_text_impl(path: &str, root: &Path) -> Result<FileRead, String> {
     Ok(FileRead { content, stamp })
 }
 
+/// The marker that makes a refused write recognisable once it reaches the page.
+///
+/// Must stay equal to `CONFLICT_PREFIX` in
+/// `www/jvscrpt_and_css_extra/conflict_rule.js`, which owns this wording for all
+/// four backends. This file cannot import it — the renderer's modules are ESM
+/// and this is Rust — so `test/conflict_rule.test.js` compares both this literal
+/// and the sentence below against the message that module builds, the same way
+/// `test/backup_staleness.test.js` holds the four backends to the backup rule.
+///
+/// A Tauri command is `Result<T, String>`, so nothing structured survives the
+/// boundary: the sentinel has to be inside the message text. See conflict_rule.js.
+const CONFLICT_PREFIX: &str = "CONFLICT:";
+
 /// Write, refusing if the file changed on disk since it was read.
 ///
 /// `expect` is the stamp taken at read time; None forces the write (the user
@@ -440,7 +453,7 @@ fn write_file_impl(
                 // desktop prompt read differently from the Electron and browser
                 // ones the tests hold to the same wording.
                 return Err(format!(
-                    "CONFLICT:{path} changed on disk since it was opened \
+                    "{CONFLICT_PREFIX}{path} changed on disk since it was opened \
                      (was {} bytes, now {} bytes)",
                     want.size, now.size
                 ));
@@ -1431,7 +1444,7 @@ mod tests {
         fs::write(root.join("main.tex"), b"their much longer edit").unwrap();
 
         let err = write_file_impl("main.tex", "mine", &root, Some(&r.stamp)).unwrap_err();
-        assert!(err.starts_with("CONFLICT:"), "got: {err}");
+        assert!(err.starts_with(CONFLICT_PREFIX), "got: {err}");
         // Their work must survive the refusal.
         assert_eq!(fs::read_to_string(root.join("main.tex")).unwrap(), "their much longer edit");
         fs::remove_dir_all(&root).ok();
@@ -1460,7 +1473,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(15));
         fs::write(root.join("main.tex"), b"bbbb").unwrap();   // same length
         let err = write_file_impl("main.tex", "cccc", &root, Some(&r.stamp)).unwrap_err();
-        assert!(err.starts_with("CONFLICT:"), "size alone would have missed this");
+        assert!(err.starts_with(CONFLICT_PREFIX), "size alone would have missed this");
         fs::remove_dir_all(&root).ok();
     }
 

@@ -590,3 +590,104 @@ test('backup keys are stable and distinct', () => {
   assert.equal(core.backupKey('/tmp/p/main.tex'), core.backupKey('/tmp/p/main.tex'));
   assert.notEqual(core.backupKey('/tmp/p/main.tex'), core.backupKey('/tmp/p/other.tex'));
 });
+
+/* ── the static server ───────────────────────────────────────────────── */
+//
+// The renderer's only window onto the disk in the Electron build, and until now
+// the only thing tested about it was `isInside` — the check it calls, not the
+// code that calls it. Everything below was reachable through a URL and reached
+// the user as a blank window with an opaque network error behind it.
+
+test('a normal request resolves to the file under www/', () => {
+  const root = tmpdir('static');
+  fs.writeFileSync(path.join(root, 'index.html'), '<!doctype html>');
+  const r = core.resolveStaticRequest(root, 'revery://app/index.html');
+  assert.equal(r.status, 200);
+  assert.equal(r.filePath, path.join(root, 'index.html'));
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('the bare origin serves index.html', () => {
+  const root = tmpdir('static');
+  fs.writeFileSync(path.join(root, 'index.html'), 'x');
+  assert.equal(core.resolveStaticRequest(root, 'revery://app/').status, 200);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+// The regression. `decodeURIComponent` throws URIError on a malformed escape,
+// the handler was an async arrow with no catch, and the throw rejected the
+// protocol request — a blank window, no message, and nothing in the log to say
+// the URL was the problem. Not a traversal attempt and not a missing file, so
+// it gets its own status rather than being folded into one of those.
+test('a malformed percent-escape is a 400, not a throw', () => {
+  const root = tmpdir('static');
+  assert.doesNotThrow(() => core.resolveStaticRequest(root, 'revery://app/%ZZ'));
+  assert.equal(core.resolveStaticRequest(root, 'revery://app/%ZZ').status, 400);
+  assert.equal(core.resolveStaticRequest(root, 'revery://app/%E0%A4%A').status, 400);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('a percent-encoded traversal is refused', () => {
+  const root = tmpdir('static');
+  const outside = tmpdir('static-outside');
+  fs.writeFileSync(path.join(outside, 'secret.env'), 'TOKEN=1');
+  // %2e%2e%2f is ../ — decoded before the containment check, so the check sees
+  // what the filesystem would have seen rather than the escaped spelling.
+  const up = path.basename(outside);
+  const r = core.resolveStaticRequest(
+    root, `revery://app/%2e%2e%2f${up}%2fsecret.env`);
+  assert.equal(r.status, 403);
+  assert.equal(r.filePath, undefined, 'a refusal must not name a path to serve');
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(outside, { recursive: true, force: true });
+});
+
+test('a sibling directory whose name starts with the root is refused', () => {
+  const root = tmpdir('static');
+  // The prefix-vs-segment bug, through the handler rather than through isInside.
+  //
+  // Percent-encoded, and that is the whole trick worth knowing here: `new URL`
+  // normalises a plain `..` out of the pathname before anything of ours runs,
+  // so a test written with literal dots proves nothing about the containment —
+  // it proves the URL parser works. Only the encoded form reaches the check.
+  const r = core.resolveStaticRequest(
+    root, `revery://app/%2e%2e%2f${path.basename(root)}x%2ff`);
+  assert.equal(r.status, 403);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('a missing file and a directory are both 404', () => {
+  const root = tmpdir('static');
+  fs.mkdirSync(path.join(root, 'engine'));
+  assert.equal(core.resolveStaticRequest(root, 'revery://app/nope.js').status, 404);
+  assert.equal(core.resolveStaticRequest(root, 'revery://app/engine').status, 404,
+    'a directory is not something net.fetch can serve');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+// The TOCTOU half: this was `existsSync(p) && statSync(p).isFile()`, so a file
+// unlinked between the two calls threw ENOENT out of the handler. One stat in a
+// catch cannot have a gap in the middle. Simulated by statting a path that is
+// gone, which is the state the second call used to land in.
+test('a file that disappears mid-request is a 404, not a throw', () => {
+  const root = tmpdir('static');
+  const doomed = path.join(root, 'gone.js');
+  fs.writeFileSync(doomed, 'x');
+  fs.unlinkSync(doomed);
+  assert.doesNotThrow(() => core.resolveStaticRequest(root, 'revery://app/gone.js'));
+  assert.equal(core.resolveStaticRequest(root, 'revery://app/gone.js').status, 404);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+// The handler must stay thin enough that these tests cover it. If the decision
+// moves back inline, they cover nothing and nothing says so.
+test('the Electron handler decides nothing of its own', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.js'), 'utf8');
+  const handler = /function registerProtocol[\s\S]*?\n}/.exec(main)[0];
+  assert.match(handler, /core\.resolveStaticRequest\(/,
+    'the handler must go through the tested decision');
+  for (const inline of ['decodeURIComponent', 'existsSync', 'statSync', 'isInside']) {
+    assert.ok(!handler.includes(inline),
+      `${inline} is back in the handler, where no test can reach it`);
+  }
+});

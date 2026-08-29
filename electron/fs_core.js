@@ -265,6 +265,59 @@ function atomicWriteFile(dest, content) {
   syncParentDir(dest);
 }
 
+/* ── the static server ───────────────────────────────────────────────── */
+
+/**
+ * What the Electron shell should serve for one `revery://` request.
+ *
+ * Split from the handler for the reason `containingDir` is split from the
+ * launch and `vetProjectRoot` from the command that mutates the root: the
+ * deciding half is a function a test can reach, and the half that touches
+ * Electron is thin enough to read at a glance. This is the renderer's only
+ * window onto the disk in the Electron build and it had no test at all — the
+ * containment was proven through `isInside` alone, which is not the same as
+ * proving the thing that calls it.
+ *
+ * Three refusals and one success, never a throw. The handler is `async`, so
+ * anything raised here would reject the protocol request and reach the user as
+ * an opaque network error with a blank window behind it:
+ *
+ *   - **400** for a URL that will not decode. `revery://app/%ZZ` is not a
+ *     traversal attempt and not a missing file; `decodeURIComponent` throws
+ *     `URIError` on it, and that throw used to escape.
+ *   - **403** for anything outside `www/`, through the same segment-wise check
+ *     every filesystem command uses — so a percent-encoded `..` is normalised
+ *     and caught here rather than resolving somewhere useful.
+ *   - **404** for what is missing or is not a file. One `statSync` in a catch,
+ *     not `existsSync` followed by `statSync`: a file unlinked between the two
+ *     calls threw ENOENT out of the handler, which is the same blank window by
+ *     a rarer route.
+ *
+ * @param {string} wwwRoot     absolute path to the directory that may be served
+ * @param {string} requestUrl  the request's full URL, undecoded
+ * @returns {{status: number, filePath?: string}}
+ */
+function resolveStaticRequest(wwwRoot, requestUrl) {
+  const root = path.resolve(wwwRoot);
+
+  let rel;
+  try {
+    rel = decodeURIComponent(new URL(requestUrl).pathname);
+  } catch {
+    return { status: 400 };
+  }
+  if (rel === '/' || rel === '') rel = '/index.html';
+
+  const resolved = path.resolve(path.join(root, rel));
+  if (!isInside(root, resolved)) return { status: 403 };
+
+  let st;
+  try { st = fs.statSync(resolved); } catch { return { status: 404 }; }
+  if (!st.isFile()) return { status: 404 };
+
+  return { status: 200, filePath: resolved };
+}
+
 /* ── directory listing ───────────────────────────────────────────────── */
 
 /** Recursive, relative to root. Symlinks skipped — following them walks out. */
@@ -309,6 +362,23 @@ function readBinaryFile(root, rel) {
 }
 
 /**
+ * The marker that makes a refused write recognisable once it reaches the page.
+ *
+ * Must stay equal to `CONFLICT_PREFIX` in
+ * `www/jvscrpt_and_css_extra/conflict_rule.js`, which owns this wording for all
+ * four backends. This file cannot import it — it is CommonJS in the main
+ * process and that module is ESM in the renderer — so
+ * `test/conflict_rule.test.js` runs the write below for real and compares what
+ * it throws against the message that module builds.
+ *
+ * The sentinel lives inside the message because nothing else survives the
+ * bridge: main.js's `handle()` sends `String(err.message)` and preload.js
+ * rebuilds a bare Error, so an `err.code` set here would be gone by the time
+ * the renderer saw it. See conflict_rule.js.
+ */
+const CONFLICT_PREFIX = 'CONFLICT:';
+
+/**
  * Write, refusing if the file changed on disk since it was read.
  *
  * `expect` is the stamp taken at read time; null forces the write (the user was
@@ -322,7 +392,7 @@ function writeFile(root, rel, content, expect = null) {
     const now = stampOf(abs);
     if (now.mtime_ms !== expect.mtime_ms || now.size !== expect.size) {
       throw new Error(
-        `CONFLICT:${rel} changed on disk since it was opened ` +
+        `${CONFLICT_PREFIX}${rel} changed on disk since it was opened ` +
         `(was ${expect.size} bytes, now ${now.size} bytes)`
       );
     }
@@ -434,9 +504,10 @@ function discardBackup(backupDir, root, rel) {
 }
 
 module.exports = {
+  CONFLICT_PREFIX,
   vetProjectRoot,
   safePath, safePathInside, isInside, containingDir,
-  fileManagerProgram, launchFileManager,
+  fileManagerProgram, launchFileManager, resolveStaticRequest,
   atomicWriteFile, isCrossDeviceErr, tmpFor,
   readDirectory, readTextFile, readBinaryFile, writeFile, writeBinaryFile,
   deleteFile, renameFile, stampOf,
