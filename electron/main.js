@@ -53,27 +53,26 @@ function requireRoot() {
   return rootPath;
 }
 
+/** What each refusal says. The body is read by nothing but a developer. */
+const STATIC_REFUSAL = { 400: 'Bad request', 403: 'Forbidden', 404: 'Not found' };
+
+/**
+ * Serve www/ over the custom protocol.
+ *
+ * Every decision — decoding, containment, existence — is `resolveStaticRequest`
+ * in fs_core.js, beside the other path logic and covered by
+ * test/fs_core.test.js. What is left here is the half that needs Electron, and
+ * it is deliberately too thin to hide a bug: this used to decode, resolve,
+ * contain and stat inline, so a malformed escape or a file unlinked mid-request
+ * threw out of an async handler and surfaced as a blank window.
+ */
 function registerProtocol() {
   protocol.handle(SCHEME, async (request) => {
-    const url = new URL(request.url);
-    let rel = decodeURIComponent(url.pathname);
-    if (rel === '/' || rel === '') rel = '/index.html';
-
-    // Contain the static server to www/ — the renderer must not be able to read
-    // the rest of the disk by asking for it.
-    //
-    // Through the same segment-wise check every filesystem command uses. This
-    // was a string prefix, which would also have served a sibling directory
-    // whose name merely starts with "www" — nothing ships beside www/ today,
-    // and one check that is right everywhere beats two that agree by luck.
-    const resolved = path.resolve(path.join(WWW, rel));
-    if (!core.isInside(path.resolve(WWW), resolved)) {
-      return new Response('Forbidden', { status: 403 });
+    const r = core.resolveStaticRequest(WWW, request.url);
+    if (r.status !== 200) {
+      return new Response(STATIC_REFUSAL[r.status], { status: r.status });
     }
-    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
-      return new Response('Not found', { status: 404 });
-    }
-    return net.fetch(pathToFileURL(resolved).toString());
+    return net.fetch(pathToFileURL(r.filePath).toString());
   });
 }
 

@@ -14,6 +14,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 // project_store.js touches no DOM, so it imports directly — this used to lift
 // the functions out of the app module's source by name, because they lived in a
@@ -101,17 +102,42 @@ test('biblatex wins when both shapes appear', async () => {
 const FIXTURES = path.join(__dirname, '..', '..', 'latex_project_tests');
 const haveFixtures = fs.existsSync(FIXTURES);
 
+/**
+ * The files the fixture repo actually ships, as a Set of repo-relative paths.
+ *
+ * `null` when the answer cannot be had — no git, or a fixtures directory that
+ * is not a checkout — so the caller can say so rather than guess.
+ *
+ * This is asked of git rather than of the filesystem because the two answer
+ * different questions, and the test below wants the one only git can answer.
+ * `existsSync` was standing in for "does this template ship a .bbl", but the
+ * gate compiles these very directories in place, so bibtex8 writes a main.bbl
+ * next to the source on every run. The test then failed for the *opposite* of
+ * its own reason: not a stale artifact committed by mistake, but proof that the
+ * tool it is asserting about had just run and worked. A tracked-files check
+ * cannot be fooled by build output, which is the whole distinction.
+ */
+function shippedFiles() {
+  const r = spawnSync('git', ['-C', FIXTURES, 'ls-files'], { encoding: 'utf8' });
+  if (r.error || r.status !== 0) return null;
+  return new Set(r.stdout.split('\n').filter(Boolean));
+}
+
 test('the book templates build with the bundled bibtex8', { skip: !haveFixtures }, async () => {
   // They asked for biber and shipped a prebuilt main.bbl, because no WASM build
   // has biber. biblatex then rejected that .bbl as the wrong format version and
   // every citation came out undefined — the flagship template demonstrating the
   // bug. On backend=bibtex the bundle's own bibtex8 builds the .bbl, so the
   // bibliography is real everywhere and no .bbl needs committing.
+  const shipped = shippedFiles();
   for (const dir of ['hrldrvry_book_templt_v1', 'hrldrvry_book_templt_v2']) {
     const src = fs.readFileSync(path.join(FIXTURES, dir, 'main.tex'), 'utf8');
     assert.equal(await inferBibTool(src), 'bibtex', `${dir} should be on backend=bibtex`);
-    assert.ok(!fs.existsSync(path.join(FIXTURES, dir, 'main.bbl')),
-      `${dir} should ship no .bbl — bibtex8 builds one on every compile`);
+    if (shipped) {
+      assert.ok(!shipped.has(`${dir}/main.bbl`),
+        `${dir} ships a committed .bbl — bibtex8 builds one on every compile, ` +
+        `so the committed copy can only go stale`);
+    }
   }
 });
 

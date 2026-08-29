@@ -17,6 +17,7 @@
 
 import { readZip, normalizeZipEntries } from './zip_core.js';
 import { staleBackups, readBackupRecords, writeBackupRecord } from './backup_rules.js';
+import { conflictError } from './conflict_rule.js';
 
 const DB_NAME = 'revery_tex_zip';
 const FILES = 'files';
@@ -305,10 +306,7 @@ export const webZipImpl = {
     if (expect && existing) {
       const now = stampOf(existing);
       if (now.mtime_ms !== expect.mtime_ms || now.size !== expect.size) {
-        throw new Error(
-          `CONFLICT:${path} changed in another tab since it was opened ` +
-          `(was ${expect.size} bytes, now ${now.size} bytes)`
-        );
+        throw conflictError(path, expect.size, now.size, 'tab');
       }
     }
 
