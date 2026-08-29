@@ -148,7 +148,7 @@ async function main() {
       desktop: window.NativeAPI.isDesktop,
       canOpen: !!window.NativeAPI.openFolder,
       canReveal: typeof window.NativeAPI.openContainingFolder === 'function',
-      importVisible: getComputedStyle(document.getElementById('importzip')).display !== 'none',
+      canReopenPath: typeof window.NativeAPI.openFolderPath === 'function',
       noticeShown: !document.getElementById('notice').hidden,
       notice: document.getElementById('notice').textContent,
       files: [...document.querySelectorAll('.node[data-path]')].map(n => n.dataset.path).sort()
@@ -161,7 +161,22 @@ async function main() {
     // menu row on the desktop and nowhere else. Never invoked by this suite: it
     // would open a file manager window on whatever machine ran it.
     check('can show a folder in the file manager', shell.canReveal);
-    check('no zip import offered', !shell.importVisible);
+    // Open folder / Import zip / New are rows in the Folder menu now. What is
+    // checked is unchanged: this shell has real files, so it must not offer an
+    // import that would replace them with a copy in browser storage.
+    const menu = await cdp.evaluate(`(() => {
+      document.getElementById('folder').click();
+      const rows = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .map(b => b.textContent.trim());
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return rows;
+    })()`);
+    check('no zip import offered', !menu.some(r => /^import zip/i.test(r)), menu.join(' | '));
+    check('the Folder menu opens a folder and starts a new project',
+      menu.some(r => /^open folder/i.test(r)) && menu.some(r => /^new/i.test(r)), menu.join(' | '));
+    // Recents are only offered where a remembered path can actually be
+    // reopened without the OS dialog, and this is the shell that can.
+    check('can reopen a remembered path', shell.canReopenPath);
     // By text, not by whether the bar is showing at all. The bar has two
     // callers and on desktop the other one — the system-LaTeX offer — is
     // legitimately in it, so asserting the bar is empty made this flaky the
@@ -169,6 +184,49 @@ async function main() {
     check('no browser-storage notice', !/browser storage/i.test(shell.notice), shell.notice.slice(0, 60));
     check('opened the scratch project', shell.files.join(',') === 'chapters/one.tex,main.tex',
       shell.files.join(', '));
+
+    /* ── recently opened projects ───────────────────────────────────── */
+    // Neither desktop shell persists a root of its own — Tauri holds it in a
+    // Mutex and this one in a plain `let` — so this list is the only thing
+    // that survives a quit, and the Project drop-down is the only place it is
+    // offered. Before it existed the drop-down was reset on every open to a
+    // one-element list holding the current project, and its onchange was
+    // wired only on the dev-fixture path, so the row did nothing when picked.
+    const recents = await cdp.evaluate(`(async () => {
+      const stored = JSON.parse(localStorage.getItem('revery_tex_recents') || '[]');
+      const btn = document.getElementById('project');
+      btn.click();
+      const rows = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .map(b => b.textContent.replace(/^[■□]\s*/, '').trim());
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      // The round trip the drop-down makes when a row is picked: a remembered
+      // absolute path reopens with no folder dialog. Same folder, so nothing
+      // is disturbed by asking.
+      let reopened = null, refused = null;
+      try { reopened = await window.NativeAPI.openFolderPath(stored[0].root); } catch (e) { reopened = String(e); }
+      // And the guard that path goes through is really in the way.
+      try { await window.NativeAPI.openFolderPath('/'); refused = 'accepted /'; }
+      catch (e) { refused = String(e.message || e); }
+      return { stored, rows, reopened, refused, disabled: btn.disabled };
+    })()`, true);
+
+    check('the opened project is recorded as recent',
+      recents.stored.length === 1 && recents.stored[0].env === 'electron',
+      JSON.stringify(recents.stored));
+    // Keyed on the absolute path, never on project.key — two folders called
+    // `thesis` are two projects, and the name is what they share.
+    check('and is keyed on its absolute path, not its name',
+      recents.stored[0]?.id === project && recents.stored[0]?.label !== recents.stored[0]?.id,
+      `${recents.stored[0]?.label} → ${recents.stored[0]?.id}`);
+    check('the Project drop-down is usable and lists it',
+      !recents.disabled && recents.rows.some(r => r.includes(path.basename(project))),
+      recents.rows.join(' | '));
+    check('a remembered path reopens without the folder dialog',
+      recents.reopened === project, String(recents.reopened));
+    // The renderer names this path, which it could not before. The backend
+    // vets it: the root is also the working directory the compiler runs in.
+    check('but a filesystem root is refused',
+      /filesystem root/i.test(recents.refused || ''), recents.refused);
 
     /* ── a save reaches the disk ────────────────────────────────────── */
     const saved = await cdp.evaluate(`(async () => {

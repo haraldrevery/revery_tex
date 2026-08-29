@@ -28,8 +28,10 @@ use tauri_plugin_dialog::DialogExt;
 // the only code here that starts a process, and that boundary is worth seeing.
 mod tex_run;
 
-/// The single open project root. Owned by the backend: the renderer can ask to
-/// change it via open_folder_dialog, but cannot set it to an arbitrary path.
+/// The single open project root. Owned by the backend: the renderer may ask for
+/// it to change, but only through a command that vets the answer — the OS folder
+/// dialog (open_folder_dialog) or a remembered path (open_folder_path, which
+/// goes through vet_project_root).
 struct RootPath(Mutex<Option<PathBuf>>);
 
 #[derive(Serialize)]
@@ -276,6 +278,61 @@ fn current_root(state: State<'_, RootPath>) -> Option<String> {
         .unwrap_or_else(|p| p.into_inner())
         .as_ref()
         .map(|p| p.to_string_lossy().to_string())
+}
+
+/// Vet a folder the renderer asks to reopen.
+///
+/// Split from the command below for the reason containing_dir is split from the
+/// launch: the deciding half is a pure function a test can reach, and the half
+/// that mutates process state is thin enough to read at a glance.
+///
+/// This is the one place the renderer gets to *name* a root. Until recents
+/// existed, only the OS folder dialog could set one, and that difference is
+/// worth being explicit about:
+///
+///   - `canonicalize` resolves symlinks, so the stored root is the real path.
+///     safe_path_inside canonicalises everything it checks against this root, so
+///     a root that were itself a symlink would make every later comparison
+///     compare the wrong two paths.
+///   - It must be a directory that exists. A recents entry for a folder since
+///     deleted is refused here and pruned by the caller.
+///   - **A filesystem root and the home directory itself are refused.** The root
+///     is not only what the file commands are allowed to reach — it is also the
+///     working directory tex_run compiles in. `/` or `$HOME` as a project root
+///     would be a materially larger surface than any folder a user picks in a
+///     dialog, and no real project is either of them.
+fn vet_project_root(raw: &str, home: Option<&Path>) -> Result<PathBuf, String> {
+    if raw.trim().is_empty() {
+        return Err("No folder given.".to_string());
+    }
+    let canonical = PathBuf::from(raw)
+        .canonicalize()
+        .map_err(|e| format!("Cannot open that folder: {e}"))?;
+    if !canonical.is_dir() {
+        return Err(format!("Not a folder: {}", canonical.display()));
+    }
+    if canonical.parent().is_none() {
+        return Err("That is a filesystem root, not a project folder.".to_string());
+    }
+    if home.map(|h| h == canonical).unwrap_or(false) {
+        return Err("That is your home directory, not a project folder.".to_string());
+    }
+    Ok(canonical)
+}
+
+/// Reopen a folder the frontend remembered, without the OS dialog.
+///
+/// The recents list itself lives in the frontend — see recent_projects.js for
+/// why it is not persisted separately here and in Electron.
+#[tauri::command]
+fn open_folder_path(path: String, state: State<'_, RootPath>) -> Result<String, String> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .and_then(|p| p.canonicalize().ok());
+    let canonical = vet_project_root(&path, home.as_deref())?;
+    *state.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(canonical.clone());
+    Ok(canonical.to_string_lossy().to_string())
 }
 
 /// Recursive listing, relative to the root. Symlinks are skipped: following them
@@ -832,6 +889,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             open_folder_dialog,
             current_root,
+            open_folder_path,
             read_directory,
             read_text_file,
             read_binary_file,
@@ -989,6 +1047,64 @@ mod tests {
         // child of this test process.
         std::thread::sleep(std::time::Duration::from_millis(1500));
         fs::remove_dir_all(&root).ok();
+    }
+
+    /* ── vet_project_root ────────────────────────────────────────────
+       The renderer names this path, so every refusal is worth a test. */
+
+    #[test]
+    fn vet_project_root_accepts_a_real_folder_and_canonicalises_it() {
+        let d = tmpdir("vet-ok");
+        let sub = d.join("thesis");
+        fs::create_dir_all(&sub).unwrap();
+        // A path with a `.` segment must come back resolved, because
+        // safe_path_inside compares canonical paths against whatever is stored.
+        let scruffy = format!("{}/./thesis", d.to_string_lossy());
+        let got = vet_project_root(&scruffy, None).unwrap();
+        assert_eq!(got, sub.canonicalize().unwrap());
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn vet_project_root_refuses_a_path_that_is_gone() {
+        let d = tmpdir("vet-gone");
+        let missing = d.join("never-existed");
+        assert!(vet_project_root(&missing.to_string_lossy(), None).is_err());
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn vet_project_root_refuses_a_file() {
+        let d = tmpdir("vet-file");
+        let f = d.join("main.tex");
+        fs::write(&f, "x").unwrap();
+        assert!(vet_project_root(&f.to_string_lossy(), None).is_err());
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn vet_project_root_refuses_empty() {
+        assert!(vet_project_root("", None).is_err());
+        assert!(vet_project_root("   ", None).is_err());
+    }
+
+    /// The root is also tex_run's working directory, so this is not tidiness.
+    #[test]
+    fn vet_project_root_refuses_a_filesystem_root() {
+        let root = if cfg!(windows) { "C:\\" } else { "/" };
+        assert!(vet_project_root(root, None).is_err());
+    }
+
+    #[test]
+    fn vet_project_root_refuses_the_home_directory_itself() {
+        let d = tmpdir("vet-home");
+        let home = d.canonicalize().unwrap();
+        assert!(vet_project_root(&home.to_string_lossy(), Some(&home)).is_err());
+        // A project *inside* home is the normal case and must still pass.
+        let sub = home.join("thesis");
+        fs::create_dir_all(&sub).unwrap();
+        assert!(vet_project_root(&sub.to_string_lossy(), Some(&home)).is_ok());
+        fs::remove_dir_all(&d).ok();
     }
 
     #[test]

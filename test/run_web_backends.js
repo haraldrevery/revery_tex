@@ -101,13 +101,25 @@ async function main() {
     await cdp.evaluate(ANSWER_ASKS);
 
     /* ── the shell chose the right backend and says what it is ──────── */
+    // Open folder / Import zip / New are rows in the Folder menu now, not
+    // separate topbar buttons. What is being checked is unchanged: a backend
+    // must not offer a way in that it cannot honour. `.click()` is enough to
+    // open an attachMenu — only dismissal needs a real mousedown.
+    const FOLDER_ROWS = `(() => {
+      const btn = document.getElementById('folder');
+      if (getComputedStyle(btn).display === 'none') return { hidden: true, rows: [] };
+      btn.click();
+      const rows = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .map(b => b.textContent.trim());
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return { hidden: false, rows };
+    })()`;
+
     const shell = await cdp.evaluate(`(() => ({
       backend: window.NativeAPI.env,
       canOpenFolder: !!window.NativeAPI.openFolder,
       canReveal: !!window.NativeAPI.openContainingFolder,
       canImport: !!window.NativeAPI.importZip,
-      openVisible: getComputedStyle(document.getElementById('open')).display !== 'none',
-      importVisible: getComputedStyle(document.getElementById('importzip')).display !== 'none',
       exportDisabled: document.getElementById('exportzip').disabled,
       noticeShown: !document.getElementById('notice').hidden,
       notice: document.getElementById('notice').textContent,
@@ -121,8 +133,15 @@ async function main() {
     // alone. Present-and-throwing would put a row here that cannot work.
     check('no openContainingFolder method', !shell.canReveal,
       shell.canReveal ? 'present — the menu would offer a folder there is none of' : '');
-    check('Open folder button hidden', !shell.openVisible);
-    check('Import zip button shown', shell.importVisible && shell.canImport);
+    const zipMenu = await cdp.evaluate(FOLDER_ROWS);
+    check('Folder menu offers no way to open a folder',
+      !zipMenu.rows.some(r => /^open folder/i.test(r)), zipMenu.rows.join(' | '));
+    check('Folder menu offers Import zip',
+      shell.canImport && zipMenu.rows.some(r => /^import zip/i.test(r)), zipMenu.rows.join(' | '));
+    // The zip store is the only backend that cannot start a project from a
+    // folder, so New here is the createProject path or nothing.
+    check('Folder menu offers a new project',
+      zipMenu.rows.some(r => /^new/i.test(r)), zipMenu.rows.join(' | '));
     check('Export disabled with no project', shell.exportDisabled);
     check('storage notice is visible', shell.noticeShown, shell.notice.slice(0, 60) + '…');
     check('notice names browser storage', /browser storage/i.test(shell.notice));
@@ -708,12 +727,13 @@ async function main() {
     await cdp.waitFor('!!window.NativeAPI', { what: 'reboot', timeoutMs: 30000 });
     const bare = await cdp.evaluate(`(() => ({
       backend: window.NativeAPI.env,
-      status: document.getElementById('status').textContent,
-      openVisible: getComputedStyle(document.getElementById('open')).display !== 'none',
-      importVisible: getComputedStyle(document.getElementById('importzip')).display !== 'none'
+      status: document.getElementById('status').textContent
     }))()`);
+    const bareMenu = await cdp.evaluate(FOLDER_ROWS);
     check('capability-free backend selected', bare.backend === 'web', bare.backend);
-    check('both open buttons hidden', !bare.openVisible && !bare.importVisible);
+    // Not an empty menu — no button at all. A control that opens onto nothing
+    // still claims the app can do something here.
+    check('the Folder button is hidden entirely', bareMenu.hidden, JSON.stringify(bareMenu.rows));
     check('says plainly it cannot help', /cannot open or store/i.test(bare.status), bare.status);
 
     /* ── and the Chromium default, on the same static host ──────────── */
@@ -727,19 +747,26 @@ async function main() {
       canOpen: !!window.NativeAPI.openFolder,
       hasReopen: !!window.NativeAPI.reopenRemembered,
       status: document.getElementById('status').textContent,
-      openVisible: getComputedStyle(document.getElementById('open')).display !== 'none',
-      importVisible: getComputedStyle(document.getElementById('importzip')).display !== 'none',
       noticeShown: !document.getElementById('notice').hidden,
       notice: document.getElementById('notice').textContent
     }))()`);
 
     check('web-fs chosen by default in Chromium', chromium.backend === 'web-fs', chromium.backend);
-    check('Open folder offered', chromium.canOpen && chromium.openVisible);
-    check('Import hidden when real files are available', !chromium.importVisible);
+    const fsMenu = await cdp.evaluate(FOLDER_ROWS);
+    check('Folder menu offers Open folder',
+      chromium.canOpen && fsMenu.rows.some(r => /^open folder/i.test(r)), fsMenu.rows.join(' | '));
+    check('no Import row when real files are available',
+      !fsMenu.rows.some(r => /^import zip/i.test(r)), fsMenu.rows.join(' | '));
     check('no storage notice — files are real here', !chromium.noticeShown);
     check('no system-LaTeX offer in a browser', !/system LaTeX|Found a LaTeX/i.test(chromium.notice || ''));
     check('status invites opening a folder', /open a folder/i.test(chromium.status), chromium.status);
     check('reopen is available for a remembered folder', chromium.hasReopen);
+    // Presence of the method was all this ever checked, which is exactly how a
+    // "Reopen folder" label that opened the picker instead survived: the row
+    // has to exist too, and it has to be its own row rather than a relabelling
+    // of Open folder.
+    check('and the Folder menu has a row that uses it',
+      fsMenu.rows.some(r => /^reopen last folder/i.test(r)), fsMenu.rows.join(' | '));
 
     // `/api/projects` 404 is the fixture probe, and on a static host it is
     // supposed to fail — that failure is how the app knows it is not on a dev

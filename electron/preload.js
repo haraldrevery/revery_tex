@@ -19,6 +19,7 @@ const call = (channel, ...args) =>
 contextBridge.exposeInMainWorld('electronAPI', {
   openFolder: () => call('fs:openFolder'),
   currentRoot: () => call('fs:currentRoot'),
+  openFolderPath: (path) => call('fs:openFolderPath', path),
   readDirectory: () => call('fs:readDirectory'),
   readTextFile: (path) => call('fs:readTextFile', path),
   readBinaryFile: (path) => call('fs:readBinaryFile', path),

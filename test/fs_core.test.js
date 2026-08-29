@@ -105,6 +105,56 @@ test('the launcher disowns its child and never waits for it', () => {
   assert.ok(!/shell:\s*true/.test(body), 'no shell');
 });
 
+/* ── vetProjectRoot ────────────────────────────────────────────────────
+   The renderer names this path — it is the one place it may — so every refusal
+   is worth a test. The Rust twin (vet_project_root in tauri/src/main.rs) has
+   the same six, and the two must agree: a folder that reopens in one desktop
+   shell and not the other is undiagnosable. */
+
+test('vetProjectRoot accepts a real folder and resolves it', () => {
+  const root = tmpdir('vet-ok');
+  fs.mkdirSync(path.join(root, 'thesis'));
+  const real = fs.realpathSync(path.join(root, 'thesis'));
+  // A scruffy path must come back resolved: safePathInside compares canonical
+  // paths against whatever is stored as the root.
+  assert.equal(core.vetProjectRoot(path.join(root, '.', 'thesis')), real);
+});
+
+test('vetProjectRoot refuses a path that is gone', () => {
+  const root = tmpdir('vet-gone');
+  assert.throws(() => core.vetProjectRoot(path.join(root, 'never-existed')),
+    /Cannot open that folder/);
+});
+
+test('vetProjectRoot refuses a file', () => {
+  const root = tmpdir('vet-file');
+  const f = path.join(root, 'main.tex');
+  fs.writeFileSync(f, 'x');
+  assert.throws(() => core.vetProjectRoot(f), /Not a folder/);
+});
+
+test('vetProjectRoot refuses nothing at all', () => {
+  assert.throws(() => core.vetProjectRoot(''), /No folder given/);
+  assert.throws(() => core.vetProjectRoot('   '), /No folder given/);
+  assert.throws(() => core.vetProjectRoot(null), /No folder given/);
+});
+
+// The root is also the working directory the compiler runs in, so this is not
+// tidiness. See CLAUDE.md § the subprocess layer.
+test('vetProjectRoot refuses a filesystem root', () => {
+  assert.throws(() => core.vetProjectRoot(path.parse(process.cwd()).root),
+    /filesystem root/);
+});
+
+test('vetProjectRoot refuses the home directory itself', () => {
+  const home = fs.realpathSync(tmpdir('vet-home'));
+  assert.throws(() => core.vetProjectRoot(home, home), /home directory/);
+  // A project *inside* home is the normal case and must still pass.
+  const sub = path.join(home, 'thesis');
+  fs.mkdirSync(sub);
+  assert.equal(core.vetProjectRoot(sub, home), fs.realpathSync(sub));
+});
+
 test('containingDir gives a directory itself and a file its parent', () => {
   const root = tmpdir('containing');
   fs.mkdirSync(path.join(root, 'chapters'));

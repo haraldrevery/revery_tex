@@ -109,6 +109,13 @@ export function openPicker({ title, items, text, label: labelOf = text, preview,
     }
   });
 
+  // The remembered card size goes on the panel before a single card exists.
+  // `applySize()` at the bottom sets it too, but that runs after the whole grid
+  // is built — so the picker laid out once at the default 9.5rem and again at
+  // the stored size, a reflow the user sees on the frame it opens.
+  let at = storedSize();
+  modal.panel.style.setProperty('--picker-card', `${SIZES[at].rem}rem`);
+
   const filter = document.createElement('input');
   filter.type = 'text';
   filter.className = 'picker-filter';
@@ -133,7 +140,13 @@ export function openPicker({ title, items, text, label: labelOf = text, preview,
       if (mount && preview) preview(entry.target._item, mount, { blobUrl });
       io.unobserve(entry.target);
     }
-  }, { root: strip, rootMargin: '200px' });
+    // The lead is deliberately under one card tall. It is a *pixel* distance
+    // into a grid that wraps, so it reaches further the wider the strip is —
+    // one row of lead at four columns is one-and-a-quarter rows' worth of
+    // cards at six. At 200px a 25-image project built all 25 on the click,
+    // which is the work this observer exists not to do; the panel only ever
+    // avoided it by sitting at its old shrink-to-fit minimum width.
+  }, { root: strip, rootMargin: '100px' });
 
   if (!items.length) {
     const note = document.createElement('div');
@@ -177,8 +190,8 @@ export function openPicker({ title, items, text, label: labelOf = text, preview,
   // Grid only. A list row is as wide as the dialog and as tall as its text, so
   // there is no card to size — the stepper is not built at all rather than
   // built and hidden, which keeps `applySize` from having to know about it.
-
-  let at = storedSize();
+  //
+  // `at` is read and applied at the top, before the cards.
 
   const sizer = document.createElement('div');
   sizer.className = 'picker-size';

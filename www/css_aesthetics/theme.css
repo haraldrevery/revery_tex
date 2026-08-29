@@ -466,8 +466,12 @@ body.desktop-app :is(#topbar button, #topbar input, #win-controls, .menu-contain
   color:var(--text-muted); background:var(--bg); border:1px solid var(--border);
   border-radius:2px;
 }
+/* `flex:none` is load-bearing, not tidiness. The footer is the panel's last
+   flex item and inherits flex-shrink:1, so a panel that reaches its max-height
+   squeezed the buttons and then scrolled them out of view — the same defect the
+   legal page works around below. Every dialog's buttons stay their own height. */
 .dlg-foot {
-  display:flex; align-items:center; justify-content:flex-end; gap:.4rem;
+  display:flex; flex:none; align-items:center; justify-content:flex-end; gap:.4rem;
   padding:.55rem .9rem .7rem .9rem; border-top:1px solid var(--border);
 }
 
@@ -563,7 +567,24 @@ body.desktop-app :is(#topbar button, #topbar input, #win-controls, .menu-contain
    Everything is sized off --picker-card, so the − / + stepper in the footer
    changes one property and the grid, the thumbnails and the column count all
    follow. */
-.dlg.picker { min-width:min(46rem, 94vw); max-width:min(56rem, 96vw); --picker-card:9.5rem }
+/* A **definite** width, not a min/max band, and this is the whole reason the
+   dialog used to move under the cursor. `.dlg` is a flex item in a centred flex
+   backdrop, so with only min-width:46rem / max-width:56rem its used width was
+   shrink-to-fit inside a 10rem band — and the grid's intrinsic width changes
+   whenever a card is filtered out or --picker-card steps. Typing in the filter
+   resized the panel mid-keystroke; pressing + moved the + button out from under
+   the pointer, because the stepper is in the footer and the footer follows the
+   content height.
+
+   `100%` resolves against .dlg-backdrop's content box, which already carries
+   padding:1rem, so this needs no vw arithmetic to stay on screen.
+
+   `overflow:hidden` is the .legal-dlg pattern: the strip below owns the scroll,
+   so the footer cannot scroll away above the fold. */
+.dlg.picker {
+  width:min(60rem, 100%); min-width:0; max-width:none;
+  overflow:hidden; --picker-card:9.5rem;
+}
 .picker-filter {
   width:100%; font-family:var(--font-mono); font-size:var(--fs-md); color:var(--text);
   background:var(--bg); border:1px solid var(--border-md); border-radius:2px;
@@ -576,8 +597,19 @@ body.desktop-app :is(#topbar button, #topbar input, #win-controls, .menu-contain
   overflow-y:auto; overflow-x:hidden;
   /* Bounded on purpose. Unbounded, a 25-image project grows the modal past the
      window — and worse, leaves the observer below nothing to scroll, so every
-     thumbnail is built on the click that opens the picker. */
-  max-height:min(58vh, 30rem);
+     thumbnail is built on the click that opens the picker.
+
+     A fixed `height` rather than a `max-height`, and the same value: with a cap
+     alone the strip was as tall as its contents, so filtering to nothing
+     collapsed the modal and stepping the card size grew it — both of which moved
+     the footer's buttons while they were being clicked. A constant box is what
+     makes the dialog hold still. The value is unchanged, because a taller strip
+     would put more thumbnails in view at open and quietly undo the lazy render
+     above. */
+  height:min(58vh, 30rem);
+  /* The scrollbar appearing on the first filtered keystroke would otherwise
+     narrow every card by 8px — a second, smaller version of the same jump. */
+  scrollbar-gutter:stable;
   padding:.4rem .1rem .6rem .1rem;
 }
 .picker-card {
@@ -610,7 +642,7 @@ body.desktop-app :is(#topbar button, #topbar input, #win-controls, .menu-contain
    down the left edge, and a flex row aligns each one to its own reference
    instead. `min-content` on that column sizes it to the longest key present
    rather than to a guess that a longer key would then break. */
-.dlg.picker.picker-list-dlg { min-width:min(42rem, 94vw); max-width:min(52rem, 96vw) }
+.dlg.picker.picker-list-dlg { width:min(54rem, 100%) }
 .picker-strip.picker-list { grid-template-columns:1fr; gap:0; padding:.3rem 0 .5rem 0 }
 .picker-list .picker-card {
   display:grid; grid-template-columns:min-content 1fr; align-items:baseline;

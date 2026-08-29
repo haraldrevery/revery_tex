@@ -484,12 +484,24 @@ export class SelectMenu {
     this._paint();
   }
 
-  setOptions(list) {
+  /**
+   * @param {Array} list
+   * @param {{allowNone?: boolean}} [opts]  when true, a menu that has nothing
+   *        selected stays that way instead of adopting the first option.
+   *        For a list you choose *from* rather than a value that is always set:
+   *        the recent-projects list is offered before any project is open, and
+   *        auto-selecting there would put a project's name on the button while
+   *        that project is not open. The engine and document menus always have
+   *        a current value, so they keep the <select> behaviour.
+   */
+  setOptions(list, { allowNone = false } = {}) {
     this.options = list.map(o => (typeof o === 'string' ? { label: o, value: o } : o));
     // Keep the current value if it survived; otherwise take the first, which is
     // what a <select> does when its options are replaced.
     if (!this.options.some(o => o.value === this._value)) {
-      this._value = this.options.length ? this.options[0].value : null;
+      this._value = (allowNone && this._value === null) || !this.options.length
+        ? null
+        : this.options[0].value;
     }
     this._paint();
   }
