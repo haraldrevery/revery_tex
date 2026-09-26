@@ -16,7 +16,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -30,8 +30,8 @@ mod tex_run;
 
 /// The single open project root. Owned by the backend: the renderer may ask for
 /// it to change, but only through a command that vets the answer — the OS folder
-/// dialog (open_folder_dialog) or a remembered path (open_folder_path, which
-/// goes through vet_project_root).
+/// dialog (open_folder_dialog) or a remembered path (open_folder_path). Both, and
+/// the launch seed in main(), go through the same vetting.
 struct RootPath(Mutex<Option<PathBuf>>);
 
 #[derive(Serialize)]
@@ -281,19 +281,38 @@ fn tmp_for(dest: &Path) -> PathBuf {
 // `get_root()` snapshot and validates every path against *that* snapshot — so a
 // root that moves mid-command cannot widen what an in-flight command may reach.
 
+/// Parented to the window, so the dialog is modal. Unparented it was not: the
+/// editor stayed live behind it, and anything typed while it was open belonged
+/// to a project the app was about to leave.
+///
+/// Vetted like a recents row, so a folder that opens here is one the frontend
+/// can also reopen by path — which is how it goes back when the folder turns out
+/// not to be a project. Unvetted, `$HOME` opened here and then could not be
+/// returned to.
 #[tauri::command]
-async fn open_folder_dialog(app: tauri::AppHandle, state: State<'_, RootPath>) -> Result<Option<String>, String> {
-    let picked = app.dialog().file().blocking_pick_folder();
+async fn open_folder_dialog(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<'_, RootPath>,
+) -> Result<Option<String>, String> {
+    let picked = app.dialog().file().set_parent(&window).blocking_pick_folder();
     let Some(folder) = picked else { return Ok(None) };
     let path = folder
         .into_path()
         .map_err(|e| format!("Cannot resolve chosen folder: {e}"))?;
-    let canonical = path
-        .canonicalize()
-        .map_err(|e| format!("Cannot resolve chosen folder: {e}"))?;
+    let canonical = vet_project_dir(&path, home_dir().as_deref())?;
 
     *state.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(canonical.clone());
     Ok(Some(canonical.to_string_lossy().to_string()))
+}
+
+/// The home directory, canonicalised, for the vetting below — which compares
+/// real paths, so a home reached through a symlink would never match.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .and_then(|p| p.canonicalize().ok())
 }
 
 #[tauri::command]
@@ -331,7 +350,14 @@ fn vet_project_root(raw: &str, home: Option<&Path>) -> Result<PathBuf, String> {
     if raw.trim().is_empty() {
         return Err("No folder given.".to_string());
     }
-    let canonical = PathBuf::from(raw)
+    vet_project_dir(Path::new(raw), home)
+}
+
+/// The same vetting for a path that did not arrive as a string — the folder
+/// dialog's answer and the launch argument. Kept as a path so a folder name that
+/// is not valid Unicode is vetted as itself rather than as a lossy copy of it.
+fn vet_project_dir(dir: &Path, home: Option<&Path>) -> Result<PathBuf, String> {
+    let canonical = dir
         .canonicalize()
         .map_err(|e| format!("Cannot open that folder: {e}"))?;
     if !canonical.is_dir() {
@@ -352,11 +378,7 @@ fn vet_project_root(raw: &str, home: Option<&Path>) -> Result<PathBuf, String> {
 /// why it is not persisted separately here and in Electron.
 #[tauri::command(async)]
 fn open_folder_path(path: String, state: State<'_, RootPath>) -> Result<String, String> {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .and_then(|p| p.canonicalize().ok());
-    let canonical = vet_project_root(&path, home.as_deref())?;
+    let canonical = vet_project_root(&path, home_dir().as_deref())?;
     *state.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(canonical.clone());
     Ok(canonical.to_string_lossy().to_string())
 }
@@ -425,21 +447,69 @@ struct FileRead {
     stamp: FileStamp,
 }
 
-fn stamp_of(abs: &Path) -> Result<FileStamp, String> {
-    let m = fs::metadata(abs).map_err(|e| format!("Cannot stat: {e}"))?;
+fn stamp_from(m: &fs::Metadata) -> FileStamp {
     let mtime_ms = m
         .modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    Ok(FileStamp { mtime_ms, size: m.len() })
+    FileStamp { mtime_ms, size: m.len() }
 }
 
+fn stamp_of(abs: &Path) -> Result<FileStamp, String> {
+    let m = fs::metadata(abs).map_err(|e| format!("Cannot stat: {e}"))?;
+    Ok(stamp_from(&m))
+}
+
+/// How many times a file that changes under the read is read again.
+const STABLE_READ_TRIES: usize = 3;
+
+/// The bytes of `abs` and the stamp that describes exactly those bytes.
+///
+/// Stat, read, stat — on one file handle — and read again if the two stats
+/// differ. It used to read the file and *then* stat the path, so a write landing
+/// in between returned the old text with the new file's stamp; the next save
+/// matched that stamp and overwrote the other program's work with no conflict.
+/// One handle rather than the path, so a file replaced by rename mid-read is
+/// still described consistently: bytes and stamp are both the old file's, and
+/// the next save is a conflict, as it should be. The twin is readStable in
+/// electron/fs_core.js.
+///
+/// `read` is the read itself, a parameter only so a test can land a write in
+/// the middle of it.
+fn read_stable_with(
+    abs: &Path,
+    mut read: impl FnMut(&mut fs::File) -> std::io::Result<Vec<u8>>,
+) -> Result<(Vec<u8>, FileStamp), String> {
+    for _ in 0..STABLE_READ_TRIES {
+        let mut f = fs::File::open(abs).map_err(|e| e.to_string())?;
+        let before = stamp_from(&f.metadata().map_err(|e| e.to_string())?);
+        let bytes = read(&mut f).map_err(|e| e.to_string())?;
+        let after = stamp_from(&f.metadata().map_err(|e| e.to_string())?);
+        if before.mtime_ms == after.mtime_ms && before.size == after.size && bytes.len() as u64 == after.size {
+            return Ok((bytes, after));
+        }
+    }
+    Err("it kept changing while it was being read".to_string())
+}
+
+fn read_stable(abs: &Path) -> Result<(Vec<u8>, FileStamp), String> {
+    read_stable_with(abs, |f| {
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf)?;
+        Ok(buf)
+    })
+}
+
+/// UTF-8, strictly, and a byte-order mark stays in the text. A file that is not
+/// UTF-8 is refused, never decoded into U+FFFD — the loader keeps it as bytes
+/// instead (project_store.js), and nothing can then write it back mangled.
 fn read_text_impl(path: &str, root: &Path) -> Result<FileRead, String> {
     let abs = safe_path_inside(&root.join(path).to_string_lossy(), root)?;
-    let content = fs::read_to_string(&abs).map_err(|e| format!("Cannot read {path}: {e}"))?;
-    let stamp = stamp_of(&abs)?;
+    let (bytes, stamp) = read_stable(&abs).map_err(|e| format!("Cannot read {path}: {e}"))?;
+    let content = String::from_utf8(bytes)
+        .map_err(|_| format!("Cannot read {path}: stream did not contain valid UTF-8"))?;
     Ok(FileRead { content, stamp })
 }
 
@@ -462,6 +532,31 @@ const CONFLICT_PREFIX: &str = "CONFLICT:";
 /// chose "overwrite" after being told). The error is prefixed CONFLICT: so the
 /// caller can distinguish it from an IO failure and offer a real choice rather
 /// than a generic failure toast.
+/// Refuse if the file at `abs` is no longer the one `expect` describes.
+///
+/// One check, for a write and for a rename: both act on a file the app read
+/// earlier, and both must not treat it as that file once something else has
+/// changed it. The twin is checkStamp in electron/fs_core.js.
+fn check_stamp(abs: &Path, path: &str, expect: Option<&FileStamp>) -> Result<(), String> {
+    let Some(want) = expect else { return Ok(()) };
+    if !abs.exists() {
+        return Ok(());
+    }
+    let now = stamp_of(abs)?;
+    if now.mtime_ms != want.mtime_ms || now.size != want.size {
+        // One line, deliberately: this is read aloud in a dialog, and a
+        // wrapped literal put twenty spaces mid-sentence here — so the
+        // desktop prompt read differently from the Electron and browser
+        // ones the tests hold to the same wording.
+        return Err(format!(
+            "{CONFLICT_PREFIX}{path} changed on disk since it was opened \
+             (was {} bytes, now {} bytes)",
+            want.size, now.size
+        ));
+    }
+    Ok(())
+}
+
 fn write_file_impl(
     path: &str,
     content: &str,
@@ -469,23 +564,7 @@ fn write_file_impl(
     expect: Option<&FileStamp>,
 ) -> Result<FileStamp, String> {
     let abs = safe_path_inside(&root.join(path).to_string_lossy(), root)?;
-
-    if let Some(want) = expect {
-        if abs.exists() {
-            let now = stamp_of(&abs)?;
-            if now.mtime_ms != want.mtime_ms || now.size != want.size {
-                // One line, deliberately: this is read aloud in a dialog, and a
-                // wrapped literal put twenty spaces mid-sentence here — so the
-                // desktop prompt read differently from the Electron and browser
-                // ones the tests hold to the same wording.
-                return Err(format!(
-                    "{CONFLICT_PREFIX}{path} changed on disk since it was opened \
-                     (was {} bytes, now {} bytes)",
-                    want.size, now.size
-                ));
-            }
-        }
-    }
+    check_stamp(&abs, path, expect)?;
 
     if let Some(parent) = abs.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
@@ -582,7 +661,19 @@ fn delete_file_impl(path: &str, root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn rename_file_impl(from: &str, to: &str, root: &Path) -> Result<(), String> {
+/// Move a file, and say what it is now.
+///
+/// `expect` is the stamp the app read the file with; a file that no longer
+/// matches it is refused with the same CONFLICT a write gets, before anything
+/// moves. The stamp returned is the destination's. See renameFile in
+/// electron/fs_core.js for why the app adopts it, and why re-stamping the
+/// destination without the check would be wrong.
+fn rename_file_impl(
+    from: &str,
+    to: &str,
+    root: &Path,
+    expect: Option<&FileStamp>,
+) -> Result<FileStamp, String> {
     let src = safe_path_inside(&root.join(from).to_string_lossy(), root)?;
     let dest = safe_path_inside(&root.join(to).to_string_lossy(), root)?;
     if !src.exists() {
@@ -593,13 +684,14 @@ fn rename_file_impl(from: &str, to: &str, root: &Path) -> Result<(), String> {
     if dest.exists() {
         return Err(format!("Cannot rename to {to}: that already exists"));
     }
+    check_stamp(&src, from, expect)?;
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
     }
     fs::rename(&src, &dest).map_err(|e| format!("Cannot rename {from}: {e}"))?;
     sync_parent_dir(&src);
     sync_parent_dir(&dest);
-    Ok(())
+    stamp_of(&dest)
 }
 
 #[tauri::command(async)]
@@ -678,23 +770,46 @@ fn open_containing_folder(path: String, state: State<'_, RootPath>) -> Result<()
 }
 
 #[tauri::command(async)]
-fn rename_file(from: String, to: String, state: State<'_, RootPath>) -> Result<(), String> {
-    rename_file_impl(&from, &to, &get_root(&state)?)
+fn rename_file(
+    from: String,
+    to: String,
+    expect: Option<ExpectStamp>,
+    state: State<'_, RootPath>,
+) -> Result<FileStamp, String> {
+    let want = expect.map(|e| FileStamp { mtime_ms: e.mtime_ms, size: e.size });
+    rename_file_impl(&from, &to, &get_root(&state)?, want.as_ref())
 }
 
 /* ── crash backups ───────────────────────────────────────────────────── */
 //
-// Backups live outside the project, in the app cache dir, so a crash-recovery
-// file never appears in the user's git status or gets swept into a compile.
+// Outside the project, so a crash-recovery file never appears in the user's git
+// status or gets swept into a compile — and in the app's *data* directory. They
+// were in its cache directory, which is the one place cleanup tools and storage
+// pressure are entitled to empty without asking, and a crash net a disk cleaner
+// can remove is not one. Electron keeps them in userData, the same kind of place.
+//
+// The cache directory is still read, and still swept on discard, so backups an
+// older build wrote there are neither stranded nor impossible to dismiss.
+//
+// The commands only find the directories and the root; the work is in the
+// `_in` functions below, which take paths, so tests can reach them.
 
-fn backup_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+/// Where backups are written, and where builds before the move wrote them.
+fn backup_dirs(app: &tauri::AppHandle) -> Result<(PathBuf, Option<PathBuf>), String> {
     let dir = app
         .path()
-        .app_cache_dir()
-        .map_err(|e| format!("No cache dir: {e}"))?
+        .app_data_dir()
+        .map_err(|e| format!("No data dir: {e}"))?
         .join("backups");
     fs::create_dir_all(&dir).map_err(|e| format!("Cannot create backup dir: {e}"))?;
-    Ok(dir)
+    let legacy = app.path().app_cache_dir().ok().map(|d| d.join("backups"));
+    Ok((dir, legacy))
+}
+
+/// Both, in the order they are read: the current one first.
+fn backup_search_path(app: &tauri::AppHandle) -> Result<Vec<PathBuf>, String> {
+    let (dir, legacy) = backup_dirs(app)?;
+    Ok(std::iter::once(dir).chain(legacy).collect())
 }
 
 /// Absolute path hashed to a flat filename: project paths are arbitrarily long
@@ -716,18 +831,7 @@ fn backup_key(abs: &Path) -> String {
     digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-#[tauri::command(async)]
-fn write_backup(
-    app: tauri::AppHandle,
-    path: String,
-    content: String,
-    state: State<'_, RootPath>,
-) -> Result<(), String> {
-    let root = get_root(&state)?;
-    let abs = safe_path_inside(&root.join(&path).to_string_lossy(), &root)?;
-    let dir = backup_dir(&app)?;
-    let key = backup_key(&abs);
-
+fn write_backup_in(dir: &Path, path: &str, abs: &Path, content: &str) -> Result<(), String> {
     let payload = serde_json::json!({
         "path": path,
         "abs": abs.to_string_lossy(),
@@ -737,63 +841,76 @@ fn write_backup(
     })
     .to_string();
 
-    let dest = dir.join(format!("{key}.json"));
+    let dest = dir.join(format!("{}.json", backup_key(abs)));
     atomic_write_file(&tmp_for(&dest), &dest, payload.as_bytes())
 }
 
-/// Backups whose content differs from what is on disk — i.e. unsaved work from
-/// a session that did not exit cleanly.
 #[tauri::command(async)]
-fn list_stale_backups(app: tauri::AppHandle, state: State<'_, RootPath>) -> Result<Vec<serde_json::Value>, String> {
+fn write_backup(
+    app: tauri::AppHandle,
+    path: String,
+    content: String,
+    state: State<'_, RootPath>,
+) -> Result<(), String> {
     let root = get_root(&state)?;
-    let dir = backup_dir(&app)?;
-    let mut out = Vec::new();
-    let Ok(entries) = fs::read_dir(&dir) else { return Ok(out) };
+    let abs = safe_path_inside(&root.join(&path).to_string_lossy(), &root)?;
+    let (dir, _) = backup_dirs(&app)?;
+    write_backup_in(&dir, &path, &abs, &content)
+}
 
-    for e in entries.flatten() {
-        let Ok(text) = fs::read_to_string(e.path()) else { continue };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
-        let Some(abs) = v.get("abs").and_then(|x| x.as_str()) else { continue };
-        // Only offer recovery for the project that is actually open.
-        if !Path::new(abs).starts_with(&root) {
-            continue;
-        }
-        let backup_content = v.get("content").and_then(|x| x.as_str()).unwrap_or("");
-        let on_disk = fs::read_to_string(abs).unwrap_or_default();
-        if on_disk != backup_content {
-            out.push(v);
+/// Backups whose content differs from what is on disk — i.e. unsaved work from
+/// a session that did not exit cleanly — across every directory in `dirs`.
+fn list_stale_backups_in(dirs: &[PathBuf], root: &Path) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = fs::read_dir(dir) else { continue };
+        for e in entries.flatten() {
+            let Ok(text) = fs::read_to_string(e.path()) else { continue };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+            let Some(abs) = v.get("abs").and_then(|x| x.as_str()) else { continue };
+            // Only offer recovery for the project that is actually open.
+            if !Path::new(abs).starts_with(root) {
+                continue;
+            }
+            let backup_content = v.get("content").and_then(|x| x.as_str()).unwrap_or("");
+            let on_disk = fs::read_to_string(abs).unwrap_or_default();
+            if on_disk != backup_content {
+                out.push(v);
+            }
         }
     }
 
     // One offer per file, newest wins. A record keyed by an older build's
-    // `backup_key` sits beside the current one for the same path, and two
-    // dialogs about the same file — one of them holding superseded text — is a
-    // way to restore the wrong copy. See backup_key.
+    // `backup_key` — or left in the old directory — sits beside the current one
+    // for the same path, and two dialogs about the same file, one of them
+    // holding superseded text, is a way to restore the wrong copy.
     out.sort_by_key(|v| std::cmp::Reverse(v.get("saved").and_then(|x| x.as_u64()).unwrap_or(0)));
     let mut seen = std::collections::HashSet::new();
     out.retain(|v| seen.insert(v.get("abs").and_then(|x| x.as_str()).unwrap_or("").to_string()));
-
-    Ok(out)
+    out
 }
 
-/// Discard by *identity*, not only by current key.
+#[tauri::command(async)]
+fn list_stale_backups(app: tauri::AppHandle, state: State<'_, RootPath>) -> Result<Vec<serde_json::Value>, String> {
+    let root = get_root(&state)?;
+    Ok(list_stale_backups_in(&backup_search_path(&app)?, &root))
+}
+
+/// Discard by *identity*, not only by current key, in every directory.
 ///
 /// The keyed filename is removed first — that is the whole job in the normal
 /// case. The sweep after it exists because a record's identity is its `abs`,
 /// while its filename is only however `backup_key` happened to hash that path
 /// in the build that wrote it. Without the sweep, changing the key scheme (as
-/// this tree just did, off `DefaultHasher`) leaves a file that Discard cannot
-/// reach and `list_stale_backups` keeps finding, so the dialog returns on every
-/// open and the button that is supposed to end it does nothing.
-#[tauri::command(async)]
-fn discard_backup(app: tauri::AppHandle, path: String, state: State<'_, RootPath>) -> Result<(), String> {
-    let root = get_root(&state)?;
-    let abs = safe_path_inside(&root.join(&path).to_string_lossy(), &root)?;
-    let dir = backup_dir(&app)?;
-    let _ = fs::remove_file(dir.join(format!("{}.json", backup_key(&abs))));
-
+/// this tree did, off `DefaultHasher`) leaves a file that Discard cannot reach
+/// and the listing keeps finding, so the dialog returns on every open and the
+/// button that is supposed to end it does nothing. The same goes for a record
+/// left in the old directory.
+fn discard_backup_in(dirs: &[PathBuf], abs: &Path) {
     let target = abs.to_string_lossy();
-    if let Ok(entries) = fs::read_dir(&dir) {
+    for dir in dirs {
+        let _ = fs::remove_file(dir.join(format!("{}.json", backup_key(abs))));
+        let Ok(entries) = fs::read_dir(dir) else { continue };
         for e in entries.flatten() {
             let Ok(text) = fs::read_to_string(e.path()) else { continue };
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
@@ -802,6 +919,13 @@ fn discard_backup(app: tauri::AppHandle, path: String, state: State<'_, RootPath
             }
         }
     }
+}
+
+#[tauri::command(async)]
+fn discard_backup(app: tauri::AppHandle, path: String, state: State<'_, RootPath>) -> Result<(), String> {
+    let root = get_root(&state)?;
+    let abs = safe_path_inside(&root.join(&path).to_string_lossy(), &root)?;
+    discard_backup_in(&backup_search_path(&app)?, &abs);
     Ok(())
 }
 
@@ -914,13 +1038,12 @@ fn run_tex(
 fn main() {
     // Seed the root from the environment or argv, so the app can be launched
     // straight into a project. Also what makes the desktop path testable without
-    // driving a native folder dialog. Canonicalised and required to be a real
-    // directory; everything after this still goes through safe_path_inside.
-    let seed = std::env::var("REVERY_TEX_OPEN")
-        .ok()
-        .or_else(|| std::env::args().nth(1))
-        .and_then(|p| PathBuf::from(p).canonicalize().ok())
-        .filter(|p| p.is_dir());
+    // driving a native folder dialog. Vetted like every other way a root is set
+    // (see vet_project_dir); everything after this still goes through
+    // safe_path_inside.
+    let seed = std::env::var_os("REVERY_TEX_OPEN")
+        .or_else(|| std::env::args_os().nth(1))
+        .and_then(|p| vet_project_dir(Path::new(&p), home_dir().as_deref()).ok());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1384,14 +1507,14 @@ mod tests {
         fs::write(root.join("a.tex"), b"content").unwrap();
         fs::write(root.join("taken.tex"), b"someone else's work").unwrap();
 
-        rename_file_impl("a.tex", "ch/b.tex", &root).unwrap();
+        rename_file_impl("a.tex", "ch/b.tex", &root, None).unwrap();
         assert_eq!(fs::read_to_string(root.join("ch/b.tex")).unwrap(), "content");
         assert!(!root.join("a.tex").exists());
 
         // Renaming onto an existing file would destroy it with no warning.
-        assert!(rename_file_impl("ch/b.tex", "taken.tex", &root).is_err());
+        assert!(rename_file_impl("ch/b.tex", "taken.tex", &root, None).is_err());
         assert_eq!(fs::read_to_string(root.join("taken.tex")).unwrap(), "someone else's work");
-        assert!(rename_file_impl("nothing.tex", "x.tex", &root).is_err());
+        assert!(rename_file_impl("nothing.tex", "x.tex", &root, None).is_err());
 
         fs::remove_dir_all(&root).ok();
     }
@@ -1403,7 +1526,7 @@ mod tests {
         fs::write(root.join("a.tex"), b"x").unwrap();
 
         let rel = format!("../{}/stolen.tex", outside.file_name().unwrap().to_string_lossy());
-        assert!(rename_file_impl("a.tex", &rel, &root).is_err());
+        assert!(rename_file_impl("a.tex", &rel, &root, None).is_err());
         assert!(!outside.join("stolen.tex").exists());
         assert!(root.join("a.tex").exists(), "the source must survive a refused rename");
 
@@ -1511,6 +1634,165 @@ mod tests {
         // would report a false conflict.
         write_file_impl("main.tex", "two", &root, Some(&s1)).unwrap();
         assert_eq!(fs::read_to_string(root.join("main.tex")).unwrap(), "two");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    // ── the bytes a read hands back are the bytes a write puts down ────────
+    // Mirrors the cases in test/fs_core.test.js. The encoding and line-ending
+    // fixes (Phases 2 and 5) are built on these holding in both shells.
+
+    /// Refusing is the contract, not an accident: the loader will fall back to
+    /// bytes when a text read is refused. Electron currently decodes instead —
+    /// the known bug the Node twin of this test marks.
+    #[test]
+    fn a_file_that_is_not_utf8_is_refused_as_text() {
+        let root = tmpdir("latin1");
+        fs::write(root.join("latin1.tex"), [0x43, 0x61, 0x66, 0xe9, 0x0a]).unwrap();
+        assert!(read_text_impl("latin1.tex", &root).is_err(),
+            "non-UTF-8 text must be refused, never decoded into U+FFFD");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn crlf_survives_a_read_and_an_unchanged_write() {
+        let root = tmpdir("crlf");
+        let bytes = b"\\documentclass{article}\r\n\\begin{document}\r\nx\r\n\\end{document}\r\n";
+        fs::write(root.join("win.tex"), bytes).unwrap();
+        let r = read_text_impl("win.tex", &root).unwrap();
+        write_file_impl("win.tex", &r.content, &root, Some(&r.stamp)).unwrap();
+        assert_eq!(fs::read(root.join("win.tex")).unwrap(), bytes.to_vec());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_byte_order_mark_survives_a_read_and_an_unchanged_write() {
+        let root = tmpdir("bom");
+        let bytes = [&[0xefu8, 0xbb, 0xbf][..], "Caf\u{e9}\n".as_bytes()].concat();
+        fs::write(root.join("bom.tex"), &bytes).unwrap();
+        let r = read_text_impl("bom.tex", &root).unwrap();
+        write_file_impl("bom.tex", &r.content, &root, Some(&r.stamp)).unwrap();
+        assert_eq!(fs::read(root.join("bom.tex")).unwrap(), bytes);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The read race, landed deterministically through read_stable_with's seam.
+    /// Two outcomes are right — the other program's text is in what was read,
+    /// or the save is a conflict. The bug was the third: old text, new stamp,
+    /// and a save that silently dropped the other program's write.
+    #[test]
+    fn a_write_that_lands_during_the_read_is_never_hidden() {
+        let root = tmpdir("read-race");
+        let target = root.join("main.tex");
+        fs::write(&target, "original\n").unwrap();
+        let mut raced = false;
+        let (bytes, stamp) = read_stable_with(&target, |f| {
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf)?;
+            if !raced {
+                raced = true;
+                fs::write(&target, "written by another program in between\n")?;
+            }
+            Ok(buf)
+        })
+        .unwrap();
+        assert!(raced, "the injected write never ran");
+        let content = String::from_utf8(bytes).unwrap();
+        let hidden = match write_file_impl("main.tex", &format!("{content}mine\n"), &root, Some(&stamp)) {
+            Ok(_) => !fs::read_to_string(&target).unwrap().contains("written by another program"),
+            Err(e) => {
+                assert!(e.starts_with(CONFLICT_PREFIX), "{e}");
+                false
+            }
+        };
+        assert!(!hidden, "a stamp taken after the read hid an external write");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_file_that_keeps_changing_is_refused_rather_than_misdescribed() {
+        let root = tmpdir("read-churn");
+        let target = root.join("main.tex");
+        fs::write(&target, "0").unwrap();
+        let mut n = 0;
+        let r = read_stable_with(&target, |f| {
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf)?;
+            n += 1;
+            fs::write(&target, "x".repeat(n + 1))?;
+            Ok(buf)
+        });
+        assert!(r.is_err(), "a read that never settled must not return a stamp");
+        assert_eq!(n, STABLE_READ_TRIES);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A rename checks the file it moves against the stamp it was read with,
+    /// and hands back the destination's stamp — which a save then checks.
+    #[test]
+    fn a_rename_carries_the_stamp_and_a_later_change_is_still_a_conflict() {
+        let root = tmpdir("rename-stamp");
+        fs::write(root.join("a.tex"), "text\n").unwrap();
+        let read = read_text_impl("a.tex", &root).unwrap();
+        let moved = rename_file_impl("a.tex", "ch/b.tex", &root, Some(&read.stamp)).unwrap();
+        // Changed by another program after the move, to a different length so
+        // the size half of the stamp carries it whatever the mtime resolution.
+        fs::write(root.join("ch/b.tex"), "changed by another program\n").unwrap();
+        let e = write_file_impl("ch/b.tex", "mine\n", &root, Some(&moved)).unwrap_err();
+        assert!(e.starts_with(CONFLICT_PREFIX), "{e}");
+        assert_eq!(fs::read_to_string(root.join("ch/b.tex")).unwrap(), "changed by another program\n");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_rename_of_a_file_changed_since_it_was_read_is_refused_and_moves_nothing() {
+        let root = tmpdir("rename-conflict");
+        fs::write(root.join("a.tex"), "text\n").unwrap();
+        let read = read_text_impl("a.tex", &root).unwrap();
+        fs::write(root.join("a.tex"), "changed outside\n").unwrap();
+        let e = rename_file_impl("a.tex", "b.tex", &root, Some(&read.stamp)).unwrap_err();
+        assert!(e.starts_with(CONFLICT_PREFIX), "{e}");
+        assert!(root.join("a.tex").exists() && !root.join("b.tex").exists());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Backups moved from the cache directory to the data directory. One an
+    /// older build left in the cache must still be offered, and still be
+    /// dismissable, or the move strands it — or makes its dialog permanent.
+    #[test]
+    fn a_backup_left_in_the_old_directory_is_offered_and_discarded() {
+        let root = tmpdir("backup-dirs-root");
+        let data = tmpdir("backup-dirs-data");
+        let cache = tmpdir("backup-dirs-cache");
+        let abs = root.canonicalize().unwrap().join("main.tex");
+        fs::write(&abs, "on disk\n").unwrap();
+        write_backup_in(&cache, "main.tex", &abs, "from an older build\n").unwrap();
+        let dirs = vec![data.clone(), cache.clone()];
+
+        let offered = list_stale_backups_in(&dirs, &root.canonicalize().unwrap());
+        assert_eq!(offered.len(), 1, "{offered:?}");
+        assert_eq!(offered[0]["content"], "from an older build\n");
+
+        // A newer one in the current directory wins — one offer per file.
+        write_backup_in(&data, "main.tex", &abs, "from this build\n").unwrap();
+        let offered = list_stale_backups_in(&dirs, &root.canonicalize().unwrap());
+        assert_eq!(offered.len(), 1, "{offered:?}");
+
+        discard_backup_in(&dirs, &abs);
+        assert!(list_stale_backups_in(&dirs, &root.canonicalize().unwrap()).is_empty());
+        assert_eq!(fs::read_dir(&cache).unwrap().count(), 0, "the old directory still holds it");
+        for d in [root, data, cache] {
+            fs::remove_dir_all(d).ok();
+        }
+    }
+
+    #[test]
+    fn an_undisturbed_read_is_the_file_and_its_stamp() {
+        let root = tmpdir("read-stable");
+        fs::write(root.join("a.tex"), "hello\n").unwrap();
+        let r = read_text_impl("a.tex", &root).unwrap();
+        assert_eq!(r.content, "hello\n");
+        let now = stamp_of(&root.join("a.tex")).unwrap();
+        assert_eq!((r.stamp.mtime_ms, r.stamp.size), (now.mtime_ms, now.size));
         fs::remove_dir_all(&root).ok();
     }
 

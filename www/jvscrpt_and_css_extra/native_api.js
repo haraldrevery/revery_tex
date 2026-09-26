@@ -60,7 +60,7 @@ const tauriImpl = {
   writeFile: (path, content, expect) => invoke('write_file', { path, content, expect: expect || null }),
   writeBinaryFile: (path, bytes) => invoke('write_binary_file', { path, content: bytesToB64(bytes) }),
   deleteFile: (path) => invoke('delete_file', { path }),
-  renameFile: (from, to) => invoke('rename_file', { from, to }),
+  renameFile: (from, to, expect) => invoke('rename_file', { from, to, expect: expect || null }),
 
   // Shows a project folder in the platform's file manager. Desktop only, and
   // absent rather than throwing on the three browser backends: there is no
@@ -140,7 +140,7 @@ const electronImpl = isElectron ? {
   writeFile: (path, content, expect) => window.electronAPI.writeFile(path, content, expect || null),
   writeBinaryFile: (path, bytes) => window.electronAPI.writeBinaryFile(path, bytesToB64(bytes)),
   deleteFile: (path) => window.electronAPI.deleteFile(path),
-  renameFile: (from, to) => window.electronAPI.renameFile(from, to),
+  renameFile: (from, to, expect) => window.electronAPI.renameFile(from, to, expect || null),
   openContainingFolder: (path) => window.electronAPI.openContainingFolder(path),
 
   writeBackup: (path, content) => window.electronAPI.writeBackup(path, content),

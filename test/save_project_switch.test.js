@@ -42,10 +42,11 @@ function saveBody() {
 }
 
 // The exhaustiveness check, and the reason `setProject` exists at all rather
-// than two bare assignments. Two loaders replace the project today
-// (`loadFromDisk` for a real folder, `loadProject` for the dev-server
-// fixtures); a third that assigned `project` directly would leave every
-// in-flight save pointing at a root that had moved, with no test failing.
+// than bare assignments. Three places replace the project today (`openProject`
+// for a real folder, `loadProject` for the dev-server fixtures, `closeProject`
+// when a switch leaves nothing open); a fourth that assigned `project` directly
+// would leave every in-flight save pointing at a root that had moved, with no
+// test failing.
 test('the open project can only be replaced through setProject', () => {
   const assignments = [...APP.matchAll(/(^|[^.\w])project\s*=(?!=)/gm)];
   const outside = assignments.filter((m) => {
@@ -67,8 +68,8 @@ test('setProject bumps the epoch', () => {
   assert.match(fn[0], /projectEpoch\+\+/, 'setProject must move the epoch');
 });
 
-test('both loaders go through it', () => {
-  for (const loader of ['loadFromDisk', 'loadProject']) {
+test('every loader goes through it', () => {
+  for (const loader of ['openProject', 'loadProject', 'closeProject']) {
     const m = new RegExp(`async function ${loader}\\([\\s\\S]*?\\n}`).exec(APP);
     assert.ok(m, `${loader} could not be located`);
     assert.match(m[0], /setProject\(/, `${loader} must replace the project through setProject`);

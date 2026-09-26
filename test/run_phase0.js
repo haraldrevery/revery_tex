@@ -13,8 +13,9 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const CHROME = process.env.CHROME_PATH ||
-  '/home/hrldrvry/.cache/puppeteer/chrome/linux-150.0.7871.24/chrome-linux64/chrome';
+// Resolved the same way every other browser suite resolves it — see cdp.js.
+const { resolveChrome, chromeMissing } = require('./cdp.js');
+const CHROME = resolveChrome();
 const SERVER = process.env.SMOKE_URL || 'http://localhost:8777/test/engine_smoke.html';
 const CDP_PORT = Number(process.env.CDP_PORT) || 9333;
 const TIMEOUT_MS = Number(process.env.COMPILE_TIMEOUT) || 900000;
@@ -88,8 +89,8 @@ async function evaluate(cdp, expression, awaitPromise = true) {
 (async () => {
   fs.mkdirSync(LOG_DIR, { recursive: true });
 
-  if (!fs.existsSync(CHROME)) {
-    console.error(`Chrome not found at ${CHROME}\nSet CHROME_PATH.`);
+  if (!CHROME || !fs.existsSync(CHROME)) {
+    console.error(chromeMissing(CHROME));
     process.exit(2);
   }
 

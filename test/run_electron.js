@@ -17,6 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { Cdp, sleep } = require('./cdp.js');
+const { knownBugCheck } = require('./known_bug.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const PORT = Number(process.env.CDP_PORT) || 9336;
@@ -30,6 +31,7 @@ function check(name, ok, detail = '') {
 /** A small project of our own, so nothing depends on the fixtures' contents. */
 function scratchProject() {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'revery-tex-electron-')));
+  scratchDirs.push(dir);
   fs.mkdirSync(path.join(dir, 'chapters'));
   fs.writeFileSync(path.join(dir, 'main.tex'), String.raw`\documentclass{article}
 \begin{document}
@@ -77,10 +79,43 @@ async function requirePortFree() {
   }
 }
 
-async function main() {
+/**
+ * Everything this run created, torn down however it ends. Two sessions launch
+ * now — the main one and the known-bug one — so cleanup is per run, not per
+ * launch, and an early exit from either still removes both.
+ */
+const scratchDirs = [];
+const children = [];
+function cleanupAll() {
+  // Kill the process group by PID, never by pattern: a pattern matches this
+  // script's own command line and takes the session with it.
+  for (const child of children) {
+    try { process.kill(-child.pid, 'SIGKILL'); } catch { }
+    try { process.kill(child.pid, 'SIGKILL'); } catch { }
+  }
+  for (const d of scratchDirs) {
+    try { fs.rmSync(d, { recursive: true, force: true }); } catch { }
+  }
+}
+process.on('exit', cleanupAll);
+process.on('SIGINT', () => { cleanupAll(); process.exit(130); });
+
+/**
+ * Start the app on `project` with a fresh user-data directory and attach to its
+ * window. The returned `stop()` ends this launch; `cleanupAll` still covers it.
+ */
+async function launchApp(project) {
+  // The previous launch, if any, has only just been killed; give its debug
+  // port a moment to close before treating an open one as a leftover.
+  for (let i = 0; i < 25; i++) {
+    const busy = await fetch(`http://127.0.0.1:${PORT}/json/version`, { signal: AbortSignal.timeout(300) })
+      .then(() => true, () => false);
+    if (!busy) break;
+    await sleep(200);
+  }
   await requirePortFree();
-  const project = scratchProject();
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'revery-tex-electron-data-'));
+  scratchDirs.push(userData);
 
   // The real binary, not node_modules/electron/cli.js. cli.js is a Node
   // wrapper that spawns Electron as a *child*, so killing the PID spawn gives
@@ -108,41 +143,42 @@ async function main() {
     env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, REVERY_TEX_OPEN: project },
     stdio: ['ignore', 'pipe', 'pipe']
   });
+  children.push(child);
 
   let stderr = '';
   child.stderr.on('data', d => { stderr += d.toString(); });
   child.stdout.on('data', d => { stderr += d.toString(); });
 
-  const cleanup = () => {
-    // Kill the process group by PID, never by pattern: a pattern matches this
-    // script's own command line and takes the session with it.
+  const stop = () => {
     try { process.kill(-child.pid, 'SIGKILL'); } catch { }
     try { process.kill(child.pid, 'SIGKILL'); } catch { }
-    try { fs.rmSync(project, { recursive: true, force: true }); } catch { }
-    try { fs.rmSync(userData, { recursive: true, force: true }); } catch { }
   };
-  process.on('exit', cleanup);
-  process.on('SIGINT', () => { cleanup(); process.exit(130); });
 
+  const target = await connect();
+  const ws = new WebSocket(target.webSocketDebuggerUrl);
+  await new Promise((res, rej) => {
+    ws.addEventListener('open', res, { once: true });
+    ws.addEventListener('error', () => rej(new Error('CDP websocket failed')), { once: true });
+  });
+  const cdp = new Cdp(ws);
+  await cdp.send('Runtime.enable');
+  await cdp.send('Page.enable');
+  cdp.on((msg) => {
+    if (msg.method === 'Page.javascriptDialogOpening') {
+      cdp.send('Page.handleJavaScriptDialog', { accept: true }).catch(() => {});
+    }
+  });
+
+  await cdp.waitFor('!!window.__reveryTexApp && window.__reveryTexApp.ready',
+    { what: 'app open on the scratch project', timeoutMs: 60000 });
+  return { cdp, stop, stderr: () => stderr };
+}
+
+async function main() {
+  const project = scratchProject();
+  const app = await launchApp(project);
+  const { cdp } = app;
   try {
-    const target = await connect();
-    const ws = new WebSocket(target.webSocketDebuggerUrl);
-    await new Promise((res, rej) => {
-      ws.addEventListener('open', res, { once: true });
-      ws.addEventListener('error', () => rej(new Error('CDP websocket failed')), { once: true });
-    });
-    const cdp = new Cdp(ws);
-    await cdp.send('Runtime.enable');
-    await cdp.send('Page.enable');
-    cdp.on((msg) => {
-      if (msg.method === 'Page.javascriptDialogOpening') {
-        cdp.send('Page.handleJavaScriptDialog', { accept: true }).catch(() => {});
-      }
-    });
-
-    await cdp.waitFor('!!window.__reveryTexApp && window.__reveryTexApp.ready',
-      { what: 'app open on the scratch project', timeoutMs: 60000 });
-
     const shell = await cdp.evaluate(`(() => ({
       backend: window.NativeAPI.env,
       desktop: window.NativeAPI.isDesktop,
@@ -581,12 +617,432 @@ async function main() {
       /^https:\/\/github\.com\/haraldrevery\/revery_tex$/.test((copied || '').trim()),
       copied);
   } finally {
-    cleanup();
-    if (failures) console.log(`\n--- electron output ---\n${stderr.slice(-2000)}`);
+    app.stop();
+    if (failures) console.log(`\n--- electron output ---\n${app.stderr().slice(-2000)}`);
   }
 
+  await dataLossSession();
+
+  const known = knownBugCheck.known;
   console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');
+  if (known) console.log(`${known} known bug(s) still reproduce — see test/known_bug.js`);
   process.exit(failures ? 1 : 0);
+}
+
+/* ── data-loss scenarios ────────────────────────────────────────────────── */
+//
+// The data-loss bugs from the analysis of 2026-09-26, driven through the real
+// UI and the real IPC, each asserted as the correct behaviour. The ones still
+// open report through knownBugCheck (test/known_bug.js): they reproduce without
+// failing the run, and the fix that closes one turns its check red until the
+// marker is removed. The ones already fixed are ordinary checks.
+//
+// A session of their own — separate projects, separate user data — because a
+// bug in any of them leaves the app in exactly the broken state it describes,
+// and the checks above assert an exact file list for their project.
+
+/** Driving helpers, installed in the page. Everything goes through the UI. */
+const KB_HELPERS = `window.__kb = {
+  row: (p) => [...document.querySelectorAll('#filetree .node')].find(r => r.dataset.path === p),
+  open(p) { const r = this.row(p); if (!r) return false; r.click(); return true; },
+  view: () => window.__reveryTexTest.view(),
+  append(text) { const v = this.view(); v.dispatch({ changes: { from: v.state.doc.length, insert: text } }); },
+  replaceAll(text) { const v = this.view(); v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: text } }); },
+  // A row of the tree's right-click menu, as a person would reach it.
+  menu(p, label) {
+    const el = this.row(p);
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    el.dispatchEvent(new MouseEvent('contextmenu',
+      { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 5 }));
+    const item = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+      .find(b => b.textContent.trim().startsWith(label));
+    if (!item) { document.body.click(); return false; }
+    item.click();
+    return true;
+  },
+  // Fill the one text field of an open form and submit it.
+  submit(value) {
+    const i = document.querySelector('.dlg input[type="text"]');
+    if (!i) return false;
+    i.value = value; i.dispatchEvent(new Event('input', { bubbles: true }));
+    [...document.querySelectorAll('.dlg-foot button')].find(b => !/cancel/i.test(b.textContent)).click();
+    return true;
+  },
+  asking: () => document.querySelector('.dlg-ask')?.textContent || null,
+  answer(label) {
+    const b = [...document.querySelectorAll('.dlg-foot button')].find(x => x.textContent.trim() === label);
+    if (b) b.click();
+    return !!b;
+  },
+  // Pick a row of the Project drop-down — the recents path, openFolderPath.
+  pick(label) {
+    document.getElementById('project').click();
+    const b = [...document.querySelectorAll('[role=menuitemradio]')].find(x => x.textContent.includes(label));
+    if (!b) { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); return false; }
+    b.click();
+    return true;
+  }
+}; true`;
+
+async function dataLossSession() {
+  console.log('\n── data-loss scenarios (known bugs: test/known_bug.js) ─────────');
+  const mk = (tag) => {
+    const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `revery-tex-known-${tag}-`)));
+    scratchDirs.push(d);
+    return d;
+  };
+  const put = (dir, rel, content) => {
+    fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+    fs.writeFileSync(path.join(dir, rel), content);
+  };
+  const disk = (dir, rel) => (fs.existsSync(path.join(dir, rel)) ? fs.readFileSync(path.join(dir, rel)) : null);
+
+  // K: the project the session works in.
+  const K = mk('K');
+  put(K, 'main.tex', '\\documentclass{article}\n\\begin{document}\n\\input{chapters/one}\n\\end{document}\n');
+  put(K, 'chapters/one.tex', 'K chapter one.\n');
+  put(K, 'crlf.tex', 'line one\r\nline two\r\n');
+  const LATIN1 = Buffer.from('Caf\xe9 na\xefve\n', 'latin1');
+  put(K, 'latin1.tex', LATIN1);
+  put(K, 'moveme.tex', 'moved later\n');
+  put(K, 'beforemove.tex', 'changed on disk, then moved\n');
+  put(K, 'renameme.tex', 'renamed later\n');
+  put(K, 'deleteme.tex', 'deleted later\n');
+  put(K, 'refs.bib', '@book{k, title={K}}\n');
+  // B: a folder with no .tex in it, so opening it fails after the root moved.
+  const B = mk('B');
+  put(B, 'notes.txt', 'not a LaTeX project\n');
+  // P: a project whose only .tex cannot be read (Tauri refuses non-UTF-8 the
+  // same way; mode 000 reproduces it in this shell), beside a refs.bib that
+  // shares a name with K's.
+  const P = mk('P');
+  const P_REFS = '@book{p, title={P, which must survive}}\n';
+  put(P, 'main.tex', '\\documentclass{article}\n\\begin{document}\nP\n\\end{document}\n');
+  put(P, 'refs.bib', P_REFS);
+  fs.chmodSync(path.join(P, 'main.tex'), 0o000);
+  // G: a project that will be deleted from disk while it is open, so that a
+  // failed switch away from it has nothing to go back to.
+  const G = mk('G');
+  put(G, 'main.tex', '\\documentclass{article}\n\\begin{document}\nG\n\\end{document}\n');
+  put(G, 'notes.tex', 'G notes.\n');
+
+  const app = await launchApp(K);
+  const { cdp } = app;
+  let failed = 0;
+  const kb = (name, spec) => { if (knownBugCheck(name, spec)) failed++; };
+  const verify = (name, ok, detail = '') => {
+    console.log(`  ${ok ? '✓' : '✗'} ${name}${detail ? `  ${detail}` : ''}`);
+    if (!ok) failed++;
+  };
+  const run = (expr) => cdp.evaluate(expr, true);
+  const settle = () => sleep(250);
+
+  /**
+   * Save everything, answering "Leave it" to any conflict prompt so a file left
+   * dirty on purpose by an earlier scenario cannot hang the run.
+   */
+  async function saveLeavingConflicts() {
+    await run(`(() => { window.__kbSaved = false;
+      window.__reveryTexApp.saveAll().finally(() => { window.__kbSaved = true; }); return true; })()`);
+    for (let i = 0; i < 150; i++) {
+      if (await run('window.__kbSaved')) return;
+      if (/changed on disk/.test((await run('__kb.asking()')) || '')) await run(`__kb.answer('Leave it')`);
+      await sleep(100);
+    }
+    throw new Error('save did not finish within 15 s');
+  }
+
+  try {
+    // The recents rows the switch scenarios pick from. Seeded, then reloaded
+    // while nothing is dirty, because the drop-down is filled when a project
+    // loads. Compile-after-save is turned off: nothing here is about compiling.
+    await run(`(async () => {
+      const k = 'revery_tex_recents';
+      const list = JSON.parse(localStorage.getItem(k) || '[]');
+      list.push({ id: ${JSON.stringify(B)}, label: 'known_B', root: ${JSON.stringify(B)}, env: 'electron' });
+      list.push({ id: ${JSON.stringify(P)}, label: 'known_P', root: ${JSON.stringify(P)}, env: 'electron' });
+      list.push({ id: ${JSON.stringify(G)}, label: 'known_G', root: ${JSON.stringify(G)}, env: 'electron' });
+      localStorage.setItem(k, JSON.stringify(list));
+      (await import('./jvscrpt_and_css_extra/settings.js')).set('autoCompile', false);
+      return true;
+    })()`);
+    await cdp.send('Page.reload');
+    await sleep(500);
+    await cdp.waitFor('!!window.__reveryTexApp && window.__reveryTexApp.ready',
+      { what: 'the app after reload', timeoutMs: 60000 });
+    await run(KB_HELPERS);
+
+    /* Phase 5 — an edit converts every CRLF in the file to LF. CodeMirror
+       normalises line endings on the way in, and nothing restores them. */
+    await run(`__kb.open('crlf.tex')`);
+    await settle();
+    await run(`__kb.append('line three\\n')`);
+    await saveLeavingConflicts();
+    {
+      const s = (disk(K, 'crlf.tex') || Buffer.alloc(0)).toString('latin1');
+      kb('editing a CRLF file keeps its line endings', {
+        phase: 'Phase 5',
+        ok: s.includes('line three') && !/(^|[^\r])\n/.test(s),
+        symptom: s.includes('line three') && !s.includes('\r\n'),
+        detail: JSON.stringify(s)
+      });
+    }
+
+    /* A file that is not UTF-8 used to open as text with every accented byte
+       turned into U+FFFD, so one unrelated edit and a save wrote that back. It
+       is held as bytes now: in the tree, read-only, and left exactly as it is. */
+    await run(`__kb.open('latin1.tex')`);
+    await settle();
+    const latin1Shown = await run(`(() => ({
+      title: __kb.row('latin1.tex') ? __kb.row('latin1.tex').title : null,
+      pane: document.getElementById('mediaview').hidden ? null : document.getElementById('mediaview').textContent
+    }))()`);
+    await run(`__kb.append('% one unrelated line\\n')`);
+    await saveLeavingConflicts();
+    {
+      const b = disk(K, 'latin1.tex') || Buffer.alloc(0);
+      verify('a non-UTF-8 file survives an edit and a save byte for byte', b.equals(LATIN1), b.toString('hex'));
+      verify('and is in the tree, marked read-only', /not UTF-8/.test(latin1Shown.title || ''),
+        JSON.stringify(latin1Shown));
+      verify('and opens as a preview saying why, not as text', /not opened for editing/.test(latin1Shown.pane || ''),
+        JSON.stringify(latin1Shown));
+    }
+
+    /* A move used to drop the file's stamp, so the next save overwrote a change
+       made on disk after the move without asking. */
+    await run(`__kb.menu('moveme.tex', 'Rename')`);
+    await settle();
+    await run(`__kb.submit('moved.tex')`);
+    await sleep(400);
+    /**
+     * Save, answering every conflict prompt "Leave it" — a file left dirty on
+     * purpose by an earlier scenario asks again — and report whether `path`
+     * was one of the files that asked.
+     */
+    async function saveExpectingPrompt(path, what) {
+      await run(`(() => { window.__kbSaved = false;
+        window.__reveryTexApp.saveAll().finally(() => { window.__kbSaved = true; }); return true; })()`);
+      const asked = new Set();
+      for (let i = 0; i < 150 && !(await run('window.__kbSaved')); i++) {
+        const q = (await run('__kb.asking()')) || '';
+        const m = /"([^"]+)" changed on disk/.exec(q);
+        if (m) { asked.add(m[1]); await run(`__kb.answer('Leave it')`); }
+        await sleep(100);
+      }
+      await cdp.waitFor('window.__kbSaved', { what, timeoutMs: 1000 });
+      return asked.has(path);
+    }
+    const MOVED_OUTSIDE = 'changed by another program after the move\n';
+    {
+      const moved = !!disk(K, 'moved.tex');
+      put(K, 'moved.tex', MOVED_OUTSIDE);
+      await run(`__kb.open('moved.tex')`);
+      await settle();
+      await run(`__kb.append('% my edit\\n')`);
+      const prompted = await saveExpectingPrompt('moved.tex', 'the save after the move');
+      const s = (disk(K, 'moved.tex') || '').toString();
+      verify('a change made on disk after a move is still caught at save',
+        moved && prompted && s === MOVED_OUTSIDE, `moved=${moved} prompted=${prompted} disk=${JSON.stringify(s)}`);
+    }
+
+    /* The other order: changed on disk first, then moved. The rename is refused
+       against the old stamp, so the app moves it anyway — a rename cannot lose
+       the change, it travels with the file — and keeps the old stamp, so the
+       save after it still asks. */
+    const BEFORE_OUTSIDE = 'changed by another program before the move\n';
+    {
+      put(K, 'beforemove.tex', BEFORE_OUTSIDE);
+      await run(`__kb.menu('beforemove.tex', 'Rename')`);
+      await settle();
+      await run(`__kb.submit('aftermove.tex')`);
+      await sleep(400);
+      const moved = !!disk(K, 'aftermove.tex') && !disk(K, 'beforemove.tex');
+      await run(`__kb.open('aftermove.tex')`);
+      await settle();
+      await run(`__kb.append('% my edit\\n')`);
+      const prompted = await saveExpectingPrompt('aftermove.tex', 'the save after moving a changed file');
+      const s = (disk(K, 'aftermove.tex') || '').toString();
+      verify('a file changed on disk before a move is still moved',
+        moved, `aftermove=${!!disk(K, 'aftermove.tex')} beforemove=${!!disk(K, 'beforemove.tex')}`);
+      verify('and the save after it still asks rather than overwriting the change',
+        prompted && s === BEFORE_OUTSIDE, `prompted=${prompted} disk=${JSON.stringify(s)}`);
+    }
+
+    const staleBackups = async () =>
+      (await run('window.NativeAPI.listStaleBackups()')).map(b => ({ path: b.path, abs: b.abs, content: b.content }));
+
+    /* Renaming a file with unsaved edits used to leave its crash backup at the
+       old path, offered on every later open as "the only copy". */
+    await run(`__kb.open('renameme.tex')`);
+    await settle();
+    await run(`__kb.append('% unsaved\\n')`);
+    await sleep(2600);                                   // the backup's idle delay
+    {
+      const before = (await staleBackups()).some(b => b.path === 'renameme.tex');
+      await run(`__kb.menu('renameme.tex', 'Rename')`);
+      await settle();
+      await run(`__kb.submit('renamed.tex')`);
+      await sleep(400);
+      const moved = await staleBackups();
+      const atOld = moved.some(b => b.path === 'renameme.tex');
+      const atNew = moved.some(b => b.path === 'renamed.tex' && /% unsaved/.test(b.content));
+      verify('renaming a file with unsaved edits leaves no backup behind at the old path',
+        before && !atOld, `backup before=${before} at old path after=${atOld}`);
+      verify('and its unsaved edits are still backed up, at the new path', atNew,
+        JSON.stringify(moved.map(b => b.path)));
+      await saveLeavingConflicts();
+    }
+
+    /* The same for a delete: the file the user chose to remove used to be
+       offered back as the only copy of their work. */
+    await run(`__kb.open('deleteme.tex')`);
+    await settle();
+    await run(`__kb.append('% unsaved\\n')`);
+    await sleep(2600);
+    {
+      const before = (await staleBackups()).some(b => b.path === 'deleteme.tex');
+      await run(`__kb.menu('deleteme.tex', 'Delete')`);
+      await settle();
+      await run(`__kb.answer('OK')`);
+      await sleep(400);
+      const gone = !disk(K, 'deleteme.tex');
+      const after = (await staleBackups()).some(b => b.path === 'deleteme.tex');
+      verify('deleting a file with unsaved edits leaves no backup behind',
+        before && gone && !after, `backup before=${before} deleted=${gone} after=${after}`);
+    }
+
+    /* A switch that fails after the backend root moved used to leave K on
+       screen bound to B, so its edits, crash backups and saves landed in B.
+       The edit is made *before* the switch, inside the backup's idle delay, so
+       the backup timer is still pending when the root moves. */
+    const EDIT = 'EDITED IN K BEFORE A FAILED SWITCH\n';
+    await run(`__kb.open('chapters/one.tex')`);
+    await settle();
+    await run(`__kb.replaceAll(${JSON.stringify(EDIT)})`);
+    await run(`__kb.pick('known_B')`);
+    await settle();
+    if (await run('__kb.asking()')) await run(`__kb.answer('OK')`);    // discard? — yes
+    await cdp.waitFor(`/no \\.tex files/.test(document.getElementById('status').textContent)`,
+      { what: 'the failed switch to B', timeoutMs: 15000 }).catch(() => {});
+    {
+      const after = await run(`(() => ({
+        key: window.__reveryTexApp.projectKey,
+        status: document.getElementById('status').textContent,
+        title: document.getElementById('editortitle').textContent,
+        text: __kb.view().state.doc.toString(),
+        project: document.getElementById('project').textContent,
+        inert: document.getElementById('workspace').inert
+      }))()`);
+      verify('a switch to a folder with no .tex leaves the project on screen open',
+        after.key === path.basename(K) && /still open/.test(after.status), JSON.stringify(after));
+      verify('with its unsaved edit, in the file it was made in',
+        after.title === 'chapters/one.tex' && after.text === EDIT, JSON.stringify(after));
+      verify('and the Project button names it, not the folder that failed',
+        after.project.includes(path.basename(K)) && !after.project.includes('known_B'), after.project);
+      verify('and the window is usable again', after.inert === false);
+    }
+    await sleep(2600);                                   // the backup's idle delay
+    {
+      const backups = await staleBackups();
+      const inB = backups.filter(b => b.abs && b.abs.startsWith(B + path.sep));
+      const inK = backups.filter(b => b.path === 'chapters/one.tex' && b.content === EDIT);
+      verify('a crash backup is never filed under a folder that failed to open',
+        inB.length === 0, inB.map(b => b.abs).join(', '));
+      verify('and the edit pending at the switch is still backed up, under K',
+        inK.length > 0, JSON.stringify(backups.map(b => b.path)));
+    }
+    await saveLeavingConflicts();
+    {
+      const leaked = (disk(B, 'chapters/one.tex') || '').toString();
+      const home = (disk(K, 'chapters/one.tex') || '').toString();
+      verify('after a failed switch, Save writes to the project on screen',
+        !leaked && home === EDIT,
+        `B/chapters/one.tex=${JSON.stringify(leaked)} K/chapters/one.tex=${JSON.stringify(home)}`);
+      verify('and nothing at all was written into the folder that failed',
+        JSON.stringify(fs.readdirSync(B)) === JSON.stringify(['notes.txt']), fs.readdirSync(B).join(', '));
+    }
+
+    /* When the new project's main file cannot be read, openFile() returns
+       early — and the editor used to keep the previous project's buffer under
+       a path the new project also has, so typing wrote K's text into P's file.
+       A project change now clears the editor before it opens anything. */
+    await run(`__kb.open('refs.bib')`);
+    await settle();
+    await run(`__kb.pick('known_P')`);
+    await settle();
+    if (await run('__kb.asking()')) await run(`__kb.answer('OK')`);
+    const pKey = path.basename(P);
+    const switched = await cdp.waitFor(`window.__reveryTexApp.projectKey === ${JSON.stringify(pKey)}`,
+      { what: 'the switch to P', timeoutMs: 15000 }).then(() => true, () => false);
+    await run(`__kb.append('typed after the switch\\n')`);
+    await saveLeavingConflicts();
+    {
+      const s = (disk(P, 'refs.bib') || '').toString();
+      verify('the previous project\'s buffer is never written into the next project',
+        switched && s.includes('which must survive') && !s.includes('@book{k'),
+        `switched=${switched} P/refs.bib=${JSON.stringify(s)}`);
+    }
+
+    /* Nothing to go back to. G is opened, edited, and deleted from disk; a
+       switch from it to B then fails, and reopening G fails too. The one
+       honest state left is no project at all — not G's buffers over B. */
+    await run(`__kb.pick('known_G')`);
+    await settle();
+    if (await run('__kb.asking()')) await run(`__kb.answer('OK')`);
+    await cdp.waitFor(`window.__reveryTexApp.projectKey === ${JSON.stringify(path.basename(G))}`,
+      { what: 'the switch to G', timeoutMs: 15000 });
+    await run(`__kb.open('notes.tex')`);
+    await settle();
+    await run(`__kb.append('% unsaved in G\\n')`);
+    fs.rmSync(G, { recursive: true, force: true });
+    await run(`__kb.pick('known_B')`);
+    await settle();
+    if (await run('__kb.asking()')) await run(`__kb.answer('OK')`);
+    await cdp.waitFor(`window.__reveryTexApp.projectKey === null`,
+      { what: 'no project', timeoutMs: 15000 }).catch(() => {});
+    {
+      const none = await run(`(() => ({
+        key: window.__reveryTexApp.projectKey,
+        ready: window.__reveryTexApp.ready,
+        status: document.getElementById('status').textContent,
+        title: document.getElementById('editortitle').textContent,
+        text: __kb.view().state.doc.toString(),
+        typeable: document.querySelector('#editor .cm-content').contentEditable,
+        rows: document.querySelectorAll('#filetree .node').length,
+        count: document.getElementById('filecount').textContent,
+        save: document.getElementById('save').disabled,
+        exp: document.getElementById('exportzip').disabled
+      }))()`);
+      verify('a failed switch with nothing to go back to leaves no project open',
+        none.key === null && !none.ready && /no \.tex files/.test(none.status), JSON.stringify(none));
+      verify('and nothing of the old project on screen',
+        none.title === 'no file' && none.text === '' && none.rows === 0 && none.count === '',
+        JSON.stringify(none));
+      // An editor that took typing with no file behind it would keep the text
+      // nowhere; read-only says so instead.
+      verify('and nothing that could write it anywhere, or take typing that goes nowhere',
+        none.typeable === 'false' && none.save && none.exp, JSON.stringify(none));
+    }
+    // Whatever reaches the buffer anyway — the driver can dispatch into a
+    // read-only editor, a person cannot — must still have nowhere to go.
+    await run(`__kb.append('typed with nothing open\\n')`);
+    await saveLeavingConflicts().catch(() => {});
+    await sleep(2600);                                   // any backup would have run
+    {
+      verify('the folder that failed is still untouched',
+        JSON.stringify(fs.readdirSync(B)) === JSON.stringify(['notes.txt']), fs.readdirSync(B).join(', '));
+      verify('and the deleted project was not recreated by a save or a backup', !fs.existsSync(G));
+    }
+  } catch (err) {
+    console.log(`  ✗ the data-loss session could not run: ${err.message}`);
+    failed++;
+  } finally {
+    try { fs.chmodSync(path.join(P, 'main.tex'), 0o644); } catch { }
+    app.stop();
+    if (failed) console.log(`\n--- electron output ---\n${app.stderr().slice(-2000)}`);
+  }
+  failures += failed;
 }
 
 main().catch((err) => { console.error(err); process.exit(1); });

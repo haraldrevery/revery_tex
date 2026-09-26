@@ -17,6 +17,7 @@
 // catch it.
 
 const { test } = require('node:test');
+const { knownBug } = require('./known_bug.js');
 const assert = require('node:assert');
 
 let _mod;
@@ -147,6 +148,24 @@ test('no PDF anywhere is still a failure', async () => {
   assert.equal(r.success, false);
   assert.match(r.error, /no PDF|missing package/i);
 });
+
+// Known bug, Phase 4. "A PDF exists" is not "this compile made one". Measured
+// against TeX Live with the exact argv tex_run builds: pdfLaTeX and LuaLaTeX
+// delete main.pdf when a run fails, but XeLaTeX writes its PDF only through
+// xdvipdfmx at the end, so a fatal error before the first page exits 1 and
+// leaves the previous run's PDF where it was. The engine reads it back and
+// reports the old document as a fresh, successful compile.
+test('a failed XeLaTeX run is a failure even when an older PDF is still on disk',
+  (t) => knownBug(t, { phase: 'Phase 4', symptom: /stale PDF reported as success/ }, async () => {
+    const api = fakeApi({
+      tools: ['xelatex'],
+      disk: { 'main.pdf': PDF },                 // from the last run that worked
+      onRun: () => ({ code: 1, stdout: '././main.tex:1: Emergency stop.\nNo pages of output.' })
+    });
+    const { eng } = await makeEngine(api);
+    const r = await eng.compile({ mainFile: 'main.tex', engine: 'xetex', passes: false });
+    assert.equal(r.success, false, 'stale PDF reported as success');
+  }));
 
 /* ── what gets run ────────────────────────────────────────────────────── */
 

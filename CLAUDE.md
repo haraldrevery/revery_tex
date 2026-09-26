@@ -9,9 +9,24 @@ This file is only the things an assistant gets wrong.
 
 Starts both dev servers, runs unit → rust → gate → ui → web → electron, tears
 them down. `npm run check gate ui` runs a subset. It refuses to start if
-something is already on port 8777, because **a long-lived `node test/serve.js`
-does not pick up edits** and testing against a stale one looks exactly like the
-change having broken something.
+something is already on port 8777 or 8778, because **a long-lived
+`node test/serve.js` does not pick up edits** and testing against a stale one
+looks exactly like the change having broken something. Each suite has a
+timeout, so a hang is reported rather than waited on forever.
+
+The gate and UI suites need the sibling fixture repo (`../latex_project_tests/`,
+or wherever `REVERY_TEX_FIXTURES` points). Missing, they are reported as FAIL,
+not skipped; `REVERY_TEX_SKIP_FIXTURES=1` skips them on purpose, and says so.
+
+### Known bugs are tests that are *meant* to fail
+
+Open data-loss bugs are written as the correct assertion and wrapped in
+`knownBug()` (node:test) or `knownBugCheck()` (the CDP harnesses) from
+`test/known_bug.js`, each naming the phase of the fix plan that closes it. They
+report as `todo` / `~` and do not fail the run — but only while they fail with
+their own symptom. **When you fix one, its test turns red on purpose: remove the
+wrapper so it becomes an ordinary test.** Never loosen a symptom or delete the
+test to make it pass.
 
 ## The invariant
 
@@ -69,6 +84,33 @@ accepting it overwrote the file with no conflict, because the stamp belonged to
 the file that was really open. web-fs uses `identify()`/`rootId`, the zip backend
 a generated `projectId` stored in IndexedDB, and the desktop shells hash the
 absolute path.
+
+**A backup follows its file.** A move writes it at the new path before dropping
+the old one, and a delete from the Files panel discards it. Left behind, a
+renamed file's backup was offered on every open as "the only copy" of a file
+that had only moved, and a deleted one's brought the file back on Restore. That
+is not the rule above bent: a file that disappears *outside* the app is still
+unreadable, and its backup is still offered. Only a file with unsaved edits
+carries its backup on a move — a clean file's backup is a crash from an earlier
+session that the user chose to keep for later.
+
+Tauri keeps backups in the app **data** directory, as Electron keeps them in
+userData. They were in the cache directory, which cleaners may empty. The old
+directory is still listed and swept on discard (`backup_search_path`), so
+nothing written there before is stranded or impossible to dismiss.
+
+### A move keeps the file's stamp
+
+`renameFile(from, to, expect)` refuses, with the ordinary CONFLICT, a file that
+no longer matches the stamp it was read with, and otherwise returns the
+destination's stamp, which `moveOne` adopts. The app used to *drop* the stamp on
+every move — the browser backends rename by copying, so a kept stamp raised a
+false conflict — and the next save then overwrote whatever another program had
+done to the file since. Two things not to do instead: keep the old stamp
+unconditionally (false conflicts in the browser), or re-stamp the destination
+without the check (absorbs a change made *before* the move, then overwrites it).
+On a conflict the app still moves the file — a rename cannot lose the change —
+but keeps the old stamp, so the next save asks.
 
 ## `www/` contains only what ships
 
@@ -148,6 +190,28 @@ stays shut and the reveal is reachable only through our own validating command.
 Adding `tauri-plugin-opener` instead would put URL-opening in the binary; see
 the licence section below for why that is not a free change.
 
+## The project root moves in one place
+
+Every backend resolves a project-relative path against the root that is open
+**when the call lands**. Moving the root while a save, a crash backup or a
+folder move was still on its way sent the rest of it into the other folder —
+and a switch that failed after moving the root left the old project on screen
+saving into the new one. So:
+
+- **Change project only through `switchProject()`** in `revery_tex_app.js`. The
+  app's `NativeAPI` is the gated one from `root_gate.js`, and it *refuses* the
+  root-moving methods (`openFolder`, `openFolderPath`, `importZip`, …) so a new
+  caller cannot bypass the switch. The switch itself uses `backend`.
+- **A Files-panel operation that makes several disk calls is `gate.task(…)`** at
+  its entry point, so a switch waits for it instead of cutting it in half. A new
+  one that is not registered is the next instance of this bug.
+- **A failed open must leave the old project exactly as it was, or nothing
+  open** (`closeProject`) — never the old project over the new folder. Desktop
+  goes back with `openFolderPath(prev.root)`; web-fs with `revertOpen`, which
+  must restore all four of the handle, its id, the file-handle map and the
+  remembered folder. Restoring the handle alone still sends a save to the failed
+  folder's file of the same name — the web harness checks exactly that.
+
 ### The one place the renderer names a root
 
 `open_folder_path` (Tauri) / `fs:openFolderPath` (Electron), behind the Project
@@ -165,6 +229,10 @@ directory `tex_run` compiles in**. So the vetting is not tidiness:
 - It canonicalises (so `safe_path_inside` keeps comparing real paths), requires
   a directory that exists, and **refuses a filesystem root and `$HOME` itself**.
   Do not drop that last one to make some path work.
+- **The folder dialog and the launch path (`REVERY_TEX_OPEN`, argv) go through
+  the same vetting** (`vet_project_dir` / `vetProjectRoot`). That is what lets a
+  failed switch reopen the previous folder by path: a root the vetting would
+  refuse could be opened but never gone back to.
 
 **The recents list itself is deliberately not persisted here.** It lives in
 `www/jvscrpt_and_css_extra/recent_projects.js`, in shared JS, for the reason the
@@ -173,6 +241,27 @@ implementations that drift. The shells supply only the half a browser cannot do.
 Entries are keyed on a **project identity** — the canonical absolute path — never
 on `project.key`, which is only the folder's name; same rule as the crash
 backups, and for the same reason.
+
+## Project text is UTF-8, strictly
+
+Every backend's `readTextFile` refuses a file that is not UTF-8, and the loader
+(`readProjectFromDisk`) keeps it as bytes — `binary: true` plus `textError`,
+read-only, compiled and exported as it is. So:
+
+- **Never decode project files leniently** — no `file.text()`, no
+  `readFileSync(…, 'utf8')` for project text, no default `TextDecoder`. Use
+  `{ fatal: true, ignoreBOM: true }`. Lenient decoding is what turned Latin-1
+  files into U+FFFD on the next save; the default decoder also strips a BOM,
+  which rewrote the first three bytes of every file that had one.
+- The only lenient decodes left are the crash-backup staleness readers, which
+  must not throw — and even those keep the BOM, or every backup of such a file
+  looks stale.
+- **Bytes go to the engine as bytes.** `tex_engine_wasm.js` used to decode the
+  main file on its way in; `test/wasm_engine_bytes.test.js` and the web
+  harness's `MARK:` check hold it to passing it through.
+- `scannable()` in `project_store.js` reads held bytes one character per byte,
+  **for the ASCII scanners only** (`\documentclass`, `\input`,
+  `\bibliography`). Never show, edit or save what it returns.
 
 ## Generated files — never edit directly
 

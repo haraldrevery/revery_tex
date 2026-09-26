@@ -352,9 +352,65 @@ function stampOf(abs) {
   return { mtime_ms: Math.floor(st.mtimeMs), size: st.size };
 }
 
+/**
+ * UTF-8, strictly — and a byte-order mark is kept, not eaten.
+ *
+ * `readFileSync(…, 'utf8')` decodes leniently: every byte that is not valid
+ * UTF-8 becomes U+FFFD, and the next save writes that back, so one unrelated
+ * edit to a Latin-1 file destroyed every accented character in it. A file that
+ * is not UTF-8 is refused instead, as the Rust twin already did, and the loader
+ * keeps it as bytes (project_store.js). `ignoreBOM: true` means "leave it in
+ * the text", so a save puts back the file it read.
+ */
+const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+/** How many times a file that changes under the read is read again. */
+const STABLE_READ_TRIES = 3;
+
+/**
+ * The bytes of `abs` and the stamp that describes exactly those bytes.
+ *
+ * Stat, read, stat — on one file handle — and read again if the two stats
+ * differ. It used to read the file and *then* stat the path, so a write landing
+ * in between returned the old text with the new file's stamp; the next save
+ * matched that stamp and overwrote the other program's work with no conflict.
+ * One handle rather than the path, so a file replaced by rename mid-read is
+ * still described consistently: the bytes and the stamp are both the old
+ * file's, and the next save is a conflict, as it should be.
+ */
+function readStable(abs) {
+  for (let i = 0; i < STABLE_READ_TRIES; i++) {
+    const fd = fs.openSync(abs, 'r');
+    try {
+      const before = fs.fstatSync(fd);
+      const bytes = fs.readFileSync(fd);
+      const after = fs.fstatSync(fd);
+      if (before.mtimeMs === after.mtimeMs && before.size === after.size && bytes.length === after.size) {
+        return { bytes, stamp: { mtime_ms: Math.floor(after.mtimeMs), size: after.size } };
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+  throw new Error('it kept changing while it was being read');
+}
+
 function readTextFile(root, rel) {
   const abs = safePathInside(rel, root);
-  return { content: fs.readFileSync(abs, 'utf8'), stamp: stampOf(abs) };
+  let read;
+  try {
+    read = readStable(abs);
+  } catch (err) {
+    throw new Error(`Cannot read ${rel}: ${err.message}`);
+  }
+  let content;
+  try {
+    content = UTF8.decode(read.bytes);
+  } catch {
+    // The Rust twin's wording, so both desktop shells refuse alike.
+    throw new Error(`Cannot read ${rel}: stream did not contain valid UTF-8`);
+  }
+  return { content, stamp: read.stamp };
 }
 
 function readBinaryFile(root, rel) {
@@ -385,18 +441,28 @@ const CONFLICT_PREFIX = 'CONFLICT:';
  * shown the conflict and chose to overwrite). The error is prefixed CONFLICT: so
  * the caller can offer a real choice rather than a generic failure.
  */
+/**
+ * Refuse if the file at `abs` is no longer the one `expect` describes.
+ *
+ * One check, for a write and for a rename: both act on a file the app read
+ * earlier, and both must not treat it as that file once something else has
+ * changed it. The sentence is conflict_rule.js's, held to it by
+ * test/conflict_rule.test.js.
+ */
+function checkStamp(abs, rel, expect) {
+  if (!expect || !fs.existsSync(abs)) return;
+  const now = stampOf(abs);
+  if (now.mtime_ms !== expect.mtime_ms || now.size !== expect.size) {
+    throw new Error(
+      `${CONFLICT_PREFIX}${rel} changed on disk since it was opened ` +
+      `(was ${expect.size} bytes, now ${now.size} bytes)`
+    );
+  }
+}
+
 function writeFile(root, rel, content, expect = null) {
   const abs = safePathInside(rel, root);
-
-  if (expect && fs.existsSync(abs)) {
-    const now = stampOf(abs);
-    if (now.mtime_ms !== expect.mtime_ms || now.size !== expect.size) {
-      throw new Error(
-        `${CONFLICT_PREFIX}${rel} changed on disk since it was opened ` +
-        `(was ${expect.size} bytes, now ${now.size} bytes)`
-      );
-    }
-  }
+  checkStamp(abs, rel, expect);
 
   fs.mkdirSync(path.dirname(abs), { recursive: true });
   atomicWriteFile(abs, content);
@@ -442,15 +508,29 @@ function deleteFile(root, rel) {
   syncParentDir(abs);
 }
 
-function renameFile(root, from, to) {
+/**
+ * Move a file, and say what it is now.
+ *
+ * `expect` is the stamp the app read the file with, and a file that no longer
+ * matches it is refused with the same CONFLICT a write gets — before anything
+ * moves. The stamp returned is the destination's, and the app adopts it only
+ * when the move was not refused: that is what keeps a change made on disk after
+ * a move visible to the next save. The app used to drop the stamp on every
+ * move instead, so that save overwrote whatever was there with no question.
+ * (The destination is not simply re-stamped either: a change made *before* the
+ * move would then be absorbed into the new stamp, and overwritten the same way.)
+ */
+function renameFile(root, from, to, expect = null) {
   const src = safePathInside(from, root);
   const dest = safePathInside(to, root);
   if (!fs.existsSync(src)) throw new Error(`Cannot rename ${from}: it does not exist`);
   if (fs.existsSync(dest)) throw new Error(`Cannot rename to ${to}: that already exists`);
+  checkStamp(src, from, expect);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.renameSync(src, dest);
   syncParentDir(src);
   syncParentDir(dest);
+  return stampOf(dest);
 }
 
 /* ── crash backups ───────────────────────────────────────────────────── */

@@ -113,6 +113,22 @@ async function walk(dir, prefix, out) {
 
 const stampOf = (file) => ({ mtime_ms: Math.floor(file.lastModified), size: file.size });
 
+/*
+ * Project text is UTF-8, strictly, and a byte-order mark stays in it.
+ *
+ * `file.text()` does neither: it decodes leniently, so a Latin-1 file came back
+ * with every accented byte replaced by U+FFFD and the next save wrote that over
+ * the original; and it strips a BOM, so saving any file that had one quietly
+ * rewrote its first three bytes. A file that is not UTF-8 is refused instead,
+ * and the loader keeps it as bytes (project_store.js).
+ *
+ * The lenient one is for crash-backup staleness only, which compares text
+ * against text and must not throw on a file that became unreadable — but must
+ * keep the BOM too, or every backup of such a file would look stale.
+ */
+const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+const UTF8_LENIENT = new TextDecoder('utf-8', { ignoreBOM: true });
+
 function requireHandle(path) {
   const h = handles.get(path);
   if (!h) throw new Error(`Not in the open folder: ${path}`);
@@ -169,6 +185,31 @@ async function destinationExists(path) {
   return false;
 }
 
+/* ── backing out of a folder that is not a project ───────────────────── */
+//
+// Opening a folder replaces four things here: the handle, its id, the map of
+// file handles, and the folder remembered for next time. The app reads the
+// folder only afterwards, so when that read fails — no .tex in it — the app
+// has to be able to go back, or its project stays on screen resolving every
+// path against the folder that failed. That is the bug this exists for: the
+// old project's saves and crash backups landed in the new folder.
+//
+// All four, not just the handle. `handles` is what every read and write looks
+// a path up in, and the failed read has just refilled it from the new folder,
+// so restoring the handle alone would still send a save of `refs.bib` to the
+// new folder's `refs.bib`. And the remembered folder is what the next visit
+// offers, which should not become a folder that could not be opened.
+
+let previous = null;
+
+/** Keep what the open about to happen will replace. Before any of it changes. */
+async function keepPrevious() {
+  previous = {
+    rootHandle, rootId, handles: new Map(handles),
+    remembered: await idbGet(HANDLE_KEY).catch(() => null)
+  };
+}
+
 /** Ask for read/write permission, prompting only if we do not already have it. */
 async function ensurePermission(handle) {
   const opts = { mode: 'readwrite' };
@@ -186,11 +227,34 @@ export const webFsImpl = {
       throw e;
     });
     if (!dir) return null;
+    await keepPrevious();
     rootHandle = dir;
     rootId = await identify(dir);
     handles.clear();
     await idbPut(HANDLE_KEY, dir).catch(() => {});
     return dir.name;
+  },
+
+  /**
+   * Put back the folder that was open before the last `openFolder` or
+   * `reopenRemembered`, for when what it opened turned out not to be a project.
+   *
+   * Only here. The desktop shells go back by reopening the previous path, and
+   * the zip store cannot go back at all — an import has already replaced it.
+   *
+   * @returns {Promise<string|null>} the folder now open again, or null if
+   *          nothing was open before
+   */
+  async revertOpen() {
+    if (!previous) return null;
+    const p = previous;
+    previous = null;
+    rootHandle = p.rootHandle;
+    rootId = p.rootId;
+    handles.clear();
+    for (const [path, h] of p.handles) handles.set(path, h);
+    await idbPut(HANDLE_KEY, p.remembered).catch(() => {});
+    return rootHandle ? rootHandle.name : null;
   },
 
   /**
@@ -214,6 +278,7 @@ export const webFsImpl = {
     const saved = await idbGet(HANDLE_KEY).catch(() => null);
     if (!saved) return null;
     if (!(await ensurePermission(saved))) return null;
+    await keepPrevious();
     rootHandle = saved;
     rootId = await identify(saved);
     handles.clear();
@@ -226,9 +291,20 @@ export const webFsImpl = {
     return walk(rootHandle, '', []);
   },
 
+  // One snapshot: `getFile()` returns a File fixed at that moment, and reading
+  // it after the file on disk has changed is an error rather than new bytes —
+  // so the stamp always describes the text, which the desktop shells need a
+  // stat before and after the read to guarantee.
   async readTextFile(path) {
     const file = await requireHandle(path).getFile();
-    return { content: await file.text(), stamp: stampOf(file) };
+    let content;
+    try {
+      content = UTF8.decode(await file.arrayBuffer());
+    } catch (err) {
+      if (err && err.name !== 'TypeError') throw err;
+      throw new Error(`Cannot read ${path}: stream did not contain valid UTF-8`);
+    }
+    return { content, stamp: stampOf(file) };
   },
 
   async readBinaryFile(path) {
@@ -286,8 +362,15 @@ export const webFsImpl = {
    * Move a file. There is no rename in the File System Access API, so this is
    * read, write, delete — in that order, so a failure at any point leaves the
    * original where it was rather than losing it.
+   *
+   * `expect` and the returned stamp are the desktop contract (see renameFile in
+   * electron/fs_core.js). Here the copy has a new mtime, which is why the app
+   * used to drop a moved file's stamp: kept, the next save saw a "change" only
+   * this session had made. The destination's stamp is returned instead, and it
+   * is safe to adopt because the source was checked against `expect` first —
+   * from the same snapshot the bytes are copied out of.
    */
-  async renameFile(from, to) {
+  async renameFile(from, to, expect = null) {
     const src = requireHandle(from);
     // Asked of the disk, not of `handles`. That map is only filled by the
     // directory walk at open time, so a file created in the folder since then
@@ -297,7 +380,14 @@ export const webFsImpl = {
     if (await destinationExists(to)) {
       throw new Error(`Cannot rename to ${to}: that already exists`);
     }
-    const bytes = new Uint8Array(await (await src.getFile()).arrayBuffer());
+    const file = await src.getFile();
+    if (expect) {
+      const now = stampOf(file);
+      if (now.mtime_ms !== expect.mtime_ms || now.size !== expect.size) {
+        throw conflictError(from, expect.size, now.size, 'disk');
+      }
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer());
 
     const dest = await handleForCreate(to);
     const w = await dest.createWritable();
@@ -307,6 +397,7 @@ export const webFsImpl = {
     const { dir, name } = await parentOf(from);
     await dir.removeEntry(name);
     handles.delete(from);
+    return stampOf(await dest.getFile());
   },
 
   /* Crash backups live in localStorage: small, synchronous, and survives a tab
@@ -337,7 +428,7 @@ export const webFsImpl = {
       // what a deleted file looks like, since deleteFile prunes that map.
       // staleBackups treats the throw as "nothing there", so the backup is
       // offered rather than dropped.
-      async (path) => (await requireHandle(path).getFile()).text()
+      async (path) => UTF8_LENIENT.decode(await (await requireHandle(path).getFile()).arrayBuffer())
     );
   },
 

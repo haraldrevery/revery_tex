@@ -14,6 +14,7 @@
 // native_api.js and is not exercised here.
 
 const { launch, sleep } = require('./cdp.js');
+const { knownBugCheck } = require('./known_bug.js');
 
 const BASE = process.env.STATIC_URL || 'http://localhost:8778/www/index.html';
 const CDP_PORT = Number(process.env.CDP_PORT) || 9335;
@@ -363,7 +364,7 @@ async function main() {
     // every LaTeX project has a main.tex and most have chapters/intro.tex.
     //
     // Driven here rather than in run_ui.js because `applyRememberedMain` only
-    // runs on the `loadFromDisk` path, which the fixture suite never takes.
+    // runs on the `openProject` path, which the fixture suite never takes.
     const planted = await cdp.evaluate(`(async () => {
       const s = await import('./jvscrpt_and_css_extra/settings.js');
       const key = window.__reveryTexApp.projectKey;
@@ -376,7 +377,7 @@ async function main() {
     })()`, true);
 
     // Re-import the same zip: that is the shortest route back through
-    // loadFromDisk, which is what calls applyRememberedMain.
+    // openProject, which is what calls applyRememberedMain.
     await cdp.evaluate(`(async () => {
       const { writeZip } = await import('./jvscrpt_and_css_extra/zip_core.js');
       const enc = new TextEncoder();
@@ -768,6 +769,275 @@ async function main() {
     check('and the Folder menu has a row that uses it',
       fsMenu.rows.some(r => /^reopen last folder/i.test(r)), fsMenu.rows.join(' | '));
 
+    /* ── web-fs: a folder that is not a project is backed out of ─────── */
+    // Opening a folder replaces four things in this backend — the handle, its
+    // id, the map of file handles and the folder remembered for next time —
+    // and the app reads the folder only afterwards. When that read failed, the
+    // old project stayed on screen resolving every path against the new
+    // folder, so its saves and crash backups landed there.
+    //
+    // Chrome's own picker cannot be driven headless, so it is replaced with one
+    // that hands back folders from the origin-private file system: real
+    // directory handles, with the same permission, identity and IndexedDB
+    // behaviour as a picked folder. The profile is throwaway, so they start
+    // empty on every run.
+    //
+    // Both folders hold a notes.txt, and that is the file edited: restoring
+    // the handle alone would still send its save to switch_B's notes.txt,
+    // because the failed read refilled the map of file handles from switch_B.
+    const SWITCH_EDIT = 'EDITED IN A BEFORE A FAILED SWITCH\n';
+    const B_NOTES = 'switch_B notes, which must survive\n';
+    await cdp.evaluate(`(async () => {
+      const root = await navigator.storage.getDirectory();
+      const put = async (dir, rel, text) => {
+        let d = await root.getDirectoryHandle(dir, { create: true });
+        const parts = rel.split('/');
+        const name = parts.pop();
+        for (const p of parts) d = await d.getDirectoryHandle(p, { create: true });
+        const w = await (await d.getFileHandle(name, { create: true })).createWritable();
+        await w.write(text); await w.close();
+      };
+      await put('switch_A', 'main.tex', ${JSON.stringify(DOC)});
+      await put('switch_A', 'notes.txt', 'switch_A notes\\n');
+      await put('switch_A', 'bom.tex', '\\ufeffCaf\\u00e9 with a byte-order mark\\n');
+      await put('switch_B', 'notes.txt', ${JSON.stringify(B_NOTES)});
+      window.showDirectoryPicker = async () => root.getDirectoryHandle(window.__pick);
+      // Nothing here is about compiling, and a save would otherwise wait for one.
+      (await import('./jvscrpt_and_css_extra/settings.js')).set('autoCompile', false);
+      return true;
+    })()`, true);
+    const OPEN_FOLDER = `(() => {
+      document.getElementById('folder').click();
+      const row = [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => /^open folder/i.test(b.textContent.trim()));
+      if (row) row.click();
+      return !!row;
+    })()`;
+    await cdp.evaluate(`window.__pick = 'switch_A'; true`);
+    await cdp.evaluate(OPEN_FOLDER);
+    const openedA = await cdp.waitFor(`window.__reveryTexApp.projectKey === 'switch_A'`,
+      { what: 'switch_A through the picker', timeoutMs: 30000 }).then(() => true, () => false);
+    check('web-fs opens a folder through the picker', openedA);
+
+    await cdp.evaluate(`(() => {
+      [...document.querySelectorAll('#filetree .node')].find(r => r.dataset.path === 'notes.txt').click();
+      const v = window.__reveryTexTest.view();
+      v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: ${JSON.stringify(SWITCH_EDIT)} } });
+      window.__pick = 'switch_B';
+      return true;
+    })()`);
+    await cdp.evaluate(OPEN_FOLDER);                     // the discard prompt is answered OK
+    await cdp.waitFor(`/no \\.tex files/.test(document.getElementById('status').textContent)`,
+      { what: 'the failed open of switch_B', timeoutMs: 30000 }).catch(() => {});
+    const backedOut = await cdp.evaluate(`(() => ({
+      key: window.__reveryTexApp.projectKey,
+      status: document.getElementById('status').textContent,
+      text: window.__reveryTexTest.view().state.doc.toString()
+    }))()`);
+    check('a folder with no .tex leaves the open project open',
+      backedOut.key === 'switch_A' && /still open/.test(backedOut.status), JSON.stringify(backedOut));
+    check('with its unsaved edit', backedOut.text === SWITCH_EDIT, JSON.stringify(backedOut.text));
+
+    await sleep(2600);                                   // the crash backup's idle delay
+    const keys = await cdp.evaluate(`Object.keys(localStorage).filter(k => k.startsWith('revery_tex_backup:'))`);
+    check('its crash backup is filed under the folder it belongs to',
+      keys.some(k => /^revery_tex_backup:switch_A-[^:]+:notes\.txt$/.test(k)), keys.join(', '));
+    check('and never under the folder that failed',
+      !keys.some(k => k.startsWith('revery_tex_backup:switch_B')), keys.join(', '));
+
+    const afterSave = await cdp.evaluate(`(async () => {
+      // A conflict prompt here means the save was aimed at switch_B's file,
+      // whose stamp is not the one read from switch_A. Answered, so the run
+      // reports that rather than hanging on a prompt nobody clicks.
+      let conflicted = false;
+      const answer = setInterval(() => {
+        const d = document.querySelector('.dlg-ask');
+        if (!d || !/changed on disk/.test(d.textContent)) return;
+        conflicted = true;
+        [...document.querySelectorAll('.dlg-foot button')].find(b => b.textContent.trim() === 'Leave it')?.click();
+      }, 50);
+      await window.__reveryTexApp.saveAll();
+      clearInterval(answer);
+      const root = await navigator.storage.getDirectory();
+      const read = async (dir, rel) => {
+        let d = await root.getDirectoryHandle(dir);
+        const parts = rel.split('/');
+        const name = parts.pop();
+        try {
+          for (const p of parts) d = await d.getDirectoryHandle(p);
+          return await (await (await d.getFileHandle(name)).getFile()).text();
+        } catch { return null; }
+      };
+      const inB = [];
+      for await (const [n] of (await root.getDirectoryHandle('switch_B')).entries()) inB.push(n);
+      return { conflicted, a: await read('switch_A', 'notes.txt'), b: await read('switch_B', 'notes.txt'), inB };
+    })()`, true);
+    check('Save after a failed open writes to the project on screen',
+      !afterSave.conflicted && afterSave.a === SWITCH_EDIT, JSON.stringify(afterSave));
+    check('and nothing reaches the folder that failed, not even its file of the same name',
+      afterSave.b === B_NOTES && JSON.stringify(afterSave.inB) === JSON.stringify(['notes.txt']),
+      JSON.stringify(afterSave));
+
+    // A byte-order mark is part of the file. `file.text()` stripped it, so
+    // saving any file that had one quietly rewrote its first three bytes.
+    const bomSaved = await cdp.evaluate(`(async () => {
+      [...document.querySelectorAll('#filetree .node')].find(r => r.dataset.path === 'bom.tex').click();
+      const v = window.__reveryTexTest.view();
+      v.dispatch({ changes: { from: v.state.doc.length, insert: '% edited\\n' } });
+      await window.__reveryTexApp.saveAll();
+      const root = await navigator.storage.getDirectory();
+      const f = await (await (await root.getDirectoryHandle('switch_A')).getFileHandle('bom.tex')).getFile();
+      return [...new Uint8Array(await f.arrayBuffer())];
+    })()`, true);
+    const bomText = Buffer.from(bomSaved).toString('utf8');
+    check('web-fs keeps a byte-order mark through an edit and a save',
+      bomSaved[0] === 0xef && bomSaved[1] === 0xbb && bomSaved[2] === 0xbf && bomText.endsWith('% edited\n'),
+      Buffer.from(bomSaved.slice(0, 8)).toString('hex'));
+
+    // A move keeps the file's identity. web-fs renames by copying, so the moved
+    // file has a new mtime; the app used to drop the stamp rather than raise a
+    // false conflict over that, and the next save then overwrote whatever had
+    // changed since. The backend now returns the copy's stamp for the app to keep.
+    const afterMove = await cdp.evaluate(`(async () => {
+      const wait = (ms) => new Promise(r => setTimeout(r, ms));
+      const rowOf = (p) => [...document.querySelectorAll('#filetree .node')].find(r => r.dataset.path === p);
+      const row = rowOf('bom.tex');
+      const box = row.getBoundingClientRect();
+      row.dispatchEvent(new MouseEvent('contextmenu',
+        { bubbles: true, cancelable: true, clientX: box.left + 20, clientY: box.top + 5 }));
+      [...document.querySelectorAll('.menu-container:not([hidden]) .menu-item')]
+        .find(b => b.textContent.trim().startsWith('Rename')).click();
+      await wait(100);
+      const input = document.querySelector('.dlg input[type="text"]');
+      input.value = 'moved/bom.tex';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      [...document.querySelectorAll('.dlg-foot button')].find(b => !/cancel/i.test(b.textContent)).click();
+      await wait(400);
+      if (!rowOf('moved/bom.tex')) return { moved: false };
+
+      const root = await navigator.storage.getDirectory();
+      const h = await (await (await root.getDirectoryHandle('switch_A')).getDirectoryHandle('moved'))
+        .getFileHandle('bom.tex');
+      const w = await h.createWritable(); await w.write('changed after the move\\n'); await w.close();
+
+      rowOf('moved/bom.tex').click();
+      const v = window.__reveryTexTest.view();
+      v.dispatch({ changes: { from: v.state.doc.length, insert: '% mine\\n' } });
+      // "Reload" rather than "Leave it", so nothing is left dirty to add a
+      // second prompt to the recovery check below.
+      let asked = false;
+      const answer = setInterval(() => {
+        const d = document.querySelector('.dlg-ask');
+        if (!d || !/changed on disk/.test(d.textContent)) return;
+        asked = true;
+        [...document.querySelectorAll('.dlg-foot button')].find(b => b.textContent.trim() === 'Reload')?.click();
+      }, 50);
+      await window.__reveryTexApp.saveAll();
+      clearInterval(answer);
+      return { moved: true, asked, onDisk: await (await h.getFile()).text() };
+    })()`, true);
+    check('web-fs: a change made after a move is still caught at the next save',
+      afterMove.moved && afterMove.asked && afterMove.onDisk === 'changed after the move\n', JSON.stringify(afterMove));
+
+    // A crash backup, and then the file saved after it — by another program,
+    // or by this app in a later session. Restoring would put older text over
+    // newer, and the save after it would go through without a question, so the
+    // prompt has to say so and must not default to Restore.
+    await cdp.evaluate(`(async () => {
+      await window.NativeAPI.writeBackup('notes.txt', 'from a session that crashed\\n');
+      await new Promise(r => setTimeout(r, 50));
+      const root = await navigator.storage.getDirectory();
+      const h = await (await root.getDirectoryHandle('switch_A')).getFileHandle('notes.txt');
+      const w = await h.createWritable(); await w.write('saved after the backup was made\\n'); await w.close();
+      return true;
+    })()`, true);
+
+    // The folder remembered for next time is part of what the open replaced.
+    // Left pointing at switch_B, the next visit would offer the folder that
+    // could not be opened rather than the one that was.
+    await cdp.send('Page.navigate', { url: BASE });
+    await sleep(1500);
+    // The recovery prompt holds boot until it is answered — see the legacy
+    // section above — so it is read and answered before anything waits on ready.
+    const newerPrompt = await cdp.evaluate(`(async () => {
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline && !document.querySelector('.dlg-ask')) {
+        await new Promise(r => setTimeout(r, 100));
+      }
+      const ask = document.querySelector('.dlg-ask');
+      if (!ask) return null;
+      const text = ask.textContent;
+      const primary = document.querySelector('.dlg-foot button.primary');
+      const out = { text, primary: primary ? primary.textContent.trim() : null };
+      [...document.querySelectorAll('.dlg-foot button')].find(b => b.textContent.trim() === 'Discard').click();
+      return out;
+    })()`, true);
+    check('recovery says when the file on disk is newer than the backup',
+      !!newerPrompt && /notes\.txt/.test(newerPrompt.text) && /changed after this backup was made/.test(newerPrompt.text),
+      JSON.stringify(newerPrompt));
+    check('and does not offer Restore as the default then',
+      !!newerPrompt && newerPrompt.primary === 'Not now', JSON.stringify(newerPrompt && newerPrompt.primary));
+    const remembered = await cdp.waitFor(`window.__reveryTexApp && window.__reveryTexApp.projectKey === 'switch_A'`,
+      { what: 'the remembered folder after a reload', timeoutMs: 30000 }).then(() => true, () => false);
+    check('the next visit reopens the folder that was open, not the one that failed', remembered,
+      await cdp.evaluate(`document.getElementById('status').textContent`));
+
+    /* ── web-zip: nothing to go back to ─────────────────────────────── */
+    // An import has replaced the store before the project is read from it, so
+    // when that read fails there is no previous project left to return to. The
+    // app must then show nothing open — not the old project's buffers, still
+    // editable and saving into a store that now holds something else.
+    await cdp.send('Page.navigate', { url: `${BASE}?backend=zip` });
+    await sleep(1500);
+    await cdp.waitFor('!!window.__reveryTexApp && window.__reveryTexApp.ready',
+      { what: 'the stored project on web-zip', timeoutMs: 30000 });
+    await cdp.evaluate(`(async () => {
+      const api = window.NativeAPI;
+      const realImport = api.importZip, realList = api.readDirectory;
+      let failNext = false;
+      // One failed read, straight after the import: the one place a failure
+      // leaves nothing to return to.
+      api.importZip = async (f) => { const r = await realImport(f); failNext = true; return r; };
+      api.readDirectory = async () => {
+        if (failNext) { failNext = false; throw new Error('simulated: the store could not be read'); }
+        return realList();
+      };
+      window.__restoreZipApi = () => { api.importZip = realImport; api.readDirectory = realList; };
+      const { writeZip } = await import('./jvscrpt_and_css_extra/zip_core.js');
+      const dt = new DataTransfer();
+      dt.items.add(new File([await writeZip([{ path: 'main.tex', bytes: new TextEncoder().encode(${JSON.stringify(DOC)}) }])],
+        'unreadable.zip', { type: 'application/zip' }));
+      const input = document.getElementById('zipinput');
+      input.files = dt.files;
+      input.dispatchEvent(new Event('change'));
+      return true;
+    })()`, true);
+    await cdp.waitFor(`/simulated/.test(document.getElementById('status').textContent)`,
+      { what: 'the failed read after the import', timeoutMs: 30000 }).catch(() => {});
+    const closed = await cdp.evaluate(`(() => {
+      window.__restoreZipApi();
+      return {
+        key: window.__reveryTexApp.projectKey,
+        status: document.getElementById('status').textContent,
+        text: window.__reveryTexTest.view().state.doc.toString(),
+        typeable: document.querySelector('#editor .cm-content').contentEditable,
+        rows: document.querySelectorAll('#filetree .node').length,
+        save: document.getElementById('save').disabled,
+        exp: document.getElementById('exportzip').disabled
+      };
+    })()`);
+    check('a failed read after an import leaves no project open',
+      closed.key === null && /simulated/.test(closed.status), JSON.stringify(closed));
+    check('and nothing of the replaced one on screen, or able to save',
+      closed.text === '' && closed.rows === 0 && closed.typeable === 'false' && closed.save && closed.exp,
+      JSON.stringify(closed));
+    // What was imported is in the store, so it is one reload away rather than lost.
+    await cdp.send('Page.navigate', { url: `${BASE}?backend=zip` });
+    await sleep(1500);
+    const recovered = await cdp.waitFor(`window.__reveryTexApp && window.__reveryTexApp.projectKey === 'unreadable'`,
+      { what: 'the imported project after a reload', timeoutMs: 30000 }).then(() => true, () => false);
+    check('and what was imported opens on the next visit', recovered);
+
     // `/api/projects` 404 is the fixture probe, and on a static host it is
     // supposed to fail — that failure is how the app knows it is not on a dev
     // server. It shows up in the console of every real deployment, which is
@@ -786,11 +1056,87 @@ async function main() {
     check('no unexpected page errors', real.length === 0, real.slice(0, 3).join(' | '));
     check('dialogs were answered, not left hanging', dialogs.length > 0,
       `beforeunload etc: ${dialogs.map(d => d.type).join(', ') || 'none fired'}`);
+
+    /* ── files that are not UTF-8, and a byte-order mark ──────────────── */
+    // Last, and after the checks above on purpose: it imports a new project,
+    // and the dialog check relies on the dirty buffer the export section left.
+    //
+    // The zip store *is* the project here, and Export builds the archive from
+    // the project's buffers. A Latin-1 file used to come back out with U+FFFD in
+    // place of every accented byte — without ever having been opened — and a
+    // byte-order mark was stripped. A file that is not UTF-8 is held as bytes
+    // now, read-only, and both come back exactly as they went in. A Latin-1
+    // *main* file also has to reach the bundled engine as the bytes it is: the
+    // engine used to decode it to a string on the way in.
+    console.log('\n── encodings ────────────────────────────────────────────────────');
+    await cdp.send('Page.navigate', { url: `${BASE}?backend=zip` });
+    await sleep(1500);
+    await cdp.waitFor('!!window.__reveryTexApp', { what: 'reboot on web-zip', timeoutMs: 30000 });
+    const latin1 = (text) => [...Buffer.from(text, 'latin1')];
+    const LATIN1 = latin1('Caf\xe9 na\xefve\n');
+    // \typeout of an inputenc character writes its LaTeX name to the log, so the
+    // log shows whether TeX was given the byte é is in Latin-1 or something else.
+    const LATIN1_MAIN = latin1('\\documentclass{article}\n\\usepackage[latin1]{inputenc}\n' +
+      '\\begin{document}\n\\typeout{MARK:\xe9:MARK}Caf\xe9, \\input{legacy}\n\\end{document}\n');
+    const BOM = [0xef, 0xbb, 0xbf, ...Buffer.from('Caf\u00e9, with a byte-order mark\n', 'utf8')];
+    await cdp.evaluate(`(async () => {
+      const { writeZip } = await import('./jvscrpt_and_css_extra/zip_core.js');
+      const bytes = await writeZip([
+        { path: 'main.tex', bytes: Uint8Array.from(${JSON.stringify(LATIN1_MAIN)}) },
+        { path: 'legacy.tex', bytes: Uint8Array.from(${JSON.stringify(LATIN1)}) },
+        { path: 'bom.tex', bytes: Uint8Array.from(${JSON.stringify(BOM)}) }
+      ]);
+      const dt = new DataTransfer();
+      dt.items.add(new File([bytes], 'latin1-legacy.zip', { type: 'application/zip' }));
+      const input = document.getElementById('zipinput');
+      input.files = dt.files;
+      input.dispatchEvent(new Event('change'));
+      return true;
+    })()`);
+    const legacyLoaded = await cdp.waitFor(`window.__reveryTexApp.projectKey === 'latin1-legacy'`,
+      { what: 'the Latin-1 project', timeoutMs: 30000 }).then(() => true, () => false);
+    check('a project whose main file is not UTF-8 opens', legacyLoaded);
+    const shownAs = await cdp.evaluate(`(() => {
+      const row = [...document.querySelectorAll('#filetree .node')].find(r => r.dataset.path === 'legacy.tex');
+      return {
+        docname: document.getElementById('docname').textContent,
+        title: row ? row.title : null,
+        pane: document.getElementById('mediaview').hidden ? null : document.getElementById('mediaview').textContent
+      };
+    })()`);
+    check('its main file is still the document', /\bmain\.tex\b/.test(shownAs.docname), shownAs.docname);
+    check('a file that is not UTF-8 is in the tree, marked read-only',
+      /not UTF-8/.test(shownAs.title || ''), JSON.stringify(shownAs));
+    check('and the main one opens as a preview saying why, not as text',
+      /not opened for editing/.test(shownAs.pane || ''), JSON.stringify(shownAs));
+
+    const legacyZip = await cdp.evaluate(`(async () => {
+      const { readZip } = await import('./jvscrpt_and_css_extra/zip_core.js');
+      const out = {};
+      for (const e of await readZip(await window.__reveryTexApp.exportBytes())) out[e.path] = [...e.bytes];
+      return out;
+    })()`);
+    const same = (a, b) => !!a && a.length === b.length && a.every((x, i) => x === b[i]);
+    const hexOf = (a) => (a ? Buffer.from(a).toString('hex') : 'absent');
+    check('Export returns a non-UTF-8 file byte for byte, untouched',
+      same(legacyZip['legacy.tex'], LATIN1), hexOf(legacyZip['legacy.tex']));
+    check('and a non-UTF-8 main file', same(legacyZip['main.tex'], LATIN1_MAIN), hexOf(legacyZip['main.tex']).slice(0, 40));
+    check('and keeps a byte-order mark', same(legacyZip['bom.tex'], BOM), hexOf(legacyZip['bom.tex']).slice(0, 16));
+
+    const legacyCompile = await cdp.evaluate(`window.__reveryTexApp.compile()`, true);
+    const markLine = await cdp.evaluate(`(async () => {
+      const { logText } = await import('./jvscrpt_and_css_extra/log_console.js');
+      return logText().split('\\n').find(l => l.includes('MARK:')) || null;
+    })()`, true);
+    check('a Latin-1 main file compiles in the browser', legacyCompile.ok, legacyCompile.status);
+    check('and TeX was given its bytes, not a re-encoding of them',
+      /MARK:(\\IeC \{)?\\'e\}?:MARK/.test(markLine || ''), JSON.stringify(markLine));
   } finally {
     cleanup();
   }
 
   console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');
+  if (knownBugCheck.known) console.log(`${knownBugCheck.known} known bug(s) still reproduce — see test/known_bug.js`);
   process.exit(failures ? 1 : 0);
 }
 

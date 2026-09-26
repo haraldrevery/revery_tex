@@ -18,9 +18,11 @@
  * came from the dev server. `test/serve.js` keeps its own copy for the fixture
  * manifest's utf8/base64 choice and must be edited with this one.
  *
- * Only genuinely-text extensions belong here. Adding a binary one would have it
- * read through readTextFile — a UTF-8 decode that replaces every invalid byte —
- * and the next saveAll() would write the mangled string back over the original.
+ * Only genuinely-text extensions belong here. Every backend's readTextFile now
+ * refuses what is not UTF-8, and the loader keeps such a file as bytes — so a
+ * binary extension added here would cost a failed read per file rather than a
+ * mangled one. It was the latter, when the reads decoded leniently, and the next
+ * saveAll() wrote the mangled string back over the original.
  */
 export const TEXT_EXT_RE = /\.(tex|bib|cls|sty|bbl|ind|def|cfg|txt|clo|ltx|md|markdown)$/i;
 
@@ -287,10 +289,7 @@ export function b64ToBytes(b64) {
  * cases the compile gate is built on. Callers gate on `project.onDisk`.
  */
 export function redescribeProject(project) {
-  const srcOf = (path) => {
-    const c = project.files.get(path)?.content;
-    return typeof c === 'string' ? c : '';
-  };
+  const srcOf = (path) => scannable(project.files.get(path)?.content);
   const order = documentOrder(project.main, project.files, (p) => includesIn(srcOf(p)));
   // Comments are stripped per file, not once over the join, so a `%` at the end
   // of one file cannot comment out the start of the next. That guard is why the
@@ -323,10 +322,8 @@ export function redescribeProject(project) {
  */
 export function mainCandidates(project) {
   const tex = [...project.files.keys()].filter(p => /\.tex$/i.test(p));
-  const withClass = tex.filter((p) => {
-    const c = project.files.get(p)?.content;
-    return typeof c === 'string' && /\\documentclass/.test(stripTexComments(c));
-  });
+  const withClass = tex.filter((p) =>
+    /\\documentclass/.test(stripTexComments(scannable(project.files.get(p)?.content))));
   const list = withClass.length ? withClass : tex;
   if (project.main && !list.includes(project.main)) list.push(project.main);
   return list.sort((a, b) => a.localeCompare(b));
@@ -342,12 +339,28 @@ export function mainCandidates(project) {
  * `mainCandidates` above is exported and the choice is offered in the UI rather
  * than being the end of the matter.
  */
-function pickMain(candidates, fallback) {
+function pickMain(candidates, fallback, isText) {
   const list = candidates.length ? candidates : fallback;
-  return [...list].sort((a, b) => {
-    const score = (p) => (/^main\.tex$/i.test(p) ? 0 : p.includes('/') ? 2 : 1);
-    return score(a) - score(b) || a.localeCompare(b);
-  })[0];
+  const score = (p) => (/^main\.tex$/i.test(p) ? 0 : p.includes('/') ? 2 : 1);
+  // Between two equally good guesses, the one that opens in the editor. A file
+  // held as bytes is still a document — a Latin-1 main.tex is the main file —
+  // but it is read-only here, so it does not win a tie.
+  return [...list].sort((a, b) =>
+    score(a) - score(b) || isText(b) - isText(a) || a.localeCompare(b))[0];
+}
+
+/**
+ * Source text for the scanners — `\documentclass`, `\input`, `\bibliography`.
+ *
+ * A file held as bytes is read one character per byte, which finds every ASCII
+ * command exactly where it is whatever the file's real encoding. For looking
+ * only: this is never shown, edited or saved, because that encoding is not
+ * known here and a wrong guess written back is how files got mangled.
+ */
+const BYTEWISE = new TextDecoder('latin1');
+export function scannable(content) {
+  if (typeof content === 'string') return content;
+  return content instanceof Uint8Array ? BYTEWISE.decode(content) : '';
 }
 
 /**
@@ -374,17 +387,32 @@ export async function readProjectFromDisk(api, root, { onWarn = () => {} } = {})
   };
 
   for (const f of files) {
-    const isText = TEXT_EXT_RE.test(f.path);
     try {
-      let content, stamp = null;
-      if (isText) {
-        const r = await api.readTextFile(f.path);
-        content = r.content;
-        stamp = r.stamp;   // identity at read time; checked again before saving
-      } else {
-        content = await api.readBinaryFile(f.path);
+      if (!TEXT_EXT_RE.test(f.path)) {
+        project.files.set(f.path,
+          { content: await api.readBinaryFile(f.path), binary: true, dirty: false, stamp: null });
+        continue;
       }
-      project.files.set(f.path, { content, binary: !isText, dirty: false, stamp });
+      let r;
+      try {
+        r = await api.readTextFile(f.path);
+      } catch (err) {
+        // Not UTF-8, as a rule — every backend refuses rather than guesses.
+        // Kept, as the bytes it is: dropped, it vanished from the tree, from the
+        // bundled engine's compile and, on the zip backend where the store *is*
+        // the project, from Export, so the next import of that export had lost
+        // it. As bytes it is read-only — nothing here writes a binary back — and
+        // is compiled and exported exactly as it is. `textError` is what says
+        // why, to the tree and the preview pane.
+        const textError = String((err && err.message) || err);
+        project.files.set(f.path, {
+          content: await api.readBinaryFile(f.path), binary: true, dirty: false, stamp: null, textError
+        });
+        onWarn(`${f.path} could not be opened as text, so it is kept as it is and read-only — ${textError}`);
+        continue;
+      }
+      // The stamp is identity at read time, checked again before saving.
+      project.files.set(f.path, { content: r.content, binary: false, dirty: false, stamp: r.stamp });
     } catch (err) {
       onWarn(`skipped ${f.path}: ${err}`);
     }
@@ -393,7 +421,8 @@ export async function readProjectFromDisk(api, root, { onWarn = () => {} } = {})
   // Candidates come from the buffers now rather than from a list built in the
   // loop above: one definition, shared with the selector, so the guess and the
   // alternatives offered against it cannot describe different sets.
-  project.main = pickMain(mainCandidates(project), texFiles.map(f => f.path));
+  project.main = pickMain(mainCandidates(project), texFiles.map(f => f.path),
+    (p) => project.files.get(p)?.binary === false);
   return redescribeProject(project);
 }
 

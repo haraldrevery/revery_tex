@@ -220,9 +220,12 @@ export class WasmTexEngine {
       this._log('info', `compiling ${mainFile} with ${engine} (passes=${passes}, bibtex=${bibtex || 'none'}, makeindex=${makeindex})`);
 
       const result = await tool.compile({
-        input: typeof main.content === 'string'
-          ? main.content
-          : new TextDecoder().decode(main.content),
+        // As it is, string or bytes: the pipeline writes it with FS.writeFile
+        // like every other file, and that takes either. A main file held as
+        // bytes is one that is not UTF-8, and decoding it here — which this
+        // used to, leniently — turned every accented byte into U+FFFD before
+        // TeX ever saw it.
+        input: main.content,
         mainTexPath: mainFile,
         additionalFiles: files.filter(f => f.path !== mainFile),
         driver: DRIVER[engine],

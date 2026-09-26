@@ -15,7 +15,8 @@
 import { NativeTexEngine } from './tex_engine_native.js';
 import { createEngineHost } from './engine_host.js';
 import { PdfPreview } from './pdf_preview.js';
-import { NativeAPI } from './native_api.js';
+import { NativeAPI as backend } from './native_api.js';
+import { createRootGate } from './root_gate.js';
 import * as recents from './recent_projects.js';
 import {
   latexEditingExtensions, setDiagnostics, beginEndInsertion,
@@ -59,6 +60,22 @@ import {
 } from './log_console.js';
 
 const CM = window.CM;
+
+// Every call to the backend goes through the gate, which knows which calls
+// resolve a path against the open root and holds them while a project switch
+// is moving it. Only switchProject, which does the moving, uses `backend`
+// itself. See root_gate.js, and switchProject for why this exists.
+const gate = createRootGate(backend);
+const NativeAPI = gate.api;
+
+/**
+ * `fn`, run as one operation that a project switch waits to finish.
+ *
+ * For the Files panel's operations, which are several disk calls long. Cut in
+ * half by a switch, the rest of a move or a delete ran against the next
+ * project's folder — and its bookkeeping against the next project's tree.
+ */
+const asTask = (fn) => (...args) => gate.task(fn(...args));
 
 // Topbar drop-downs. Same .value / .onchange surface a <select> had, so the
 // call sites below read identically — only the rendering changed.
@@ -144,6 +161,8 @@ let project = null;          // { key, main, engine, files: Map<path, {content, 
  * assignments.
  */
 let projectEpoch = 0;
+/** A project switch is in progress. See switchProject. */
+let switching = false;
 let currentPath = null;
 // The file the media preview is showing, if any. Never set at the same time as
 // currentPath: the editor pane shows one thing, and the two are how it says
@@ -693,11 +712,37 @@ function editorExtensions(path = null) {
   ];
 }
 
-function makeEditor() {
-  return new CM.EditorView({
-    state: CM.EditorState.create({ doc: '', extensions: editorExtensions() }),
-    parent: $('editor')
+/**
+ * The editor with no file in it: empty, and read-only.
+ *
+ * Read-only because the update listener writes an edit into the file at
+ * `currentPath`, and with no file open there is none — so text typed here
+ * appeared to be accepted and was kept nowhere.
+ */
+function emptyEditorState() {
+  return CM.EditorState.create({
+    doc: '',
+    extensions: [editorExtensions(), CM.EditorState.readOnly.of(true), CM.EditorView.editable.of(false)]
   });
+}
+
+function makeEditor() {
+  return new CM.EditorView({ state: emptyEditorState(), parent: $('editor') });
+}
+
+/**
+ * Show no file.
+ *
+ * For a project change, where nothing of the old project may stay on screen.
+ * It used to: `currentPath` and the buffer both survived the switch, so when the
+ * new project's main file could not be opened, the editor went on showing the
+ * old project's file under a path the new project also had, and typing into it
+ * wrote into the new project's file of that name.
+ */
+function clearEditor() {
+  currentPath = null;
+  $('editortitle').textContent = 'no file';
+  view?.setState(emptyEditorState());
 }
 
 function openFile(path) {
@@ -798,6 +843,19 @@ function showMediaFile(path) {
   // here" mark clears rather than staying on the file that was open. Clicking
   // a heading still works and brings the editor back with it.
   refreshOutline();
+}
+
+/**
+ * Show `path` in the editor pane: as a buffer, or as a preview if it is held as
+ * bytes.
+ *
+ * For the places that show the *main* file without the user having picked a
+ * row. openFile alone refuses bytes and changes nothing, which for a main file
+ * that is not UTF-8 left the pane blank — or, before a project change cleared
+ * the editor, showing the previous project's file.
+ */
+function showFile(path) {
+  if (project?.files.get(path)?.binary) showMediaFile(path); else openFile(path);
 }
 
 /** Put the editor back. Safe to call when no preview is up. */
@@ -1108,7 +1166,15 @@ async function runBackup() {
   // flight is a new oldest-unwritten edit and starts its own deadline.
   backupOldestEdit = 0;
   if (!project) return;
+  // Checked before every file, not once. The loop awaits a write per file over
+  // a map it read at the start, so a project switch landing between two of them
+  // left it writing the old project's buffers under the new root — where the
+  // next launch offered them as "the only copy" of the new project's files of
+  // the same name. Stopping is enough: a switch that is cancelled or fails
+  // restarts the timer when it ends.
+  const epoch = projectEpoch;
   for (const [path, f] of project.files) {
+    if (switching || projectEpoch !== epoch) return;
     // Binaries are not backed up: they are written at drop time and never
     // edited here, so there is no unsaved version of one to lose.
     if (!f.dirty || f.binary || typeof f.content !== 'string') continue;
@@ -1156,15 +1222,24 @@ async function offerRecovery() {
     const age = b.saved ? `, saved ${describeAge(b.saved)}` : '';
     const size = `${(b.content || '').length} characters`;
     const gone = !project.files.get(b.path);
+    // Saved after the backup was made — by another program, or by this app in
+    // a later session that never cleared the backup. Restoring then puts older
+    // text over newer, and the save after it goes through without a question,
+    // because the file matches the stamp it was read with. So it is said here,
+    // where the choice is made, and Restore stops being the default answer.
+    const diskMtime = project.files.get(b.path)?.stamp?.mtime_ms;
+    const newer = !!(b.saved && diskMtime && diskMtime > b.saved);
     const answer = await askChoice(
       `Unsaved changes from a previous session were found in:\n\n` +
       `  ${b.path}  (${size}${age})\n\n` +
       (gone ? `That file is no longer in the project, so this backup is the only copy.\n\n` : '') +
+      (newer ? `The file on disk was changed after this backup was made (${describeAge(diskMtime)}). ` +
+               `Restoring replaces that newer version in the editor, and saving then writes over it.\n\n` : '') +
       `Restore it into the editor?`,
       [
-        { value: 'keep', label: 'Not now' },
+        { value: 'keep', label: 'Not now', primary: newer },
         { value: 'discard', label: 'Discard' },
-        { value: 'restore', label: 'Restore', primary: true }
+        { value: 'restore', label: 'Restore', primary: !newer }
       ],
       'keep'          // dismissal keeps the backup and changes nothing
     );
@@ -1373,7 +1448,7 @@ function renderTree() {
   // each of those call sites, because that is four places to remember and the
   // fifth one added later is the one that gets forgotten.
   syncMainSelect();
-  if (!project) return;
+  if (!project) { $('filecount').textContent = ''; return; }
 
   // Binaries are shown too, dimmed. They are what \includegraphics points at,
   // and hiding them meant a project's images were invisible in the one place
@@ -1429,6 +1504,11 @@ function renderTree() {
     n.type = 'button';
     n.textContent = node.name;
     n.title = node.path;
+    // Held as bytes because it is not UTF-8: dimmed like any binary, and the
+    // tooltip says why a .tex will not open for editing.
+    const notText = project.files.get(node.path)?.textError;
+    if (notText) n.title = `${node.path} — not UTF-8 text, so it is read-only here. ` +
+      'It compiles and exports exactly as it is.';
     // Indent by depth. The old render put every directory's files at the same
     // inset, so nothing said what contained what.
     n.style.paddingLeft = `calc(0.55rem + ${node.depth * 0.8}rem)`;
@@ -1654,7 +1734,7 @@ function makeRowDraggable(el, node) {
     if (!canAcceptDrop(node)) { e.preventDefault(); refuseDrop(e); endDrag(); return; }
     e.preventDefault();
     e.stopPropagation();
-    handleDrop(e, dropTargetOf(node));
+    gate.task(handleDrop(e, dropTargetOf(node)));
   });
 }
 
@@ -1936,7 +2016,7 @@ $('filetree').addEventListener('dragleave', (e) => {
 $('filetree').addEventListener('drop', async (e) => {
   if (!project) return;
   e.preventDefault();
-  await handleDrop(e, '');
+  await gate.task(handleDrop(e, ''));
 });
 
 // Everything else on the page. Without this a file dropped anywhere outside the
@@ -2016,7 +2096,7 @@ async function addEmptyFile(path) {
 }
 
 async function createFile(parent = '') {
-  askName({ title: 'New file', label: 'Name', def: '' }, async (raw) => {
+  askName({ title: 'New file', label: 'Name', def: '' }, asTask(async (raw) => {
     const path = normalizePath(raw, parent);
     if (!path) { setStatus('✗ that is not a usable file name', 'err'); return; }
     // The disk, not just the project map — see nameCollision. A new file is
@@ -2040,7 +2120,7 @@ async function createFile(parent = '') {
     // Ctrl+Z is unreachable exactly when it is most wanted. See focusTreeRow.
     focusTreeRow(path);
     setStatus(`created ${path}`, 'ok');
-  });
+  }));
 }
 
 /** Draw a folder that holds nothing yet. Nothing here reaches the disk. */
@@ -2067,16 +2147,41 @@ function createFolder(parent = '') {
 
 /** Move one file, in memory and on disk, keeping the editor pointed at it. */
 async function moveOne(from, to) {
-  if (canWriteDisk() && NativeAPI.renameFile) await NativeAPI.renameFile(from, to);
   const f = project.files.get(from);
-  // The stamp identified the file at the path it was *read* from, and that path
-  // no longer holds it. Carrying it over made the next save look like someone
-  // else had edited the file: the two browser backends implement rename as
-  // copy-then-delete, so the destination has a new mtime and the conflict check
-  // fired on a file only this session had ever touched — with a message that
-  // argued against itself, reporting the same size before and after. Same rule
-  // as `writeBinaryFile`: a file with no read-time identity does not get one.
-  f.stamp = null;
+  if (canWriteDisk() && NativeAPI.renameFile) {
+    // The stamp goes with the file. It used to be dropped here, because the two
+    // browser backends rename by copying, so the destination has a new mtime
+    // and a carried-over stamp raised a conflict about a file only this session
+    // had touched. Dropped, the next save had nothing to check against and
+    // overwrote whatever another program had done to the file since the move.
+    // Now the backend checks the file against the stamp it was read with and
+    // returns the destination's, which the next save checks in turn.
+    try {
+      f.stamp = await NativeAPI.renameFile(from, to, f.stamp || null);
+    } catch (err) {
+      if (!isConflict(err)) throw err;
+      // Changed on disk since it was read. A rename cannot lose that change —
+      // it moves with the file — so the move the user asked for goes ahead.
+      // What must not happen is the next save treating the moved file as the
+      // one that was read: it keeps the stamp it had, which the file no longer
+      // matches, so that save asks first.
+      await NativeAPI.renameFile(from, to, null);
+      rawLog('wrn', `${from} had changed on disk since it was opened — moved it anyway; saving ${to} will ask first`);
+    }
+    // The crash backup goes with it too. Left keyed on the old path, it was
+    // offered on every later open as "the only copy" of a file that had only
+    // been renamed, and Restore put the old path back. Written at the new path
+    // before the old one is dropped, so a failure keeps the one there is.
+    // Only for a file with unsaved edits: a clean file's backup, if it has one,
+    // is a crash from an earlier session the user chose to keep for later, and
+    // is not this move's to decide about.
+    if (f.dirty && !f.binary && typeof f.content === 'string' && NativeAPI.writeBackup) {
+      try {
+        await NativeAPI.writeBackup(to, f.content);
+        await NativeAPI.discardBackup?.(from);
+      } catch { /* the old backup stays where it was */ }
+    }
+  }
   project.files.delete(from);
   project.files.set(to, f);
   // The editor state goes with the file, so renaming does not cost the undo
@@ -2343,6 +2448,7 @@ async function removeEmptyFile(path) {
     setStatus(`✗ ${err.message || err}`, 'err');
     return false;
   }
+  await NativeAPI.discardBackup?.(path).catch(() => {});   // as in deleteEntries
   project.files.delete(path);
   docStates.delete(path);
   diagPositions.forget(path);
@@ -2351,7 +2457,7 @@ async function removeEmptyFile(path) {
   if (path === currentPath) {
     currentPath = null;
     $('editortitle').textContent = 'no file';
-    if (project.files.has(project.main)) openFile(project.main);
+    if (project.files.has(project.main)) showFile(project.main);
   }
   renderTree();
   refreshDirty();
@@ -2422,8 +2528,8 @@ async function stepHistory(back) {
   }
 }
 
-const undoTree = () => stepHistory(true);
-const redoTree = () => stepHistory(false);
+const undoTree = () => gate.task(stepHistory(true));
+const redoTree = () => gate.task(stepHistory(false));
 
 /**
  * Show one entry's folder in the platform's file manager.
@@ -2449,7 +2555,7 @@ async function renameEntry(path, isDir) {
   }
   askName({ title: isDir ? 'Rename folder' : 'Rename file', label: 'New path',
             def: path, submitLabel: 'Rename' }, async (raw) => {
-    await moveEntry(path, normalizePath(raw), isDir);
+    await gate.task(moveEntry(path, normalizePath(raw), isDir));
   });
 }
 
@@ -2507,7 +2613,13 @@ async function deleteEntries(entries) {
     // remove a tree, which is deliberate: there is no single call that could
     // point at the wrong one.
     for (const p of doomed) {
-      if (canWriteDisk() && NativeAPI.deleteFile) await NativeAPI.deleteFile(p);
+      if (canWriteDisk() && NativeAPI.deleteFile) {
+        await NativeAPI.deleteFile(p);
+        // Its crash backup too. Left behind, the file the user had just chosen
+        // to delete was offered back on every later open as the only copy of
+        // their work, and Restore recreated it.
+        await NativeAPI.discardBackup?.(p).catch(() => {});
+      }
       project.files.delete(p);
       docStates.delete(p);          // nothing left for its undo history to be about
       diagPositions.forget(p);      // nor for a diagnostic to point into
@@ -2541,7 +2653,7 @@ async function deleteEntries(entries) {
   }
   for (const p of kept) emptyDirs.add(p);
   if (hadEmpty || kept.length) rememberEmptyDirs();
-  if (!currentPath && project.files.has(project.main)) openFile(project.main);
+  if (!currentPath && project.files.has(project.main)) showFile(project.main);
   renderTree();
   refreshDirty();
   scheduleOutline();
@@ -2576,7 +2688,7 @@ function importFilesInto(parent) {
   input.type = 'file';
   input.multiple = true;
   input.onchange = () => {
-    if (input.files?.length) importDroppedFiles(input.files, parent);
+    if (input.files?.length) gate.task(importDroppedFiles(input.files, parent));
   };
   input.click();
 }
@@ -2602,9 +2714,9 @@ function moveTargetRows(paths) {
     .filter(d => !(parents.size === 1 && parents.has(d)))
     .map(d => ({
       label: d ? `${d}/` : '⌐ project root',
-      run: () => moveEntries(paths.map(p => ({
+      run: () => gate.task(moveEntries(paths.map(p => ({
         from: p, to: normalizePath(p.split('/').pop(), d), isDir: isDirPath(p)
-      })))
+      }))))
     }));
 }
 
@@ -2679,7 +2791,7 @@ function treeMenuRows(node) {
     rows.push({
       type: 'action',
       label: many ? `Delete ${acting.length} items…` : 'Delete…',
-      run: () => deleteEntries(acting.map(p => ({ path: p, isDir: isDirPath(p) })))
+      run: () => gate.task(deleteEntries(acting.map(p => ({ path: p, isDir: isDirPath(p) }))))
     });
   }
   if (project && !project.onDisk) {
@@ -2851,7 +2963,7 @@ async function setMainFile(path) {
   syncEngineSelect();
   renderTree();
   scheduleOutline();
-  openFile(path);
+  showFile(path);
   rawLog('inf', `main document is now ${path}`);
   setStatus(`main document · ${path}`, 'ok');
 }
@@ -2875,8 +2987,14 @@ async function loadProjects() {
       return;
     }
     await showStorageNotice();
-    const root = await NativeAPI.currentRoot().catch(() => null);
-    if (root) { await loadFromDisk(root); return; }
+    let found = false;
+    await switchProject(async () => {
+      const root = await backend.currentRoot().catch(() => null);
+      found = !!root;
+      return root;
+    });
+    // Opened, or found and failed to open: either way the status line says so.
+    if (found) return;
     // Nothing open. Offer whatever was open last time, so a desktop launch
     // lands on a list of the user's projects instead of a disabled button —
     // neither desktop shell persists a root of its own, and this list is the
@@ -2913,16 +3031,19 @@ projectSel.onchange = async (v) => {
   if (fixtureMode) { await loadProject(v); return; }
   if (!canReopen()) return;                 // nothing else can reopen by id yet
 
-  try {
-    const root = await NativeAPI.openFolderPath(v);
-    await loadFromDisk(root);
-  } catch (err) {
-    // The folder is gone, or moved. Drop the row rather than leaving one that
-    // fails every time it is picked — and say so, rather than pruning silently.
-    recents.forget(localStorage, NativeAPI.env, v);
-    syncProjectSelect();
-    setStatus(`✗ ${err.message || err}`, 'err');
-  }
+  const opened = await switchProject(async () => {
+    try {
+      return await backend.openFolderPath(v);
+    } catch (err) {
+      // The folder is gone, or moved. Drop the row rather than leaving one that
+      // fails every time it is picked — and say so (the switch does), rather
+      // than pruning silently. Only here: a folder that opens but holds no
+      // project keeps its row, since it may hold one again.
+      recents.forget(localStorage, NativeAPI.env, v);
+      throw err;
+    }
+  });
+  if (!opened) restore();
 };
 
 
@@ -2930,15 +3051,7 @@ projectSel.onchange = async (v) => {
 async function openFolder() {
   if (!NativeAPI.openFolder) return;
   if (!await confirmDiscard('Open another folder')) return;
-  let root;
-  try {
-    root = await NativeAPI.openFolder();
-  } catch (err) {
-    setStatus(`✗ ${err}`, 'err');
-    return;
-  }
-  if (!root) return;                      // user cancelled
-  await loadFromDisk(root);
+  await switchProject(() => backend.openFolder());
 }
 
 /**
@@ -2967,35 +3080,22 @@ async function newProject() {
   if (!await confirmDiscard('Start a new project')) return;
 
   if (NativeAPI.openFolder) {
-    let root;
-    try {
-      root = await NativeAPI.openFolder();
-    } catch (err) {
-      setStatus(`✗ ${err}`, 'err');
-      return;
-    }
-    if (!root) return;                    // user cancelled
-
-    // Refuse a folder that already holds a project rather than dropping a
-    // second main.tex into it. Opening it is what the user wanted anyway, and
-    // is what the Open folder row does — so say so instead of half-doing it.
-    let existing = [];
-    try {
-      existing = await NativeAPI.readDirectory();
-    } catch { /* unreadable: the write below will report it properly */ }
-    if (existing.some(e => e.type === 'file' && /\.tex$/i.test(e.path))) {
-      setStatus('✗ that folder already has a .tex file — use Open folder', 'err');
-      return;
-    }
-
-    try {
-      await NativeAPI.writeFile('main.tex', NEW_PROJECT_MAIN, null);
-    } catch (err) {
-      setStatus(`✗ ${err.message || err}`, 'err');
-      return;
-    }
-    await loadFromDisk(root);
-    setStatus('new project — main.tex');
+    const opened = await switchProject(() => backend.openFolder(), async () => {
+      // Refuse a folder that already holds a project rather than dropping a
+      // second main.tex into it. Opening it is what the user wanted anyway, and
+      // is what the Open folder row does — so say so instead of half-doing it.
+      // A refusal here comes after the picker has moved the root, which is why
+      // it is a step of the switch: the switch is what knows how to go back.
+      let existing = [];
+      try {
+        existing = await backend.readDirectory();
+      } catch { /* unreadable: the write below will report it properly */ }
+      if (existing.some(e => e.type === 'file' && /\.tex$/i.test(e.path))) {
+        throw new Error('that folder already has a .tex file — use Open folder');
+      }
+      await backend.writeFile('main.tex', NEW_PROJECT_MAIN, null);
+    });
+    if (opened) setStatus('new project — main.tex');
     return;
   }
 
@@ -3006,14 +3106,12 @@ async function newProject() {
     + '\n\nExport it first if you want to keep it. Continue?')) return;
 
   askName({ title: 'New project', label: 'Name', def: 'project' }, async (raw) => {
-    try {
-      const name = await NativeAPI.createProject(raw, NEW_PROJECT_MAIN);
+    const opened = await switchProject(async () => {
+      const name = await backend.createProject(raw, NEW_PROJECT_MAIN);
       await showStorageNotice();
-      await loadFromDisk(name);
-      setStatus('new project — main.tex');
-    } catch (err) {
-      setStatus(`✗ ${err.message || err}`, 'err');
-    }
+      return name;
+    });
+    if (opened) setStatus('new project — main.tex');
   });
 }
 
@@ -3129,16 +3227,17 @@ async function importZip(file) {
   }
 
   setStatus('reading zip…', 'warn');
-  let name;
-  try {
-    name = await NativeAPI.importZip(file);
-  } catch (err) {
-    setStatus(`✗ ${err.message || err}`, 'err');
-    rawLog('err', `import failed: ${err.message || err}`);
-    return;
-  }
-  await showStorageNotice();
-  await loadFromDisk(name);
+  await switchProject(async () => {
+    let name;
+    try {
+      name = await backend.importZip(file);
+    } catch (err) {
+      rawLog('err', `import failed: ${err.message || err}`);
+      throw err;
+    }
+    await showStorageNotice();
+    return name;
+  });
 }
 
 /**
@@ -3172,73 +3271,180 @@ async function exportZip() {
   }
 }
 
-/**
- * Which engine a document wants.
+/* ── changing project ──────────────────────────────────────────────────
  *
- * fontspec and unicode-math require XeTeX or LuaTeX — but a well-written
- * preamble loads them *conditionally*:
+ * Seven things change which project is open: Open folder, New in a folder, New
+ * in browser storage, a recents row, Reopen last folder, Import zip, and boot.
+ * Each used to move the backend's root first and read the new folder second,
+ * and when the read failed — a folder with no .tex in it — it said so and left
+ * the old project on screen. Still editable, and now resolving every path
+ * against the folder that had failed: its saves, crash backups, renames and
+ * deletes all went into a folder the user had never opened as this project,
+ * under a green status line. Reproduced in Electron: an edit to
+ * chapters/one.tex was written to the *other* folder's chapters/one.tex.
  *
- *     \ifPDFTeX \usepackage[utf8]{inputenc} \else \usepackage{fontspec} \fi
- *
- * Matching \usepackage{fontspec} anywhere therefore picks XeTeX for documents
- * designed to run under pdfLaTeX, which then fail on fonts the pdfTeX path
- * never needed. A document that branches on the engine runs under either, so
- * pdfLaTeX wins: it is faster and needs fewer font files.
+ * So there is one way to change project, and it ends in one of three states:
+ * the new project is open; the old one is still open, exactly as it was; or,
+ * when that cannot be arranged either, nothing is open. Never the old project
+ * over the new folder.
  */
-async function loadFromDisk(root) {
-  // Before anything else, and before the long read below: a compile still
-  // running belongs to the project being closed. `cancelCompile` is a no-op
-  // when nothing is running, and it is the one place that performs the whole
-  // ritual — move the token, free the button, tell the engine — so this reuses
-  // it rather than adding a second way to abandon a compile.
-  //
-  // First statement, not next to `setProject`, because the read below is one
-  // IPC round trip per file and a compile can land in that gap. The cost of
-  // being early: if the read then fails, the old project stays open with its
-  // compile already abandoned. That is the honest outcome — the user asked to
-  // leave — but it is worth saying rather than discovering.
-  await cancelCompile();
-  setStatus('reading folder…', 'warn');
+
+/**
+ * Replace the open project with the one `attach` points the backend at.
+ *
+ * `attach` moves the backend's root — a picker, a recents path, an import — and
+ * returns it, or null if the user cancelled. Every backend's open either moves
+ * the root or throws having moved nothing, which is what lets a throw from it
+ * mean "nothing changed".
+ *
+ * Callers ask about unsaved work first. From here on the old project is going
+ * away, so:
+ *
+ *   - Its window is inert. A drag, a delete or an undo started now would be
+ *     work on a project that is being replaced, and half of one is worse than
+ *     none.
+ *   - The crash-backup timer stops, because its next run reads the old buffers.
+ *   - The root does not move until the old project's disk work has finished,
+ *     and anything issued after that is held until the outcome is known — run
+ *     if the old project is still open, refused if it is not. See root_gate.js.
+ *
+ * @param {() => Promise<string|null>} attach
+ * @param {(root: string) => Promise<void>} [prepare]  run against the new root
+ *        before it is read; a throw counts as a failed open.
+ * @returns {Promise<boolean>} whether a new project is now open
+ */
+async function switchProject(attach, prepare = null) {
+  if (switching) return false;
+  switching = true;
+  const prev = project;
+  const inert = [$('workspace'), $('topbar-main')];
+  for (const el of inert) el.inert = true;
+  clearTimeout(backupTimer);
+  let release = null;
+  // Whether the backend's root may now differ from the open project's. Decides,
+  // at the end, whether calls held meanwhile are safe to run.
+  let moved = false;
   try {
-    setProject(await readProjectFromDisk(NativeAPI, root, {
-      onWarn: (msg) => rawLog('wrn', msg)
-    }));
-  } catch (err) {
-    setStatus(`✗ ${err.message}`, 'err');
-    return;
+    release = await gate.lock();
+    let root;
+    try {
+      root = await attach();
+    } catch (err) {
+      setStatus(`✗ ${err.message || err}`, 'err');
+      return false;
+    }
+    if (!root) return false;                    // cancelled: nothing moved
+    moved = true;
+
+    let loaded;
+    try {
+      // A compile still running belongs to the project being left, and
+      // cancelCompile is the one place that performs the whole ritual — move
+      // the token, free the button, tell the engine. Here rather than at the
+      // top, so a picker opened and cancelled costs nothing.
+      await cancelCompile();
+      if (prepare) await prepare(root);
+      setStatus('reading folder…', 'warn');
+      loaded = await readProjectFromDisk(backend, root, { onWarn: (msg) => rawLog('wrn', msg) });
+    } catch (err) {
+      if (await putBack(prev, err)) moved = false;
+      return false;
+    }
+    // Before the new project opens: opening it offers crash recovery, which
+    // goes through the gate, and anything the old project left held must be
+    // refused rather than run against the new root.
+    release(false);
+    release = null;
+    await openProject(loaded, root);
+    return true;
+  } finally {
+    // Only if the old project is still the open one, on its own root — the
+    // switch was cancelled or put back — do its held calls run.
+    release?.(!moved && project !== null && project === prev);
+    for (const el of inert) el.inert = false;
+    switching = false;
+    if (project && dirtyCount()) scheduleBackup();
   }
-  // Cached states belong to the project that was open. Two projects can both
-  // have a main.tex, and reusing one's state for the other would hand over its
-  // undo history along with it.
+}
+
+/**
+ * The root moved, and what it points at could not be opened. Go back.
+ *
+ * web-fs restores what its open replaced. The desktop shells reopen the old
+ * folder by path, which their vetting makes possible for any folder they
+ * opened. The zip store cannot go back — the import has already replaced it —
+ * and there nothing is open afterwards, rather than a project whose files are
+ * no longer where it thinks they are.
+ *
+ * @returns {Promise<boolean>} whether the backend's root is back where it was
+ */
+async function putBack(prev, err) {
+  const why = (err && err.message) || String(err);
+  let restored = false;
+  try {
+    if (backend.revertOpen) restored = (await backend.revertOpen()) != null;
+    else if (backend.openFolderPath && prev?.root) restored = !!(await backend.openFolderPath(prev.root));
+  } catch (e) {
+    rawLog('err', `could not reopen ${prev?.root || prev?.key}: ${e.message || e}`);
+  }
+  // A dev-server fixture is not on disk, so it never depended on the root.
+  if (prev && (restored || !prev.onDisk)) {
+    // Nothing of it was touched — buffers, undo, selection and all.
+    syncProjectSelect();
+    setStatus(`✗ ${why} (${prev.key} is still open)`, 'err');
+    return restored;
+  }
+  await closeProject();
+  setStatus(`✗ ${why}`, 'err');
+  if (prev) rawLog('err', `${prev.key} could not be reopened, so no project is open`);
+  return false;
+}
+
+/**
+ * Drop everything on screen that belongs to the project being replaced.
+ *
+ * All of it is keyed by path, and two projects can both have a main.tex — so
+ * anything that survived a switch would be one project's state shown, undone or
+ * saved as the other's.
+ */
+async function forgetProjectView() {
+  // Cached states, since reusing one would hand over its undo history.
   docStates.clear();
-  // The preview goes with them. renderTree's backstop only catches a path the
-  // new project does not have, and `figures/logo.png` exists in more projects
-  // than not — which would leave the old project's bytes on screen under the
-  // new project's filename.
+  clearEditor();
+  // The preview too. renderTree's backstop only catches a path the new project
+  // does not have, and `figures/logo.png` exists in more projects than not —
+  // which would leave the old project's bytes on screen under the new name.
   hideMedia();
-  // As do the diagnostic baselines: they are keyed by path, and two projects
-  // can both have a main.tex.
   diagPositions.clear();
-  // And so does the PDF, for the same reason.
+  // And the PDF, for the same reason.
   await resetPreview();
+  // A selection's paths mean nothing in another project, and nor do an undo
+  // entry's — `figures/` exists in more projects than not.
+  clearSelection();
+  history.clear();
+  chosenEngine = null;              // a new document gets its own inference
+  backupOldestEdit = 0;
+}
+
+/**
+ * Make `loaded` the open project. Its folder has already been read, so nothing
+ * here can leave the root and the project disagreeing.
+ */
+async function openProject(loaded, root) {
+  setProject(loaded);
+  await forgetProjectView();
   // Before anything reads project.main: the remembered choice overrules the
   // inference, and the tree, the outline and the editor all key off it.
   applyRememberedMain();
-  // A selection is about the project that was open, and its paths mean nothing
-  // in this one. The folders made from the tree, by contrast, are remembered.
-  clearSelection();
-  // And neither does an undo entry — every path in one names a file in the
-  // project that was open, and `figures/` exists in more projects than not.
-  history.clear();
+  // The folders made from the tree, unlike the selection, are remembered.
   applyRememberedEmptyDirs();
 
   syncMainSelect();
   recordRecent(project.root || root, project.key);
   syncProjectSelect();
-  chosenEngine = null;              // a new document gets its own inference
   syncEngineSelect();
   renderTree();
-  openFile(project.main);
+  showFile(project.main);
   clearLog();
   setIssues([]);
   rawLog('inf', `opened ${root} — ${project.files.size} files, main = ${project.main}`);
@@ -3247,24 +3453,44 @@ async function loadFromDisk(root) {
   setStatus(`ready · ${project.files.size} files`);
 }
 
+/**
+ * Nothing open.
+ *
+ * Reached when a switch could neither open the new project nor put the old one
+ * back. Everything that belonged to the old project goes, so nothing on screen
+ * is left able to write it anywhere.
+ */
+async function closeProject() {
+  setProject(null);
+  await forgetProjectView();
+  emptyDirs.clear();
+  setIssues([]);
+  syncMainSelect();
+  syncProjectSelect();
+  syncEngineSelect();
+  renderTree();
+  refreshDirty();
+  refreshOutline();
+}
+
 async function loadProject(key) {
-  await cancelCompile();          // as in loadFromDisk, and for the same reason
+  await cancelCompile();          // as in switchProject, and for the same reason
   setStatus('loading project…', 'warn');
   const { project: loaded, patchLog } = await readProjectFromFixture(key);
   setProject(loaded);
-  docStates.clear();                // as in loadFromDisk, and for the same reason
+  docStates.clear();                // as in forgetProjectView, and for the same reason
   hideMedia();                      // likewise
   await resetPreview();             // likewise
 
   // No applyRememberedMain here: a fixture's main file is declared by the dev
   // server on purpose (book-legacy pins main_legacy.tex), and a remembered
   // override would silently compile something the gate did not ask for.
-  clearSelection();                 // as in loadFromDisk, and for the same reason
+  clearSelection();                 // as in forgetProjectView, and for the same reason
   history.clear();                  // likewise
   applyRememberedEmptyDirs();
   syncMainSelect();
   refreshDirty();
-  chosenEngine = null;              // as in loadFromDisk, and for the same reason
+  chosenEngine = null;              // as in forgetProjectView, and for the same reason
   syncEngineSelect();
   renderTree();
   openFile(project.main);
@@ -3370,7 +3596,9 @@ async function cancelCompile() {
 }
 
 async function compile() {
-  if (!project) return;
+  // Not during a switch: the project on screen is on its way out, and a system
+  // TeX would compile in whichever folder the root settles on.
+  if (!project || switching) return;
   // Ctrl+Enter during a compile does nothing, as it always has. Stopping is the
   // button's job, and a shortcut that meant "compile" one moment and "throw away
   // the compile" the next would be a bad thing to have under muscle memory.
@@ -3872,17 +4100,15 @@ attachMenu($('folder'), folderRows, { align: 'left' });
 /** Reopen the remembered folder, and fall back to the picker if it is gone. */
 async function reopenRemembered() {
   if (!await confirmDiscard('Open another folder')) return;
-  let root = null;
-  try {
-    root = await NativeAPI.reopenRemembered();
-  } catch (err) {
-    setStatus(`✗ ${err.message || err}`, 'err');
-    return;
-  }
+  let gone = false;
+  await switchProject(async () => {
+    const root = await backend.reopenRemembered();
+    gone = !root;
+    return root;
+  });
   // Permission refused, or the folder is gone. Not an error worth a red status:
   // the picker is one row up and is what the user would reach for next.
-  if (!root) { setStatus('that folder is no longer available — open it again', 'warn'); return; }
-  await loadFromDisk(root);
+  if (gone) setStatus('that folder is no longer available — open it again', 'warn');
 }
 
 $('zipinput').onchange = async (e) => {

@@ -61,6 +61,7 @@ rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-t
 │    native_api.js                NativeAPI  ── the only file that knows shells │
 │    native_api_web.js            File System Access backend (Chromium)        │
 │    native_api_zip.js            IndexedDB backend (Firefox, Safari)          │
+│    root_gate.js                 what a project switch waits for; no DOM      │
 │    zip_core.js                  zip reader/writer, no dependencies           │
 │    project_store.js             folder/fixture → project; no DOM             │
 │    engine_host.js               picks, starts and replaces the TeX engine    │
@@ -145,6 +146,67 @@ handed by sniffing the argument is one coercion away from writing
 `[object Object]` over someone's figure. It carries no `expect` stamp either —
 a dropped file has no read-time identity that could have gone stale, so the
 caller refuses an existing path instead of racing it.
+
+### Files that are not UTF-8
+
+Project text is read as UTF-8, **strictly**, on every backend, and a byte-order
+mark stays in the text so a save puts back the file that was read. A text file
+that is not UTF-8 — a Latin-1 `.tex` from an older document, say — is kept as
+the bytes it is: it appears in the tree dimmed and read-only, opens as a card
+saying why, and is compiled and exported exactly as it is. It is never decoded
+by guessing, because a wrong guess saved back is how such files used to be
+mangled: every backend but Tauri decoded leniently, so one unrelated edit
+replaced every accented character with `�`, and the zip backend's Export did it
+without an edit at all. Tauri refused them instead and dropped them from the
+project, so they were invisible there; now they show up read-only like
+everywhere else. Convert a file to UTF-8 to edit it in the app.
+
+The desktop shells also read each file with a stat before and after, on one
+file handle, so the stamp a save is checked against always describes the text
+that was read. It used to be taken after the read, and a write by another
+program landing in between was overwritten at the next save with no conflict.
+
+### Moves, deletes and crash backups
+
+A moved or renamed file keeps its identity: the backend checks it against the
+stamp it was read with and hands back the destination's, so a change another
+program makes to it after the move is still a conflict at the next save. The
+app used to drop the stamp on every move, and that save overwrote the change
+without asking. A file changed on disk *before* the move is still moved — the
+change goes with it — and the save after it asks first.
+
+A crash backup follows its file on a move and goes with it on a delete; left
+behind, it was offered on every later open as the only copy of work that had
+only been renamed, or that the user had chosen to delete. The recovery prompt
+also says when the file on disk was changed after the backup was made, and
+then stops offering Restore as the default, because restoring would put older
+text over newer. The Tauri build keeps backups in its data directory rather
+than its cache directory, which cleanup tools may empty; backups an older build
+left in the cache are still offered and can still be discarded.
+
+### Changing project
+
+Every path the app sends a backend is relative to the root that is open *when
+the call lands*. So there is exactly one way to change it, `switchProject()` in
+`revery_tex_app.js`, and every way in — Open folder, New, a recents row, Reopen
+last folder, Import zip, boot — goes through it. It ends in one of three states:
+the new project is open; the old one is still open, exactly as it was; or, when
+neither can be arranged, nothing is open.
+
+- **The root moves only once the old project's disk work has finished.** The
+  app talks to the backend through `root_gate.js`, which counts the calls in
+  flight, lets a Files-panel operation (a move, a delete, a drop) finish rather
+  than be cut in half, and holds anything issued while the root is moving until
+  it knows whether the old project survived.
+- **A folder that turns out not to be a project is backed out of.** The desktop
+  shells reopen the previous folder by path — which is why the folder dialog is
+  vetted exactly like a recents row, so any folder the app opened can be
+  reopened — and web-fs restores what its open replaced (`revertOpen`). The zip
+  store cannot go back, because an import has already replaced it, so there the
+  app shows nothing open rather than a project whose files are gone.
+- **Nothing of the old project stays on screen.** The editor is cleared before
+  the new project opens anything, and with no file open it is read-only: text
+  typed into it had nowhere to go.
 
 ### The Files panel
 
@@ -533,9 +595,18 @@ should be. So that row also asserts what the log must **not** contain
 It exists because classic BibTeX was broken in every shipped bundle and five
 green page counts said nothing about it.
 
-Fixtures live in `../latex_project_tests/`. `test/serve.js` applies a small
-in-flight patch overlay to `homework` (EPS logo → PNG, system fonts → Latin
-Modern) so those source files stay pristine; the patches are printed in the log.
+Fixtures live in `../latex_project_tests/` — or wherever
+`REVERY_TEX_FIXTURES` points. A missing fixture repo fails the suites that need
+it rather than skipping them; `REVERY_TEX_SKIP_FIXTURES=1` skips them on
+purpose. `test/serve.js` applies a small in-flight patch overlay to
+`homework` (EPS logo → PNG, system fonts → Latin Modern) so those source files
+stay pristine; the patches are printed in the log. The browser suites find
+Chrome through `CHROME_PATH`, then a Chrome or Chromium on `PATH`.
+
+Known, not-yet-fixed bugs are tests too: written as the correct assertion,
+wrapped in `knownBug()` / `knownBugCheck()` (`test/known_bug.js`), reported as
+`todo` / `~`. They fail the run if they stop reproducing, so a fix has to
+remove its marker.
 
 ### The coverage probe — the question the gate cannot ask
 

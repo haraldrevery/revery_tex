@@ -9,8 +9,35 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+// The Chrome for Testing build this suite was developed against. Only a
+// fallback now: it is one machine's cache path, and on any other machine it
+// meant every browser suite failed before starting unless CHROME_PATH was set.
 const DEFAULT_CHROME =
   '/home/hrldrvry/.cache/puppeteer/chrome/linux-150.0.7871.24/chrome-linux64/chrome';
+
+const CHROME_NAMES = ['google-chrome-stable', 'google-chrome', 'chromium', 'chromium-browser'];
+
+/**
+ * The Chrome to drive: CHROME_PATH if set, else the build above if this
+ * machine has it, else the first Chrome or Chromium on PATH. Null when there is
+ * none; `chromeMissing()` says what was tried.
+ */
+function resolveChrome() {
+  if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
+  if (fs.existsSync(DEFAULT_CHROME)) return DEFAULT_CHROME;
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (!dir) continue;
+    for (const name of CHROME_NAMES) {
+      const candidate = path.join(dir, name);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+const chromeMissing = (tried) =>
+  `Chrome not found${tried ? ` at ${tried}` : ` (looked for CHROME_PATH, ${DEFAULT_CHROME}, ` +
+  `and ${CHROME_NAMES.join(' / ')} on PATH)`}. Set CHROME_PATH.`;
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -83,10 +110,8 @@ class Cdp {
  * HTTP cache and empty IndexedDB -- which is what makes cold-load measurable.
  */
 async function launch({ url, port = 9333, chromePath, extraArgs = [] } = {}) {
-  const CHROME = chromePath || process.env.CHROME_PATH || DEFAULT_CHROME;
-  if (!fs.existsSync(CHROME)) {
-    throw new Error(`Chrome not found at ${CHROME}\nSet CHROME_PATH.`);
-  }
+  const CHROME = chromePath || resolveChrome();
+  if (!CHROME || !fs.existsSync(CHROME)) throw new Error(chromeMissing(CHROME));
 
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'revery-tex-cdp-'));
   const chrome = spawn(CHROME, [
@@ -165,4 +190,4 @@ async function launch({ url, port = 9333, chromePath, extraArgs = [] } = {}) {
   };
 }
 
-module.exports = { Cdp, launch, sleep, DEFAULT_CHROME };
+module.exports = { Cdp, launch, sleep, DEFAULT_CHROME, resolveChrome, chromeMissing };
