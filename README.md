@@ -64,6 +64,7 @@ rebuild the texmf bundle — see [Rebuilding the TeX distribution](#rebuilding-t
 │    root_gate.js                 what a project switch waits for; no DOM      │
 │    zip_core.js                  zip reader/writer, no dependencies           │
 │    project_store.js             folder/fixture → project; no DOM             │
+│    line_endings.js              LF in the buffer, the file's own on disk     │
 │    engine_host.js               picks, starts and replaces the TeX engine    │
 │    log_console.js               Issues, Raw log and the status line          │
 │    latex_editor.js              CodeMirror behaviour: completion, auto-close │
@@ -373,6 +374,17 @@ app never loaded. But that refusal was swallowed, and since the tree is drawn
 from `project.files` the row vanished anyway: the folder was reported deleted and
 was still there, holding whatever the walk skips (dotfiles, symlinks,
 `node_modules`). The row now stays and the status names it.
+
+**A CRLF file stays CRLF.** CodeMirror holds every document as LF, so the first
+save after any edit used to rewrite a Windows-authored file line by line. Now
+the buffer form is LF everywhere inside the app — `project.files`, the editor,
+the engines, every computed offset — and the disk form is the file's own,
+recorded as `eol` when it is read. Writes, crash backups and the zip export are
+all disk form, converted in `line_endings.js` in shared JS rather than in four
+backends. Backups are on the disk side on purpose: every backend decides
+staleness by comparing a backup with the file on disk, so no backend had to
+change. A file that mixes endings is written with its majority once edited, and
+the log says so when the folder opens.
 
 ### Settings are a table, not a variable each
 

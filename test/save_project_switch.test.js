@@ -98,12 +98,15 @@ test('the save checks before every write, including the forced one', () => {
 
   const dialog = body.indexOf('await resolveConflict(');
   assert.ok(dialog > 0, 'the conflict dialog could not be located');
-  const forced = body.indexOf('writeFile(path, sent, null)');
+  // By the call's shape, not its middle argument, which is the text converted
+  // to the file's line endings and may be spelled any number of ways.
+  const forced = body.search(/writeFile\(path, [^\n]*\bsent\b[^\n]*, null\)/);
   assert.ok(forced > dialog, 'the forced write should follow the dialog');
   assert.ok(checks.some(m => m.index > dialog && m.index < forced),
     'nothing re-checks the epoch between the conflict dialog and the forced write');
 
-  const firstWrite = body.indexOf('await NativeAPI.writeFile(path, sent, f.stamp');
+  const firstWrite = body.search(/await NativeAPI\.writeFile\(path, [^\n]*\bsent\b[^\n]*, f\.stamp/);
+  assert.ok(firstWrite > 0, 'the ordinary write could not be located');
   assert.ok(checks.some(m => m.index < firstWrite),
     'nothing checks the epoch before the ordinary write');
 });

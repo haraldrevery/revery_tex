@@ -100,3 +100,31 @@ test('main.tex held as bytes still beats a better-encoded file elsewhere', async
   }), '/work/book');
   assert.equal(p.main, 'main.tex');
 });
+
+// Line endings. CodeMirror holds every document as LF, so a CRLF file read
+// raw disagreed with the editor about every offset past its first line break,
+// and the first save after an edit rewrote all of it as LF. Held as LF here,
+// with the file's own ending kept for the way back.
+test('a CRLF file is held as LF and remembers it was CRLF', async () => {
+  const { readProjectFromDisk } = await store();
+  const p = await readProjectFromDisk(fakeApi({
+    'main.tex': enc.encode('\\documentclass{article}\r\n\\begin{document}\r\nx\r\n\\end{document}\r\n'),
+    'unix.tex': enc.encode('just lf\n')
+  }), '/work/windows');
+  const f = p.files.get('main.tex');
+  assert.equal(f.eol, '\r\n');
+  assert.ok(!f.content.includes('\r'), `the buffer holds a CR: ${JSON.stringify(f.content)}`);
+  assert.equal(p.files.get('unix.tex').eol, '\n');
+  // Description reads the same text the editor will, so it is unaffected.
+  assert.equal(p.main, 'main.tex');
+});
+
+test('a file mixing line endings is named, since saving will change the minority', async () => {
+  const { readProjectFromDisk } = await store();
+  const warned = [];
+  const p = await readProjectFromDisk(fakeApi({
+    'main.tex': enc.encode('\\documentclass{article}\r\n\\begin{document}\r\nx\n\\end{document}\r\n')
+  }), '/work/mixed', { onWarn: (m) => warned.push(m) });
+  assert.equal(p.files.get('main.tex').eol, '\r\n');
+  assert.ok(warned.some(m => /main\.tex mixes line endings .*CRLF/.test(m)), warned.join('; '));
+});

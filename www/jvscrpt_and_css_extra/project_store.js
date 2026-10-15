@@ -9,6 +9,8 @@
 //
 // It touches no DOM, which also makes it directly unit-testable.
 
+import { fromDisk, CRLF } from './line_endings.js';
+
 /**
  * Files opened as text. Everything else is read as bytes and shown in the tree
  * but not editable — a preview, not a buffer; see media_view.js.
@@ -411,8 +413,15 @@ export async function readProjectFromDisk(api, root, { onWarn = () => {} } = {})
         onWarn(`${f.path} could not be opened as text, so it is kept as it is and read-only — ${textError}`);
         continue;
       }
-      // The stamp is identity at read time, checked again before saving.
-      project.files.set(f.path, { content: r.content, binary: false, dirty: false, stamp: r.stamp });
+      // The stamp is identity at read time, checked again before saving. The
+      // text is held as LF and written back with the file's own line ending —
+      // see line_endings.js.
+      const { content, eol, mixed } = fromDisk(r.content);
+      project.files.set(f.path, { content, eol, binary: false, dirty: false, stamp: r.stamp });
+      if (mixed) {
+        onWarn(`${f.path} mixes line endings — if you edit it, saving writes ` +
+               `${eol === CRLF ? 'CRLF' : 'LF'} throughout`);
+      }
     } catch (err) {
       onWarn(`skipped ${f.path}: ${err}`);
     }
@@ -445,12 +454,14 @@ export async function readProjectFromFixture(key, fetchImpl = fetch) {
   };
   for (const f of m.files) {
     const binary = f.encoding === 'base64' && !TEXT_EXT_RE.test(f.path);
-    project.files.set(f.path, {
-      content: binary ? b64ToBytes(f.content)
-                      : (f.encoding === 'base64' ? atob(f.content) : f.content),
-      binary,
-      dirty: false
-    });
+    if (binary) {
+      project.files.set(f.path, { content: b64ToBytes(f.content), binary, dirty: false });
+      continue;
+    }
+    // LF in the buffer here too: the offsets the outline and diagnostics
+    // compute must count in the same text the editor holds.
+    const { content, eol } = fromDisk(f.encoding === 'base64' ? atob(f.content) : f.content);
+    project.files.set(f.path, { content, eol, binary, dirty: false });
   }
   return { project, patchLog: m.patchLog || [] };
 }

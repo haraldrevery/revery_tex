@@ -24,6 +24,7 @@ import {
 } from './latex_editor.js';
 import { SyncTex } from './synctex.js';
 import { writeZip } from './zip_core.js';
+import { fromDisk, toBuffer, toDisk } from './line_endings.js';
 import * as settings from './settings.js';
 import { attachMenu, openMenuAt, SelectMenu } from './menus.js';
 import { toolboxRows, contextRows } from './toolbox.js';
@@ -1000,9 +1001,13 @@ async function saveAllInner(pending) {
       // dirtyCount() went to zero, so the close guard said nothing, the Save
       // button greyed out, scheduleBackup skipped the file for not being dirty,
       // and discardBackup below deleted the one copy that was left.
+      //
+      // `sent` stays in the buffer form, because it is compared with
+      // `f.content` below; only the copy that crosses to disk carries the
+      // file's own line endings (see line_endings.js).
       let sent = f.content;
       try {
-        stamp = await NativeAPI.writeFile(path, sent, f.stamp || null);
+        stamp = await NativeAPI.writeFile(path, toDisk(sent, f.eol), f.stamp || null);
       } catch (err) {
         // The one refusal that is a question rather than a failure. Recognised
         // through conflict_rule.js, which also builds the message every backend
@@ -1032,7 +1037,10 @@ async function saveAllInner(pending) {
         }
         if (choice === 'reload') {
           const r = await NativeAPI.readTextFile(path);
-          f.content = r.content; f.stamp = r.stamp; f.dirty = false;
+          // The other program may have changed the line endings too, so they
+          // are re-detected rather than kept.
+          const d = fromDisk(r.content);
+          f.content = d.content; f.eol = d.eol; f.stamp = r.stamp; f.dirty = false;
           // Wholesale replacement with no ChangeSet describing it, so the
           // accumulated mapping is about a document that no longer exists.
           invalidateDiagnostics(path);
@@ -1042,7 +1050,7 @@ async function saveAllInner(pending) {
           continue;
         }
         sent = f.content;                                          // re-read: the dialog took time too
-        stamp = await NativeAPI.writeFile(path, sent, null);       // forced
+        stamp = await NativeAPI.writeFile(path, toDisk(sent, f.eol), null);   // forced
         rawLog('wrn', `overwrote ${path}, discarding the version on disk`);
       }
       // The stamp describes what is on disk, so it is adopted either way: it is
@@ -1179,7 +1187,9 @@ async function runBackup() {
     // edited here, so there is no unsaved version of one to lose.
     if (!f.dirty || f.binary || typeof f.content !== 'string') continue;
     try {
-      await NativeAPI.writeBackup(path, f.content);
+      // In the file's own line endings, because every backend decides whether
+      // a backup is stale by comparing it with the file on disk.
+      await NativeAPI.writeBackup(path, toDisk(f.content, f.eol));
     } catch (err) {
       // Best effort per file, but no longer silent. A backend now throws only
       // when it could not make room for the record at all, and a crash net that
@@ -1251,11 +1261,13 @@ async function offerRecovery() {
     if (!f) {
       // The file went away while the backup survived. Put it back rather than
       // asking the user to recreate a path they cannot see any more.
-      project.files.set(b.path, { content: '', binary: false, dirty: true, stamp: null });
+      // Its line ending comes from the backup, which was written in it.
+      project.files.set(b.path,
+        { content: '', eol: fromDisk(b.content).eol, binary: false, dirty: true, stamp: null });
       f = project.files.get(b.path);
       rawLog('wrn', `${b.path} was missing — recreated from its backup`);
     }
-    f.content = b.content;
+    f.content = toBuffer(b.content);
     f.dirty = true;
     invalidateDiagnostics(b.path);      // replaced wholesale, as in the reload path
     restored++;
@@ -1941,7 +1953,10 @@ async function importDroppedFiles(fileList, parent) {
           refused++;
           continue;
         }
-        project.files.set(path, { content, binary: false, dirty: true, stamp: null });
+        // Written as it arrived, byte for byte; held as LF like every other
+        // buffer, with the dropped file's own line ending kept for later saves.
+        const d = fromDisk(content);
+        project.files.set(path, { content: d.content, eol: d.eol, binary: false, dirty: true, stamp: null });
         if (canWriteDisk() && NativeAPI.writeFile) {
           const stamp = await NativeAPI.writeFile(path, content, null);
           Object.assign(project.files.get(path), { stamp, dirty: false });
@@ -2177,7 +2192,7 @@ async function moveOne(from, to) {
     // is not this move's to decide about.
     if (f.dirty && !f.binary && typeof f.content === 'string' && NativeAPI.writeBackup) {
       try {
-        await NativeAPI.writeBackup(to, f.content);
+        await NativeAPI.writeBackup(to, toDisk(f.content, f.eol));
         await NativeAPI.discardBackup?.(from);
       } catch { /* the old backup stays where it was */ }
     }
@@ -3249,10 +3264,12 @@ async function importZip(file) {
  */
 async function buildExportZip() {
   const enc = new TextEncoder();
+  // Text in each file's own line endings: an archive is a disk boundary too,
+  // and on the zip backend it is the only way the project leaves the browser.
   const files = [...project.files].map(([path, f]) => ({
     path,
     bytes: f.binary ? (f.content instanceof Uint8Array ? f.content : enc.encode(f.content))
-                    : enc.encode(f.content)
+                    : enc.encode(toDisk(f.content, f.eol))
   }));
   return { bytes: await writeZip(files), count: files.length };
 }
@@ -4416,7 +4433,7 @@ window.__reveryTexApp = {
   setBuffer(path, text) {
     const f = project?.files.get(path);
     if (!f) return false;
-    f.content = text; f.dirty = true;
+    f.content = toBuffer(text); f.dirty = true;
     invalidateDiagnostics(path);      // wholesale replacement, no ChangeSet
     if (path === currentPath) openFile(path); else refreshOutline();
     refreshDirty();

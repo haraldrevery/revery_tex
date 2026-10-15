@@ -477,7 +477,9 @@ async function main() {
       const bytes = await writeZip([
         { path: 'legacy/main.tex', bytes: enc.encode(${JSON.stringify(DOC)}) },
         { path: 'legacy/chapters/one.tex', bytes: enc.encode(${JSON.stringify(CHAPTER)}) },
-        { path: 'legacy/notes.bib', bytes: enc.encode('@book{x, title={T}}') }
+        { path: 'legacy/notes.bib', bytes: enc.encode('@book{x, title={T}}') },
+        // For the export check: a Windows-authored file must leave as CRLF.
+        { path: 'legacy/windows.tex', bytes: enc.encode('line one\\r\\nline two\\r\\n') }
       ]);
       await window.NativeAPI.importZip(new File([bytes], 'legacy.zip', { type: 'application/zip' }));
 
@@ -700,6 +702,8 @@ async function main() {
     const exported = await cdp.evaluate(`(async () => {
       const { readZip } = await import('./jvscrpt_and_css_extra/zip_core.js');
       window.__reveryTexApp.setBuffer('main.tex', 'UNSAVED EDIT\\n' + ${JSON.stringify(DOC)});
+      // An edit arrives as LF, the way CodeMirror hands it over.
+      window.__reveryTexApp.setBuffer('windows.tex', 'line one\\nline two\\nedited\\n');
       const bytes = await window.__reveryTexApp.exportBytes();
       const dec = new TextDecoder();
       const back = await readZip(bytes);
@@ -721,6 +725,9 @@ async function main() {
     check('export reflects the editor, not the store',
       exported.files['chapters/one.tex'] === CHAPTER,
       JSON.stringify(exported.files['chapters/one.tex']));
+    check('an edited CRLF file is exported with CRLF throughout',
+      exported.files['windows.tex'] === 'line one\r\nline two\r\nedited\r\n',
+      JSON.stringify(exported.files['windows.tex']));
 
     /* ── the no-capability browser is told the truth ────────────────── */
     await cdp.send('Page.navigate', { url: `${BASE}?backend=none` });

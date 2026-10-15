@@ -773,20 +773,17 @@ async function dataLossSession() {
       { what: 'the app after reload', timeoutMs: 60000 });
     await run(KB_HELPERS);
 
-    /* Phase 5 — an edit converts every CRLF in the file to LF. CodeMirror
-       normalises line endings on the way in, and nothing restores them. */
+    /* An edit used to convert every CRLF in the file to LF: CodeMirror
+       normalises line endings on the way in, and nothing restored them. The
+       buffer is LF now and the save writes the file's own ending back. */
     await run(`__kb.open('crlf.tex')`);
     await settle();
     await run(`__kb.append('line three\\n')`);
     await saveLeavingConflicts();
     {
       const s = (disk(K, 'crlf.tex') || Buffer.alloc(0)).toString('latin1');
-      kb('editing a CRLF file keeps its line endings', {
-        phase: 'Phase 5',
-        ok: s.includes('line three') && !/(^|[^\r])\n/.test(s),
-        symptom: s.includes('line three') && !s.includes('\r\n'),
-        detail: JSON.stringify(s)
-      });
+      verify('editing a CRLF file keeps its line endings',
+        s === 'line one\r\nline two\r\nline three\r\n', JSON.stringify(s));
     }
 
     /* A file that is not UTF-8 used to open as text with every accented byte
