@@ -41,10 +41,26 @@ protocol.registerSchemesAsPrivileged([{
   privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true }
 }]);
 
+/**
+ * The home directory, resolved, for vetProjectRoot — which compares against a
+ * real path, so a home reached through a symlink would never match. The Rust
+ * twin canonicalises HOME for the same reason.
+ */
+function resolvedHome() {
+  try { return fs.realpathSync(os.homedir()); } catch { return null; }
+}
+
+/**
+ * Vetted, or nothing. Every way a root gets set goes through vetProjectRoot —
+ * the dialog, a recents row, and this — because the root is also the working
+ * directory a system TeX compiles in.
+ */
+function vettedOrNull(p) {
+  try { return core.vetProjectRoot(p, resolvedHome()); } catch { return null; }
+}
+
 /** The open project root. Backend-owned, exactly as in the Rust shell. */
-let rootPath = process.env.REVERY_TEX_OPEN
-  ? (fs.existsSync(process.env.REVERY_TEX_OPEN) ? fs.realpathSync(process.env.REVERY_TEX_OPEN) : null)
-  : null;
+let rootPath = process.env.REVERY_TEX_OPEN ? vettedOrNull(process.env.REVERY_TEX_OPEN) : null;
 
 const backupDir = () => path.join(app.getPath('userData'), 'backups');
 
@@ -157,10 +173,19 @@ function handle(channel, fn) {
   });
 }
 
+// Parented to the window, so the dialog is modal. Unparented it was not: the
+// editor stayed live behind it, and anything typed while it was open belonged
+// to a project the app was about to leave.
+//
+// Vetted like a recents row, so a folder that opens here is one the frontend
+// can also reopen by path — which is how it goes back when the folder turns out
+// not to be a project. Unvetted, `$HOME` opened here and then could not be
+// returned to.
 handle('fs:openFolder', async () => {
-  const r = await dialog.showOpenDialog({ properties: ['openDirectory'] });
+  const opts = { properties: ['openDirectory'] };
+  const r = mainWindow ? await dialog.showOpenDialog(mainWindow, opts) : await dialog.showOpenDialog(opts);
   if (r.canceled || !r.filePaths.length) return null;
-  rootPath = fs.realpathSync(r.filePaths[0]);
+  rootPath = core.vetProjectRoot(r.filePaths[0], resolvedHome());
   return rootPath;
 });
 handle('fs:currentRoot', () => rootPath);
@@ -169,12 +194,7 @@ handle('fs:currentRoot', () => rootPath);
 // cannot drift over it; this is the only half a browser cannot do. The vetting
 // is in fs_core beside its Rust twin's reasoning — see vetProjectRoot.
 handle('fs:openFolderPath', (p) => {
-  // Resolved first, because vetProjectRoot compares against a real path and
-  // a home directory reached through a symlink would never match. The Rust
-  // twin canonicalises HOME for the same reason.
-  let home = null;
-  try { home = fs.realpathSync(os.homedir()); } catch { /* no home: skip it */ }
-  rootPath = core.vetProjectRoot(p, home);
+  rootPath = core.vetProjectRoot(p, resolvedHome());
   return rootPath;
 });
 handle('fs:readDirectory', () => core.readDirectory(requireRoot()));
@@ -183,7 +203,7 @@ handle('fs:readBinaryFile', (p) => core.readBinaryFile(requireRoot(), p));
 handle('fs:writeFile', (p, c, expect) => core.writeFile(requireRoot(), p, c, expect || null));
 handle('fs:writeBinaryFile', (p, b64) => core.writeBinaryFile(requireRoot(), p, b64));
 handle('fs:deleteFile', (p) => core.deleteFile(requireRoot(), p));
-handle('fs:renameFile', (from, to) => core.renameFile(requireRoot(), from, to));
+handle('fs:renameFile', (from, to, expect) => core.renameFile(requireRoot(), from, to, expect || null));
 
 // The one place this app reaches outside itself, and it reaches a file manager
 // rather than a browser. `setWindowOpenHandler` and the `will-navigate` block

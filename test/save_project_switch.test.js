@@ -42,10 +42,11 @@ function saveBody() {
 }
 
 // The exhaustiveness check, and the reason `setProject` exists at all rather
-// than two bare assignments. Two loaders replace the project today
-// (`loadFromDisk` for a real folder, `loadProject` for the dev-server
-// fixtures); a third that assigned `project` directly would leave every
-// in-flight save pointing at a root that had moved, with no test failing.
+// than bare assignments. Three places replace the project today (`openProject`
+// for a real folder, `loadProject` for the dev-server fixtures, `closeProject`
+// when a switch leaves nothing open); a fourth that assigned `project` directly
+// would leave every in-flight save pointing at a root that had moved, with no
+// test failing.
 test('the open project can only be replaced through setProject', () => {
   const assignments = [...APP.matchAll(/(^|[^.\w])project\s*=(?!=)/gm)];
   const outside = assignments.filter((m) => {
@@ -67,8 +68,8 @@ test('setProject bumps the epoch', () => {
   assert.match(fn[0], /projectEpoch\+\+/, 'setProject must move the epoch');
 });
 
-test('both loaders go through it', () => {
-  for (const loader of ['loadFromDisk', 'loadProject']) {
+test('every loader goes through it', () => {
+  for (const loader of ['openProject', 'loadProject', 'closeProject']) {
     const m = new RegExp(`async function ${loader}\\([\\s\\S]*?\\n}`).exec(APP);
     assert.ok(m, `${loader} could not be located`);
     assert.match(m[0], /setProject\(/, `${loader} must replace the project through setProject`);
@@ -97,12 +98,15 @@ test('the save checks before every write, including the forced one', () => {
 
   const dialog = body.indexOf('await resolveConflict(');
   assert.ok(dialog > 0, 'the conflict dialog could not be located');
-  const forced = body.indexOf('writeFile(path, sent, null)');
+  // By the call's shape, not its middle argument, which is the text converted
+  // to the file's line endings and may be spelled any number of ways.
+  const forced = body.search(/writeFile\(path, [^\n]*\bsent\b[^\n]*, null\)/);
   assert.ok(forced > dialog, 'the forced write should follow the dialog');
   assert.ok(checks.some(m => m.index > dialog && m.index < forced),
     'nothing re-checks the epoch between the conflict dialog and the forced write');
 
-  const firstWrite = body.indexOf('await NativeAPI.writeFile(path, sent, f.stamp');
+  const firstWrite = body.search(/await NativeAPI\.writeFile\(path, [^\n]*\bsent\b[^\n]*, f\.stamp/);
+  assert.ok(firstWrite > 0, 'the ordinary write could not be located');
   assert.ok(checks.some(m => m.index < firstWrite),
     'nothing checks the epoch before the ordinary write');
 });

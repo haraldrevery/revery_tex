@@ -99,8 +99,9 @@ test('biblatex wins when both shapes appear', async () => {
 
 /* ── against the real fixtures, which is what this is for ─────────────── */
 
-const FIXTURES = path.join(__dirname, '..', '..', 'latex_project_tests');
-const haveFixtures = fs.existsSync(FIXTURES);
+// The sibling fixture repo. A missing one fails these tests with a message
+// naming the fix, rather than skipping them — see fixtures_dir.js.
+const { FIXTURES_DIR: FIXTURES, fixtureTestOptions, requireFixtures } = require('./fixtures_dir.js');
 
 /**
  * The files the fixture repo actually ships, as a Set of repo-relative paths.
@@ -123,7 +124,8 @@ function shippedFiles() {
   return new Set(r.stdout.split('\n').filter(Boolean));
 }
 
-test('the book templates build with the bundled bibtex8', { skip: !haveFixtures }, async () => {
+test('the book templates build with the bundled bibtex8', fixtureTestOptions(), async () => {
+  requireFixtures();
   // They asked for biber and shipped a prebuilt main.bbl, because no WASM build
   // has biber. biblatex then rejected that .bbl as the wrong format version and
   // every citation came out undefined — the flagship template demonstrating the
@@ -141,7 +143,8 @@ test('the book templates build with the bundled bibtex8', { skip: !haveFixtures 
   }
 });
 
-test('the thesis fixture needs no bibliography tool', { skip: !haveFixtures }, async () => {
+test('the thesis fixture needs no bibliography tool', fixtureTestOptions(), async () => {
+  requireFixtures();
   // examensLatexv5 is the document that exposed this. It keeps an uncommented
   // \bibliographystyle{vancouver}, has \bibliography{kallor} commented out, and
   // writes its bibliography by hand in manuellreferens.tex. It used to come
@@ -153,7 +156,8 @@ test('the thesis fixture needs no bibliography tool', { skip: !haveFixtures }, a
   assert.equal(await inferBibTool(src), null);
 });
 
-test('the homework fixture needs no bibliography tool', { skip: !haveFixtures }, async () => {
+test('the homework fixture needs no bibliography tool', fixtureTestOptions(), async () => {
+  requireFixtures();
   const src = fs.readFileSync(path.join(FIXTURES, 'homework_template', 'main.tex'), 'utf8');
   assert.equal(await inferBibTool(src), null,
     'homework hand-writes its bibliography; both bib commands are commented out');
@@ -210,7 +214,8 @@ test('no bibliography means no bib tool runs', async () => {
   assert.deepEqual(calls.filter(c => c === 'biber' || c === 'bibtex'), []);
 });
 
-test('a commented-out bibliography is not detected', { skip: !haveFixtures }, async () => {
+test('a commented-out bibliography is not detected', fixtureTestOptions(), async () => {
+  requireFixtures();
   // homework has \bibliography commented out. Running bibtex because of a
   // commented line would be a spurious failure on a document that compiles.
   const src = fs.readFileSync(path.join(FIXTURES, 'homework_template', 'main.tex'), 'utf8');

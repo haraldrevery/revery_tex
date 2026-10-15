@@ -17,7 +17,8 @@ const path = require('path');
 const { isInside } = require('../electron/fs_core.js');
 
 const ROOT = path.resolve(__dirname, '..');
-const PROJECTS_DIR = path.resolve(ROOT, '..', 'latex_project_tests');
+// The sibling fixture repo; REVERY_TEX_FIXTURES moves it. See fixtures_dir.js.
+const { FIXTURES_DIR: PROJECTS_DIR, fixturesPresent, MISSING: FIXTURES_MISSING } = require('./fixtures_dir.js');
 // The in-tree fixtures. Purpose-built, self-contained and always present —
 // unlike PROJECTS_DIR above, which is a sibling repo, so every test that
 // depends on it is guarded on existsSync and silently skips where it is absent.
@@ -472,6 +473,9 @@ function buildManifest(key) {
   }
 
   const dir = path.join(spec.root || PROJECTS_DIR, spec.dir);
+  // Said rather than thrown as ENOENT: a missing sibling repo reached the
+  // harness as an opaque 500 and the app as a project that failed to parse.
+  if (!spec.root && !fixturesPresent()) throw new Error(FIXTURES_MISSING);
   const files = [];
   const patchLog = [];
   let skipped = 0;
@@ -595,7 +599,7 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`revery_tex dev server  http://localhost:${PORT}/`);
   console.log(`  root     ${ROOT}`);
-  console.log(`  projects ${PROJECTS_DIR}`);
+  console.log(`  projects ${PROJECTS_DIR}${fixturesPresent() ? '' : '  (MISSING — the gate and UI suites cannot pass)'}`);
   console.log(`  CSP      ${APPLY_CSP ? (CSP_SITE ? "site-current (--csp-site)" : "proposed (--csp)") : "off"}`);
   if (STATIC_ONLY) console.log('  mode     static host — /api/* returns 404');
 });

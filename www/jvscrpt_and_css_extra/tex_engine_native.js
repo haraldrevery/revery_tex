@@ -22,6 +22,38 @@ import { parseLatexLog, engineLimits, pagesFromLog } from './latex_log.js';
 
 const ENGINE_TOOL = { pdftex: 'pdflatex', xetex: 'xelatex', luatex: 'lualatex' };
 
+/**
+ * The project folder belongs to one compile at a time.
+ *
+ * Cancelling cannot stop the tool already running — there is no IPC to kill a
+ * child — so a cancelled compile's current pass runs to the end, up to the
+ * shell's timeout. A compile started in that window used to begin its own
+ * pass 1 straight away: two TeX processes in one directory, interleaving
+ * writes to the same .aux, .bbl and .pdf. Now it waits for the folder.
+ *
+ * Module-level rather than per instance, and that is load-bearing:
+ * engine_host.js disposes the engine and builds a new one when the source
+ * changes, and a disposed instance's tool is still running in the same folder.
+ * There is one shell and one folder, so there is one lock.
+ */
+let folderTail = Promise.resolve();
+let folderBusy = false;
+
+async function withFolder(onWait, fn) {
+  const before = folderTail;
+  let release;
+  folderTail = new Promise((r) => { release = r; });
+  if (folderBusy) onWait();
+  try {
+    await before;
+    folderBusy = true;
+    return await fn();
+  } finally {
+    folderBusy = false;
+    release();
+  }
+}
+
 export class NativeTexEngine {
   /**
    * @param {object} opts
@@ -122,6 +154,16 @@ export class NativeTexEngine {
       return this._fail(`${tool} is not installed. Available: ${this.capabilities.engines.join(', ') || 'none'}`);
     }
 
+    return withFolder(
+      () => this.onLog('waiting for the cancelled compile to finish its current pass — ' +
+                       'a running TeX cannot be stopped, only not continued', 'wrn'),
+      () => cancelled()
+        ? this._fail('cancelled')
+        : this._compile({ tool, mainFile, passes, bibtex, makeindex, timeoutSecs, cancelled })
+    );
+  }
+
+  async _compile({ tool, mainFile, passes, bibtex, makeindex, timeoutSecs, cancelled }) {
     const runs = [];
     const run = async (t, label) => {
       if (cancelled()) return null;
@@ -173,9 +215,21 @@ export class NativeTexEngine {
       [...log.matchAll(/(?:File|LaTeX Error: File)\s+`([^']+\.sty)'\s+not found/g)].map(m => m[1])
     )];
 
-    // Success is a PDF on disk, never an exit code — the last pass's status
-    // hides a fatal error in an earlier one, which is the same trap the WASM
-    // wrapper sets.
+    // Success is a PDF *this compile wrote*, and a PDF on disk cannot say
+    // whose it is. It used to be the whole test, which reported the previous
+    // run's document as a fresh success whenever the last pass failed without
+    // removing it. No engine opens its PDF until the first page ships out, so
+    // an error in the preamble — a missing package, the commonest failure
+    // there is — exits 1 and leaves the old file exactly where it was. Measured
+    // with pdfLaTeX and XeLaTeX both. A document with no pages exits 0 and
+    // does the same. So the last engine pass must have exited 0, not been
+    // stopped, and not said it wrote nothing — and only then is the PDF read.
+    //
+    // The last *engine* pass, because `last` is never bibtex or makeindex:
+    // bibtex exits 1 on a mere warning, and a bibliography warning is not a
+    // failed document. An earlier engine pass failing is not decisive either —
+    // the passes after it ran on the same source, and the last one is the
+    // document's final word.
     //
     // By basename, not beside the source. The shell pins cwd to the project
     // root and passes -output-directory=. , so every artefact lands at the root
@@ -184,17 +238,25 @@ export class NativeTexEngine {
     // compiler produced no PDF" over a log that had compiled cleanly. This is
     // also what bibtex and makeindex already assume, since their stems come
     // from the basename too.
+    const stoppedAtLimit = !!(last.timedOut || last.timed_out);
+    const exitedClean = last.code === 0 && !stoppedAtLimit;
+    const wroteNothing = /No pages of output\./.test(last.stdout || '');
     const stem = mainFile.split('/').pop().replace(/\.tex$/i, '');
     let pdf = null;
-    try { pdf = await this.api.readBinaryFile(`${stem}.pdf`); } catch { /* none produced */ }
+    if (exitedClean && !wroteNothing) {
+      try { pdf = await this.api.readBinaryFile(`${stem}.pdf`); } catch { /* none produced */ }
+    }
 
     if (!pdf || !pdf.length) {
       const first = diagnostics.find(d => d.severity === 'error');
       return {
         success: false, pdf: null, log, diagnostics, missingPackages, limits,
-        error: missingPackages.length
-          ? `missing package: ${missingPackages.join(', ')}`
-          : (first ? first.message : 'the compiler produced no PDF — see the raw log'),
+        error: missingPackages.length ? `missing package: ${missingPackages.join(', ')}`
+          : first ? first.message
+          : stoppedAtLimit ? `${tool} was stopped at the time limit`
+          : !exitedClean ? `${tool} failed (exit code ${last.code ?? 'none'}) — see the raw log`
+          : wroteNothing ? 'the document produced no pages'
+          : 'the compiler produced no PDF — see the raw log',
         pages: 0
       };
     }
@@ -220,7 +282,12 @@ export class NativeTexEngine {
       // all. The status line, the log header and the driver hook were all wrong
       // on every successful system-TeX compile, and only the preview pane —
       // which asks pdf.js — was right.
-      pages: pagesFromLog(log) ?? countPages(pdf),
+      //
+      // The *last* pass that printed a count, not the first: the joined log
+      // starts with pass 1, which typesets before the table of contents and
+      // the bibliography exist, so it reported a document pages short.
+      pages: [...runs].reverse().map(r => pagesFromLog(r.stdout)).find(n => n != null)
+        ?? countPages(pdf),
       error: null
     };
   }

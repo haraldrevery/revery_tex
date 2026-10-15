@@ -110,6 +110,30 @@ test('Electron throws exactly the message the shared rule builds', async () => {
   }
 });
 
+// A rename is refused the same way, for the same reason: it acts on a file the
+// app read earlier, and a move used to drop that file's stamp so the next save
+// overwrote whatever another program had done to it. Same sentence, because it
+// opens the same kind of question.
+test('Electron refuses a rename with the same message', async () => {
+  const { conflictMessage, isConflict } = await load();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'revery-conflict-rename-'));
+  try {
+    const abs = path.join(root, 'a.tex');
+    core.writeFile(root, 'a.tex', 'original');
+    const stamp = core.stampOf(abs);
+    fs.writeFileSync(abs, 'changed underneath us');
+    const now = core.stampOf(abs);
+
+    let thrown = null;
+    try { core.renameFile(root, 'a.tex', 'b.tex', stamp); } catch (e) { thrown = e; }
+    assert.ok(thrown && isConflict(thrown), 'the rename should have been refused as a conflict');
+    assert.equal(thrown.message, conflictMessage('a.tex', stamp.size, now.size, 'disk'));
+    assert.ok(fs.existsSync(abs) && !fs.existsSync(path.join(root, 'b.tex')), 'a refused rename moved the file');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 /**
  * Rust's string continuation: a backslash at end of line eats the newline and
  * every leading space on the next one. Spelled out because getting it wrong
@@ -127,8 +151,15 @@ test('Tauri formats exactly the message the shared rule builds', async () => {
   assert.equal(declared[1], CONFLICT_PREFIX,
     'the Tauri marker has drifted from conflict_rule.js');
 
-  const body = /fn write_file_impl[\s\S]*?\n}/.exec(rust);
-  assert.ok(body, 'write_file_impl could not be located');
+  // One check, shared by the write and the rename, so there is one sentence to
+  // hold — and both callers are held to using it.
+  const body = /fn check_stamp[\s\S]*?\n}/.exec(rust);
+  assert.ok(body, 'check_stamp could not be located');
+  for (const caller of ['write_file_impl', 'rename_file_impl']) {
+    const fn = new RegExp(`fn ${caller}[\\s\\S]*?\\n}`).exec(rust);
+    assert.ok(fn, `${caller} could not be located`);
+    assert.match(fn[0], /check_stamp\(/, `${caller} must refuse through check_stamp`);
+  }
   const literal = /return Err\(format!\(\s*"((?:[^"\\]|\\[\s\S])*)"/.exec(body[0]);
   assert.ok(literal, 'the conflict format string could not be located');
 
@@ -152,6 +183,9 @@ test('the browser pair and the app go through the shared rule', () => {
     assert.match(src, /from '\.\/conflict_rule\.js'/, `${file} must import the shared rule`);
     assert.match(src, new RegExp(`conflictError\\([^)]*'${where}'\\)`),
       `${file} must report the ${where} story`);
+    // Twice: the write and the rename.
+    assert.equal(src.match(new RegExp(`conflictError\\([^)]*'${where}'\\)`, 'g')).length, 2,
+      `${file} must refuse both a write and a rename through the shared rule`);
     assert.ok(!/`CONFLICT:\$\{/.test(src),
       `${file} still builds the message by hand`);
   }

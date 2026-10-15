@@ -176,6 +176,15 @@ export async function showMedia(container, path, file, { onLog = () => {} } = {}
     return;
   }
 
+  // A text file held as bytes because it is not UTF-8. Opening it as text would
+  // mean guessing its encoding, and a wrong guess saved back is how files were
+  // mangled; so it is not opened, and the card says what happens to it instead.
+  if (file.textError) {
+    card(container, path, 'Not UTF-8 text, so it is not opened for editing. It compiles and exports ' +
+      'exactly as it is — convert it to UTF-8 to edit it here.');
+    return;
+  }
+
   const kind = kindOf(path);
 
   if (kind === 'image') {

@@ -27,7 +27,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // base64, matching readBinaryFile's direction across the same bridge.
   writeBinaryFile: (path, b64) => call('fs:writeBinaryFile', path, b64),
   deleteFile: (path) => call('fs:deleteFile', path),
-  renameFile: (from, to) => call('fs:renameFile', from, to),
+  renameFile: (from, to, expect) => call('fs:renameFile', from, to, expect),
   // Takes a path, never a program and never a flag: what gets launched, and on
   // which directory, is decided in the main process.
   openContainingFolder: (path) => call('fs:openContainingFolder', path),

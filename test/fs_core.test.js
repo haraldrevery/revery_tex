@@ -436,6 +436,113 @@ test('write returns a stamp usable for the next save', () => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+// ── the bytes a read hands back are the bytes a write puts down ─────────
+// The backend is transparent; whatever normalising happens, happens above it.
+// Pinned here because the fixes for line endings and encodings (Phases 2 and 5)
+// sit on top of exactly this, and must not have to wonder.
+
+test('CRLF line endings survive a read and an unchanged write, byte for byte', () => {
+  const root = tmpdir('crlf');
+  const bytes = Buffer.from('\\documentclass{article}\r\n\\begin{document}\r\nx\r\n\\end{document}\r\n');
+  fs.writeFileSync(path.join(root, 'win.tex'), bytes);
+  const r = core.readTextFile(root, 'win.tex');
+  core.writeFile(root, 'win.tex', r.content, r.stamp);
+  assert.deepEqual(fs.readFileSync(path.join(root, 'win.tex')), bytes);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('a UTF-8 byte-order mark survives a read and an unchanged write', () => {
+  const root = tmpdir('bom');
+  const bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('Caf\u00e9\n', 'utf8')]);
+  fs.writeFileSync(path.join(root, 'bom.tex'), bytes);
+  const r = core.readTextFile(root, 'bom.tex');
+  core.writeFile(root, 'bom.tex', r.content, r.stamp);
+  assert.deepEqual(fs.readFileSync(path.join(root, 'bom.tex')), bytes);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+// `readFileSync(…, 'utf8')` decoded leniently: every byte that is not valid
+// UTF-8 became U+FFFD, and the next save wrote that back, so one unrelated edit
+// to a Latin-1 file destroyed every accented character in it. Refused now, like
+// the Tauri twin, and the loader keeps such a file as bytes (project_store.js).
+test('a file that is not UTF-8 is refused as text rather than decoded into U+FFFD', () => {
+  const root = tmpdir('latin1');
+  try {
+    const bytes = Buffer.from('Caf\xe9 na\xefve\n', 'latin1');
+    fs.writeFileSync(path.join(root, 'latin1.tex'), bytes);
+    assert.throws(() => core.readTextFile(root, 'latin1.tex'), /latin1\.tex: stream did not contain valid UTF-8/,
+      'non-UTF-8 text was decoded instead of refused');
+    // …and the bytes are still there to be had, exactly, which is what the
+    // loader falls back to.
+    assert.deepEqual(Buffer.from(core.readBinaryFile(root, 'latin1.tex'), 'base64'), bytes);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// readTextFile used to read the content and *then* stat the file, so a write
+// landing between the two returned the old text with the new file's stamp. The
+// next save matched that stamp and overwrote the other program's work with no
+// conflict. The write is injected at exactly that point, by wrapping
+// readFileSync; `raced` proves the injection still reaches the read, so a fix
+// that reads another way cannot pass this without the test noticing.
+//
+// The read is on a file handle now, so the target is recognised by its inode.
+// Two outcomes are correct: the read noticed and returned the other program's
+// text (with its stamp), or it returned the old text with the old stamp and the
+// save is a conflict. The bug is the third — old text, new stamp, and a save
+// that silently drops the other program's write.
+test('a write that lands between the read and the stamp is never hidden', () => {
+  const root = tmpdir('read-race');
+  const target = path.join(root, 'main.tex');
+  fs.writeFileSync(target, 'original\n');
+  const ino = fs.statSync(target).ino;
+  const isTarget = (p) => p === target || (typeof p === 'number' && fs.fstatSync(p).ino === ino);
+  const realRead = fs.readFileSync;
+  let raced = false;
+  fs.readFileSync = function (p, ...rest) {
+    const out = realRead.call(this, p, ...rest);
+    if (!raced && isTarget(p)) {
+      raced = true;
+      fs.writeFileSync(target, 'written by another program in between\n');
+    }
+    return out;
+  };
+  let r;
+  try {
+    r = core.readTextFile(root, 'main.tex');
+  } finally {
+    fs.readFileSync = realRead;
+  }
+  try {
+    assert.ok(raced, 'the injected write never ran — the test no longer reaches the read');
+    let hidden = false;
+    try {
+      core.writeFile(root, 'main.tex', `${r.content}mine\n`, r.stamp);
+      hidden = !fs.readFileSync(target, 'utf8').includes('written by another program');
+    } catch (err) {
+      if (!/CONFLICT:/.test(err.message)) throw err;
+    }
+    assert.ok(!hidden, 'a stamp taken after the read hid an external write');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The same read with nothing racing it: one pass, and the stamp is the file's.
+test('an undisturbed read returns the file and the stamp a write will accept', () => {
+  const root = tmpdir('read-stable');
+  try {
+    fs.writeFileSync(path.join(root, 'a.tex'), 'hello\n');
+    const r = core.readTextFile(root, 'a.tex');
+    assert.equal(r.content, 'hello\n');
+    assert.deepEqual(r.stamp, core.stampOf(path.join(root, 'a.tex')));
+    core.writeFile(root, 'a.tex', 'hello again\n', r.stamp);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 /* ── delete and rename ───────────────────────────────────────────────── */
 
 test('delete removes a file and refuses to escape', () => {
@@ -486,6 +593,44 @@ test('rename moves and never overwrites', () => {
   assert.throws(() => core.renameFile(root, 'nothing.tex', 'x.tex'), /does not exist/);
 
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+// A move used to drop the file's stamp, so the save after it overwrote whatever
+// another program had done to the file since — with no question asked. The
+// rename now checks the file against the stamp it was read with and returns the
+// destination's, which the next save checks in turn.
+test('a rename returns the stamp a change after the move is caught against', () => {
+  const root = tmpdir('rename-stamp');
+  try {
+    fs.writeFileSync(path.join(root, 'a.tex'), 'text\n');
+    const read = core.readTextFile(root, 'a.tex');
+    const moved = core.renameFile(root, 'a.tex', 'ch/b.tex', read.stamp);
+    assert.deepEqual(moved, core.stampOf(path.join(root, 'ch', 'b.tex')));
+    // Nothing changed: the save goes through against the adopted stamp…
+    const saved = core.writeFile(root, 'ch/b.tex', 'mine\n', moved);
+    // …and a change after that is a conflict, not an overwrite.
+    fs.writeFileSync(path.join(root, 'ch', 'b.tex'), 'changed by another program\n');
+    assert.throws(() => core.writeFile(root, 'ch/b.tex', 'mine again\n', saved), /^Error: CONFLICT:/);
+    assert.equal(fs.readFileSync(path.join(root, 'ch', 'b.tex'), 'utf8'), 'changed by another program\n');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a rename of a file changed since it was read is refused, and moves nothing', () => {
+  const root = tmpdir('rename-conflict');
+  try {
+    fs.writeFileSync(path.join(root, 'a.tex'), 'text\n');
+    const read = core.readTextFile(root, 'a.tex');
+    fs.writeFileSync(path.join(root, 'a.tex'), 'changed outside\n');
+    assert.throws(() => core.renameFile(root, 'a.tex', 'b.tex', read.stamp), /CONFLICT:a\.tex changed on disk/);
+    assert.ok(fs.existsSync(path.join(root, 'a.tex')) && !fs.existsSync(path.join(root, 'b.tex')));
+    // With no stamp to hold it to — "move it anyway" — it moves.
+    core.renameFile(root, 'a.tex', 'b.tex', null);
+    assert.equal(fs.readFileSync(path.join(root, 'b.tex'), 'utf8'), 'changed outside\n');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('rename refuses to escape the root, and the source survives', () => {

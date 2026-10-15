@@ -124,7 +124,12 @@ let projectId = null;
 const newProjectId = (name) =>
   `${name}-${(globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)).slice(0, 12)}`;
 
-const decoder = new TextDecoder();
+// UTF-8 strictly, keeping a byte-order mark — see native_api_web.js for why
+// each half matters. The store holds bytes, so a file that is not UTF-8 is
+// refused as text and kept as bytes by the loader, which is also what makes
+// Export hand it back exactly as it was imported.
+const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+const lenientDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
 const encoder = new TextEncoder();
 
 const stampOf = (rec) => ({ mtime_ms: rec.mtime_ms, size: rec.bytes.length });
@@ -285,7 +290,13 @@ export const webZipImpl = {
 
   async readTextFile(path) {
     const rec = await requireFile(path);
-    return { content: decoder.decode(rec.bytes), stamp: stampOf(rec) };
+    let content;
+    try {
+      content = decoder.decode(rec.bytes);
+    } catch {
+      throw new Error(`Cannot read ${path}: stream did not contain valid UTF-8`);
+    }
+    return { content, stamp: stampOf(rec) };
   },
 
   async readBinaryFile(path) {
@@ -341,13 +352,28 @@ export const webZipImpl = {
     await run(FILES, 'readwrite', (s) => s.delete(path));
   },
 
-  /** Move a file. Copy then delete, so a failure leaves the original. */
-  async renameFile(from, to) {
+  /**
+   * Move a file. Copy then delete, so a failure leaves the original.
+   *
+   * `expect` and the returned stamp as on the desktop (see renameFile in
+   * electron/fs_core.js): refused if another tab changed the file since it was
+   * read, and otherwise the destination's stamp, which is new here.
+   */
+  async renameFile(from, to, expect = null) {
     const src = await getFile(from);
     if (!src) throw new Error(`Cannot rename ${from}: it does not exist`);
     if (await getFile(to)) throw new Error(`Cannot rename to ${to}: that already exists`);
-    await run(FILES, 'readwrite', (s) => s.put({ path: to, bytes: src.bytes, mtime_ms: Date.now() }));
+    if (expect) {
+      const now = stampOf(src);
+      if (now.mtime_ms !== expect.mtime_ms || now.size !== expect.size) {
+        throw conflictError(from, expect.size, now.size, 'tab');
+      }
+    }
+    let mtime_ms = Date.now();
+    if (mtime_ms <= src.mtime_ms) mtime_ms = src.mtime_ms + 1;
+    await run(FILES, 'readwrite', (s) => s.put({ path: to, bytes: src.bytes, mtime_ms }));
     await run(FILES, 'readwrite', (s) => s.delete(from));
+    return { mtime_ms, size: src.bytes.length };
   },
 
   /** Everything in the store, for Export. */
@@ -386,7 +412,7 @@ export const webZipImpl = {
       async (path) => {
         const rec = await getFile(path);
         if (!rec) throw new Error(`${path} is not in this project`);
-        return decoder.decode(rec.bytes);
+        return lenientDecoder.decode(rec.bytes);
       }
     );
   },
