@@ -88,9 +88,10 @@ numbers that break every time someone edits a comment.
 | `encoding/main.tex` | yes | UTF-8 across Nordic, continental, punctuation and maths |
 | `encoding/latin1.tex` | not input | genuinely non-UTF-8 bytes, for the refusal path |
 
-`deep_structure/` is deliberately 20 levels deep. `readDirectory` in both
-desktop backends stops at 16 and says nothing, so the four levels past the cap
-are there to make that truncation visible instead of theoretical.
+`deep_structure/` is deliberately 20 levels deep. `readDirectory` stops at 16
+in every backend. It used to say nothing about it; now the folder at the cap is
+listed as `skipped` (`too deep`) and the app's log names it. The four levels
+past the cap are there so that report is tested rather than assumed.
 
 ## Running them
 

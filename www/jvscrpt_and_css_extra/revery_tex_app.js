@@ -47,7 +47,7 @@ import { createHistory } from './tree_history.js';
 import { createDiagnosticPositions } from './diagnostic_positions.js';
 import { referencesTo } from './document_model.js';
 import { $, download } from './dom.js';
-import { showMedia, clearMedia } from './media_view.js';
+import { showMedia, clearMedia, humanSize } from './media_view.js';
 import {
   readProjectFromDisk, readProjectFromFixture, TEXT_EXT_RE, PLAIN_TEXT_EXT_RE,
   inferBibTool, redescribeProject, mainCandidates
@@ -3362,7 +3362,17 @@ async function switchProject(attach, prepare = null) {
       await cancelCompile();
       if (prepare) await prepare(root);
       setStatus('reading folder…', 'warn');
-      loaded = await readProjectFromDisk(backend, root, { onWarn: (msg) => rawLog('wrn', msg) });
+      loaded = await readProjectFromDisk(backend, root, {
+        onWarn: (msg) => rawLog('wrn', msg),
+        onProgress: (done, total) => setStatus(`reading folder… ${done} of ${total} files`, 'warn'),
+        // A "no" throws, and the catch below puts the previous project back.
+        confirmLarge: ({ files, bytes, largest }) => ask(
+          `That folder holds ${files} files, ${humanSize(bytes)} in all — more than a LaTeX ` +
+          `project usually does. Opening it reads every file into memory, which can take a ` +
+          `long time and may run out of memory.\n\n` +
+          `Largest: ${largest.map(f => `${f.path} (${humanSize(f.size)})`).join(', ')}\n\n` +
+          `Open it anyway?`)
+      });
     } catch (err) {
       if (await putBack(prev, err)) moved = false;
       return false;

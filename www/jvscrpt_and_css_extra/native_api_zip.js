@@ -284,7 +284,7 @@ export const webZipImpl = {
     const files = await allFiles();
     if (!files.length) throw new Error('No project is loaded. Import a zip first.');
     return files
-      .map(r => ({ name: r.path.split('/').pop(), path: r.path, type: 'file' }))
+      .map(r => ({ name: r.path.split('/').pop(), path: r.path, type: 'file', size: r.bytes?.length ?? null }))
       .sort((a, b) => a.path.localeCompare(b.path));
   },
 

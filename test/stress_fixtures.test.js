@@ -127,33 +127,32 @@ test('deep_structure has the shape it claims', () => {
 
 // The gap this fixture exists to make visible.
 //
-// `readDirectory` stops at depth 16 in both desktop backends (fs_core.js and
-// the `walk` in main.rs) and returns what it has — no warning, no marker, no
-// entry in the log. A project nested deeper is silently truncated, and the user
-// is told nothing at all: the files simply are not in the tree.
-//
-// This asserts the truncation rather than the fix, deliberately. It is a
-// characterisation test: it pins what the code does today so the loss is
-// impossible to overlook, and it fails the moment somebody changes the
-// behaviour — at which point this test is the checklist of what to update.
-test('readDirectory silently truncates past depth 16, losing real files', () => {
+// `readDirectory` stops at depth 16 in every backend. It used to return what it
+// had and say nothing — no marker, no entry in the log — so a project nested
+// deeper was truncated and the files simply were not in the tree. The cap
+// stays (it is also the backstop for a loop the symlink check cannot see), but
+// the folder at the cap is now listed as skipped, and the loader names it.
+test('readDirectory stops at depth 16, and says where', () => {
   const dir = path.join(FIX, 'deep_structure');
-  const listed = core.readDirectory(dir)
-    .filter(e => e.type === 'file')
-    .map(e => e.path);
+  const entries = core.readDirectory(dir);
+  const listed = entries.filter(e => e.type === 'file').map(e => e.path);
   const onDisk = walkAll(dir);
 
   const lost = onDisk.filter(f => !listed.includes(f));
   assert.ok(lost.length > 0,
-    'the depth cap appears to be gone — if it was fixed, update this test and README.md');
+    'the depth cap appears to be gone — if so, update this test and latex_stress_test/README.md');
   assert.ok(lost.every(f => f.startsWith('deep/')),
     `only the deep chain should be truncated, lost: ${lost.join(', ')}`);
-  // The leaf is the file a user would notice missing.
   assert.ok(lost.some(f => f.endsWith('leaf.tex')),
-    'the deepest file should be among the ones dropped');
-  // And nothing anywhere says so.
-  assert.ok(listed.length < onDisk.length,
-    'the truncation must actually drop files for this fixture to mean anything');
+    'the deepest file should be among the ones beyond the cap');
+
+  // What used to be missing: every lost file sits under a folder reported as
+  // skipped for being too deep.
+  const skipped = entries.filter(e => e.type === 'skipped');
+  assert.ok(skipped.length > 0 && skipped.every(s => s.why === 'too deep'),
+    JSON.stringify(skipped));
+  assert.ok(lost.every(f => skipped.some(s => f.startsWith(`${s.path}/`))),
+    `a file past the cap is under no reported folder: ${lost.join(', ')}`);
 });
 
 test('the include graph is walked to the bottom', async () => {

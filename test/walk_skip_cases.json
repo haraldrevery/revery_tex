@@ -1,0 +1,5 @@
+{
+  "_comment": "Folder names every directory walk must agree on: skipped_dir in tauri/src/main.rs, skippedDir in electron/fs_core.js and in www/jvscrpt_and_css_extra/native_api_web.js. Read by test/walk_parity.test.js and by main.rs's own tests, so the three cannot drift apart.",
+  "skipped": [".git", ".hidden", ".vscode", "node_modules", "_minted", "_minted-main", "_minted-thesis"],
+  "kept": ["chapters", "figures", "build", "node_modules_old", "my_node_modules", "minted", "notes_minted", "x.git"]
+}

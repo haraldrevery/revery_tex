@@ -320,9 +320,31 @@ function resolveStaticRequest(wwwRoot, requestUrl) {
 
 /* ── directory listing ───────────────────────────────────────────────── */
 
-/** Recursive, relative to root. Symlinks skipped — following them walks out. */
+/**
+ * Folders the walk never enters. Twin of `skipped_dir` in main.rs and of
+ * native_api_web.js, held to the same cases by test/walk_skip_cases.json.
+ *
+ * `node_modules` because no document reads from one and it can hold tens of
+ * thousands of files, every one of which the loader would read into memory;
+ * `_minted*` because it is minted's cache, which needs shell escape that is
+ * never granted here. Dot-folders were already skipped, as dotfiles are.
+ */
+const skippedDir = (name) =>
+  name.startsWith('.') || name === 'node_modules' || name.startsWith('_minted');
+
+/** Deeper than this, a folder is reported as skipped rather than walked. */
+const MAX_DEPTH = 16;
+
+/**
+ * Recursive, relative to root. Symlinks skipped — following them walks out.
+ *
+ * Only the root's own listing can throw. A subfolder that cannot be read, or
+ * is past MAX_DEPTH, is one `{type: 'skipped', why}` entry instead: it used to
+ * abort the whole listing — one permission-denied folder and the project would
+ * not open at all — or, past the depth cap, vanish with nothing said. Files
+ * carry their `size`, so the loader can see what it is about to read.
+ */
 function readDirectory(root, dir = root, depth = 0, out = []) {
-  if (depth > 16) return out;
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (entry.name.startsWith('.')) continue;
     const full = path.join(dir, entry.name);
@@ -331,10 +353,22 @@ function readDirectory(root, dir = root, depth = 0, out = []) {
     if (st.isSymbolicLink()) continue;
     const rel = path.relative(root, full).split(path.sep).join('/');
     if (st.isDirectory()) {
+      if (skippedDir(entry.name)) continue;
+      if (depth + 1 > MAX_DEPTH) {
+        out.push({ name: entry.name, path: rel, type: 'skipped', why: 'too deep' });
+        continue;
+      }
+      const at = out.length;
       out.push({ name: entry.name, path: rel, type: 'dir' });
-      readDirectory(root, full, depth + 1, out);
+      try {
+        readDirectory(root, full, depth + 1, out);
+      } catch {
+        // Nothing under it was pushed: readdirSync is all or nothing, and it
+        // runs before any entry.
+        Object.assign(out[at], { type: 'skipped', why: 'unreadable' });
+      }
     } else if (st.isFile()) {
-      out.push({ name: entry.name, path: rel, type: 'file' });
+      out.push({ name: entry.name, path: rel, type: 'file', size: st.size });
     }
   }
   return out;
@@ -589,7 +623,7 @@ module.exports = {
   safePath, safePathInside, isInside, containingDir,
   fileManagerProgram, launchFileManager, resolveStaticRequest,
   atomicWriteFile, isCrossDeviceErr, tmpFor,
-  readDirectory, readTextFile, readBinaryFile, writeFile, writeBinaryFile,
+  readDirectory, skippedDir, readTextFile, readBinaryFile, writeFile, writeBinaryFile,
   deleteFile, renameFile, stampOf,
   writeBackup, listStaleBackups, discardBackup, backupKey
 };

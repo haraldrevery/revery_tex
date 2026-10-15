@@ -93,18 +93,43 @@ async function identify(handle) {
 let rootHandle = null;
 const handles = new Map();   // project-relative path -> FileSystemFileHandle
 
-const SKIP_DIR = /^(\.|node_modules$|_minted)/;
+/**
+ * Folders the walk never enters. Twin of `skipped_dir` in main.rs and of
+ * fs_core.js, held to the same cases by test/walk_skip_cases.json.
+ */
+export const skippedDir = (name) => /^(\.|node_modules$|_minted)/.test(name);
 
-async function walk(dir, prefix, out) {
+/** Deeper than this, a folder is reported as skipped rather than walked. */
+const MAX_DEPTH = 16;
+
+/**
+ * The same listing the desktop shells return. Only the root's own listing can
+ * throw: a subfolder that cannot be read, or is past MAX_DEPTH, is one
+ * `{type: 'skipped', why}` entry, and files carry their `size`.
+ */
+async function walk(dir, prefix, out, depth = 0) {
   for await (const [name, handle] of dir.entries()) {
     if (name.startsWith('.')) continue;
     const rel = prefix ? `${prefix}/${name}` : name;
     if (handle.kind === 'directory') {
-      if (SKIP_DIR.test(name)) continue;
+      if (skippedDir(name)) continue;
+      if (depth + 1 > MAX_DEPTH) {
+        out.push({ name, path: rel, type: 'skipped', why: 'too deep' });
+        continue;
+      }
+      const at = out.length;
       out.push({ name, path: rel, type: 'dir' });
-      await walk(handle, rel, out);
+      try {
+        await walk(handle, rel, out, depth + 1);
+      } catch {
+        // Unlike readdir, this iterates, so it can fail partway — and what it
+        // listed before failing is real and stays.
+        Object.assign(out[at], { type: 'skipped', why: 'unreadable' });
+      }
     } else {
-      out.push({ name, path: rel, type: 'file' });
+      let size = null;
+      try { size = (await handle.getFile()).size; } catch { /* unknown; still listed */ }
+      out.push({ name, path: rel, type: 'file', size });
       handles.set(rel, handle);
     }
   }

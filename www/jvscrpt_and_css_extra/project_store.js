@@ -366,21 +366,55 @@ export function scannable(content) {
 }
 
 /**
+ * Past either of these, a folder is asked about before it is read.
+ *
+ * Every file is read into memory on open — the bundled engine compiles from
+ * those copies — so a folder that is not really a LaTeX project (a home
+ * directory's Documents, a dataset with one .tex beside it) used to be read
+ * whole, one round trip per file, before anyone could say no. Generous on
+ * purpose: a real thesis with its figures is well inside both, and asking
+ * about one would be a question with only one right answer.
+ */
+export const LARGE_PROJECT = { files: 5000, bytes: 512 * 1024 * 1024 };
+
+/**
  * Read the open folder into a project.
  *
  * @param {object} api      NativeAPI
  * @param {string} root     display name of the folder
- * @param {{onWarn?: (msg:string)=>void}} [opts]  per-file read failures, which
- *        are skipped rather than fatal — one unreadable image should not stop
- *        a project opening.
- * @throws if the folder holds no .tex file at all
+ * @param {object} [opts]
+ * @param {(msg:string)=>void} [opts.onWarn]  per-file read failures, which are
+ *        skipped rather than fatal — one unreadable image should not stop a
+ *        project opening — and folders the listing could not enter.
+ * @param {(size:{files:number, bytes:number, largest:object[]})=>Promise<boolean>|boolean} [opts.confirmLarge]
+ *        asked before reading a folder past LARGE_PROJECT; false declines.
+ * @param {(done:number, total:number)=>void} [opts.onProgress]
+ * @throws if the folder holds no .tex file at all, or the open was declined
  */
-export async function readProjectFromDisk(api, root, { onWarn = () => {} } = {}) {
+export async function readProjectFromDisk(api, root,
+  { onWarn = () => {}, confirmLarge = () => true, onProgress = () => {} } = {}) {
   const entries = await api.readDirectory();
   const files = entries.filter(e => e.type === 'file');
 
   const texFiles = files.filter(f => /\.tex$/i.test(f.path));
   if (!texFiles.length) throw new Error('no .tex files in that folder');
+
+  // Named, so a missing chapter has an explanation. Every backend lists a
+  // folder it could not enter this way rather than failing the whole listing
+  // or, past the depth cap, leaving it out without a word.
+  for (const s of entries.filter(e => e.type === 'skipped')) {
+    onWarn(`${s.path}/ was not read (${s.why || 'skipped'}) — nothing inside it is in the project`);
+  }
+
+  // Before the first read, which is the point: sizes come from the listing.
+  const bytes = files.reduce((n, f) => n + (f.size || 0), 0);
+  if (files.length > LARGE_PROJECT.files || bytes > LARGE_PROJECT.bytes) {
+    const largest = [...files].sort((a, b) => (b.size || 0) - (a.size || 0)).slice(0, 3);
+    if (!(await confirmLarge({ files: files.length, bytes, largest }))) {
+      throw new Error(`not opened — that folder holds ${files.length} files, ` +
+                      `${Math.round(bytes / (1024 * 1024))} MB`);
+    }
+  }
 
   const project = {
     key: root.split('/').pop(), root, onDisk: true,
@@ -388,7 +422,11 @@ export async function readProjectFromDisk(api, root, { onWarn = () => {} } = {})
     files: new Map()
   };
 
+  let done = 0;
   for (const f of files) {
+    // One round trip per file, so a big folder takes visible time. Every 25,
+    // not every file: the caller paints a status line with it.
+    if (done++ % 25 === 0) onProgress(done - 1, files.length);
     try {
       if (!TEXT_EXT_RE.test(f.path)) {
         project.files.set(f.path,

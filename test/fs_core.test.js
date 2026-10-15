@@ -358,6 +358,54 @@ test('directory listing is relative and skips symlinks and dotfiles', () => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+test('the listing skips node_modules and minted caches, as the browser walk always did', () => {
+  const root = tmpdir('listing-skip');
+  for (const d of ['node_modules/pkg', '_minted-main', 'figures']) fs.mkdirSync(path.join(root, d), { recursive: true });
+  fs.writeFileSync(path.join(root, 'main.tex'), 'x');
+  fs.writeFileSync(path.join(root, 'node_modules', 'pkg', 'index.js'), 'x');
+  fs.writeFileSync(path.join(root, '_minted-main', 'cache.pygtex'), 'x');
+  fs.writeFileSync(path.join(root, 'figures', 'a.png'), 'x');
+  const paths = core.readDirectory(root).map(e => e.path).sort();
+  assert.deepEqual(paths, ['figures', 'figures/a.png', 'main.tex']);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('files carry their size, so the loader can see what it is about to read', () => {
+  const root = tmpdir('listing-size');
+  fs.writeFileSync(path.join(root, 'main.tex'), '12345');
+  const [f] = core.readDirectory(root).filter(e => e.type === 'file');
+  assert.equal(f.size, 5);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+// chmod cannot lock out root, and Windows has no mode bits to clear.
+const canLockOut = process.platform !== 'win32' && process.getuid?.() !== 0;
+
+test('an unreadable subfolder is reported, and the rest of the project still lists',
+  { skip: !canLockOut && 'needs a non-root POSIX user' }, () => {
+    // It used to throw out of the whole listing, so one folder with the wrong
+    // permissions meant the project could not be opened at all.
+    const root = tmpdir('listing-locked');
+    fs.mkdirSync(path.join(root, 'private'));
+    fs.writeFileSync(path.join(root, 'private', 'secret.tex'), 'x');
+    fs.writeFileSync(path.join(root, 'main.tex'), 'x');
+    fs.chmodSync(path.join(root, 'private'), 0o000);
+    try {
+      const entries = core.readDirectory(root);
+      assert.ok(entries.some(e => e.path === 'main.tex'), 'the readable files must still be listed');
+      const locked = entries.find(e => e.path === 'private');
+      assert.equal(locked?.type, 'skipped');
+      assert.equal(locked?.why, 'unreadable');
+    } finally {
+      fs.chmodSync(path.join(root, 'private'), 0o755);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+test('an unreadable root is still an error — there is nothing to open', () => {
+  assert.throws(() => core.readDirectory(path.join(os.tmpdir(), 'revery-tex-no-such-root-xyz')));
+});
+
 test('backups round-trip and only surface when they differ from disk', () => {
   const root = tmpdir('backup');
   const bdir = tmpdir('backup-store');

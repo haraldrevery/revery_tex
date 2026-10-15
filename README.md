@@ -386,6 +386,17 @@ staleness by comparing a backup with the file on disk, so no backend had to
 change. A file that mixes endings is written with its majority once edited, and
 the log says so when the folder opens.
 
+**A folder that cannot be listed is named, not fatal.** One permission-denied
+subfolder used to fail the whole listing on the desktop, so the project would
+not open at all; and past the walk's 16-level cap, folders vanished without a
+word. Every backend now lists such a folder as `{type: 'skipped', why}` and the
+log names it. All three walks skip the same folders — dot-folders,
+`node_modules`, `_minted*` — which only the browser's did before; the rule
+cannot be shared code (one twin is Rust), so `test/walk_skip_cases.json` holds
+all three to one list. Files carry their `size`, and a folder past 5,000 files
+or 512 MB is asked about before the first file is read, since opening reads
+every one of them into memory.
+
 ### Settings are a table, not a variable each
 
 `settings.js` holds one `SCHEMA` array. Loading, validating, persisting,

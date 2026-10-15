@@ -39,8 +39,28 @@ struct DirEntry {
     name: String,
     path: String,
     #[serde(rename = "type")]
-    kind: &'static str, // "file" | "dir"
+    kind: &'static str, // "file" | "dir" | "skipped"
+    /// Bytes, for a file — so the loader can see the size of what it is about
+    /// to read before reading it. None for anything else.
+    size: Option<u64>,
+    /// Why a "skipped" folder was not listed. Twin of fs_core.js.
+    why: Option<&'static str>,
 }
+
+/// Folders the walk never enters. Twin of `skippedDir` in fs_core.js and
+/// native_api_web.js, held to the same cases by test/walk_skip_cases.json.
+///
+/// `node_modules` because no document reads from one and it can hold tens of
+/// thousands of files, every one of which the loader would read into memory;
+/// `_minted*` because it is minted's cache, which needs shell escape that is
+/// never granted here. Dot-folders were already skipped, as dotfiles are.
+fn skipped_dir(name: &str) -> bool {
+    name.starts_with('.') || name == "node_modules" || name.starts_with("_minted")
+}
+
+/// Deeper than this, a folder is reported as skipped rather than walked. Also
+/// the backstop for a loop the symlink check cannot see.
+const MAX_DEPTH: usize = 16;
 
 /* ── path safety ─────────────────────────────────────────────────────── */
 
@@ -393,10 +413,11 @@ fn read_directory(state: State<'_, RootPath>) -> Result<Vec<DirEntry>, String> {
     Ok(out)
 }
 
+/// Only the root's own listing can fail the walk. A subfolder that cannot be
+/// read, or is past MAX_DEPTH, is one `skipped` entry instead: it used to abort
+/// the whole listing — one permission-denied folder and the project would not
+/// open at all — or, past the depth cap, vanish with nothing said.
 fn walk(dir: &Path, root: &Path, out: &mut Vec<DirEntry>, depth: usize) -> Result<(), String> {
-    if depth > 16 {
-        return Ok(()); // pathological nesting; also a symlink-loop backstop
-    }
     let entries = fs::read_dir(dir).map_err(|e| format!("Cannot read {}: {e}", dir.display()))?;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -418,10 +439,23 @@ fn walk(dir: &Path, root: &Path, out: &mut Vec<DirEntry>, depth: usize) -> Resul
             .replace('\\', "/");
 
         if meta.is_dir() {
-            out.push(DirEntry { name, path: rel, kind: "dir" });
-            walk(&path, root, out, depth + 1)?;
+            if skipped_dir(&name) {
+                continue;
+            }
+            if depth + 1 > MAX_DEPTH {
+                out.push(DirEntry { name, path: rel, kind: "skipped", size: None, why: Some("too deep") });
+                continue;
+            }
+            let at = out.len();
+            out.push(DirEntry { name, path: rel, kind: "dir", size: None, why: None });
+            if walk(&path, root, out, depth + 1).is_err() {
+                // Nothing under it was pushed: its own read_dir is the only
+                // way a walk fails, and that happens before any entry.
+                out[at].kind = "skipped";
+                out[at].why = Some("unreadable");
+            }
         } else if meta.is_file() {
-            out.push(DirEntry { name, path: rel, kind: "file" });
+            out.push(DirEntry { name, path: rel, kind: "file", size: Some(meta.len()), why: None });
         }
     }
     Ok(())
@@ -1818,6 +1852,83 @@ mod tests {
         assert_eq!(r.content, "hello\n");
         let now = stamp_of(&root.join("a.tex")).unwrap();
         assert_eq!((r.stamp.mtime_ms, r.stamp.size), (now.mtime_ms, now.size));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The same list fs_core.js and native_api_web.js are held to, by
+    /// test/walk_parity.test.js — one file, so the three walks cannot drift.
+    #[test]
+    fn skipped_dir_agrees_with_the_shared_case_list() {
+        let cases: serde_json::Value =
+            serde_json::from_str(include_str!("../../test/walk_skip_cases.json")).unwrap();
+        for name in cases["skipped"].as_array().unwrap() {
+            let name = name.as_str().unwrap();
+            assert!(skipped_dir(name), "{name} should be skipped");
+        }
+        for name in cases["kept"].as_array().unwrap() {
+            let name = name.as_str().unwrap();
+            assert!(!skipped_dir(name), "{name} should be walked");
+        }
+    }
+
+    fn listing(root: &Path) -> Vec<DirEntry> {
+        let mut out = Vec::new();
+        walk(root, root, &mut out, 0).unwrap();
+        out
+    }
+
+    #[test]
+    fn the_walk_skips_node_modules_and_reports_file_sizes() {
+        let root = tmpdir("walk-skip");
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        fs::create_dir_all(root.join("figures")).unwrap();
+        fs::write(root.join("node_modules/pkg/index.js"), "x").unwrap();
+        fs::write(root.join("figures/a.png"), "12345").unwrap();
+        fs::write(root.join("main.tex"), "x").unwrap();
+        let out = listing(&root);
+        let mut paths: Vec<&str> = out.iter().map(|e| e.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, ["figures", "figures/a.png", "main.tex"]);
+        let png = out.iter().find(|e| e.path == "figures/a.png").unwrap();
+        assert_eq!(png.size, Some(5));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_subfolder_is_reported_rather_than_failing_the_listing() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmpdir("walk-locked");
+        let locked = root.join("private");
+        fs::create_dir_all(&locked).unwrap();
+        fs::write(locked.join("secret.tex"), "x").unwrap();
+        fs::write(root.join("main.tex"), "x").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads through any mode, and then there is nothing to test.
+        if fs::read_dir(&locked).is_err() {
+            let out = listing(&root);
+            assert!(out.iter().any(|e| e.path == "main.tex"));
+            let p = out.iter().find(|e| e.path == "private").unwrap();
+            assert_eq!((p.kind, p.why), ("skipped", Some("unreadable")));
+        }
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_folder_past_the_depth_cap_is_reported_as_too_deep() {
+        let root = tmpdir("walk-deep");
+        let mut deep = root.clone();
+        for i in 0..=MAX_DEPTH {
+            deep = deep.join(format!("d{i}"));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("leaf.tex"), "x").unwrap();
+        let out = listing(&root);
+        assert!(!out.iter().any(|e| e.path.ends_with("leaf.tex")), "the cap is still the cap");
+        let s = out.iter().find(|e| e.kind == "skipped").expect("nothing said where the walk stopped");
+        assert_eq!(s.why, Some("too deep"));
+        assert!(s.path.ends_with(&format!("d{MAX_DEPTH}")), "{}", s.path);
         fs::remove_dir_all(&root).ok();
     }
 
