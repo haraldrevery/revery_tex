@@ -958,10 +958,27 @@ fn arm_close_guard() {
     GUARD_ARMED.store(true, Ordering::SeqCst);
 }
 
+/// A page has started loading, so whoever armed the guard is gone.
+///
+/// The arming belongs to the page that registered the listener, not to the
+/// window. Without this a reload kept the old page's arming: if the new page
+/// then failed before it got as far as `onCloseRequested` — the exact case
+/// `GUARD_ARMED` exists for — every close was cancelled and handed to a page
+/// with nobody listening, and the window could not be closed at all. The new
+/// page re-arms itself once its listener is really attached.
+fn page_load_started() {
+    GUARD_ARMED.store(false, Ordering::SeqCst);
+}
+
 #[tauri::command]
 fn close_window(window: tauri::Window) -> Result<(), String> {
     AGREED_CLOSE.store(true, Ordering::SeqCst);
-    window.close().map_err(|e| e.to_string())
+    window.close().map_err(|e| {
+        // The close did not happen, so nothing was agreed. Left set, every
+        // later close would skip the question for the life of the app.
+        AGREED_CLOSE.store(false, Ordering::SeqCst);
+        e.to_string()
+    })
 }
 
 /* ── frameless window controls ───────────────────────────────────────── */
@@ -1072,6 +1089,14 @@ fn main() {
             set_fullscreen,
             is_fullscreen,
         ])
+        // Before any of the page's scripts run, so a page that boots normally
+        // re-arms the close guard after this and one that does not leaves it
+        // off. See page_load_started.
+        .on_page_load(|_webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Started {
+                page_load_started();
+            }
+        })
         // `beforeunload` does not run when a native window is closed — the
         // webview is torn down rather than navigated — so the unsaved-changes
         // warning the browser build has was doing nothing at all here. Closing
@@ -1796,4 +1821,18 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// The only test that touches GUARD_ARMED, so the parallel runner cannot
+    /// interleave another one with it.
+    #[test]
+    fn a_page_load_disarms_the_close_guard_until_the_new_page_arms_it() {
+        arm_close_guard();
+        assert!(GUARD_ARMED.load(Ordering::SeqCst));
+        page_load_started();
+        assert!(
+            !GUARD_ARMED.load(Ordering::SeqCst),
+            "a reloaded page that never re-arms would leave a window that cannot close"
+        );
+        arm_close_guard();
+        assert!(GUARD_ARMED.load(Ordering::SeqCst));
+    }
 }

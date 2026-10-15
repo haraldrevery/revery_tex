@@ -17,7 +17,6 @@
 // catch it.
 
 const { test } = require('node:test');
-const { knownBug } = require('./known_bug.js');
 const assert = require('node:assert');
 
 let _mod;
@@ -149,23 +148,78 @@ test('no PDF anywhere is still a failure', async () => {
   assert.match(r.error, /no PDF|missing package/i);
 });
 
-// Known bug, Phase 4. "A PDF exists" is not "this compile made one". Measured
-// against TeX Live with the exact argv tex_run builds: pdfLaTeX and LuaLaTeX
-// delete main.pdf when a run fails, but XeLaTeX writes its PDF only through
-// xdvipdfmx at the end, so a fatal error before the first page exits 1 and
-// leaves the previous run's PDF where it was. The engine reads it back and
-// reports the old document as a fresh, successful compile.
-test('a failed XeLaTeX run is a failure even when an older PDF is still on disk',
-  (t) => knownBug(t, { phase: 'Phase 4', symptom: /stale PDF reported as success/ }, async () => {
-    const api = fakeApi({
-      tools: ['xelatex'],
-      disk: { 'main.pdf': PDF },                 // from the last run that worked
-      onRun: () => ({ code: 1, stdout: '././main.tex:1: Emergency stop.\nNo pages of output.' })
-    });
-    const { eng } = await makeEngine(api);
-    const r = await eng.compile({ mainFile: 'main.tex', engine: 'xetex', passes: false });
-    assert.equal(r.success, false, 'stale PDF reported as success');
-  }));
+// "A PDF exists" is not "this compile made one". Measured against TeX Live
+// with the exact argv tex_run builds: no engine opens main.pdf before the
+// first page ships out, so a fatal error in the preamble — a missing package —
+// exits 1 and leaves the previous run's PDF where it was, under pdfLaTeX and
+// XeLaTeX alike. The engine read it back and reported the old document as a
+// fresh, successful compile.
+test('a failed XeLaTeX run is a failure even when an older PDF is still on disk', async () => {
+  const api = fakeApi({
+    tools: ['xelatex'],
+    disk: { 'main.pdf': PDF },                 // from the last run that worked
+    onRun: () => ({ code: 1, stdout: '././main.tex:1: Emergency stop.\nNo pages of output.' })
+  });
+  const { eng } = await makeEngine(api);
+  const r = await eng.compile({ mainFile: 'main.tex', engine: 'xetex', passes: false });
+  assert.equal(r.success, false, 'stale PDF reported as success');
+  assert.equal(r.pdf, null, 'the old PDF must not be handed to the preview');
+});
+
+test('a document with no pages is a failure even though TeX exited 0', async () => {
+  // The other way to leave an old PDF in place: an empty body. TeX says so,
+  // exits 0, and writes nothing.
+  const api = fakeApi({
+    tools: ['pdflatex'],
+    disk: { 'main.pdf': PDF },
+    onRun: () => ({ code: 0, stdout: 'No pages of output.' })
+  });
+  const { eng } = await makeEngine(api);
+  const r = await eng.compile({ mainFile: 'main.tex', engine: 'pdftex', passes: false });
+  assert.equal(r.success, false);
+  assert.match(r.error, /no pages/);
+});
+
+test('a pass stopped at the time limit is a failure, and says so', async () => {
+  const api = fakeApi({
+    tools: ['pdflatex'],
+    disk: { 'main.pdf': PDF },
+    // Both spellings: Rust serialises `timed_out`, Node returns `timedOut`.
+    onRun: () => ({ code: null, timed_out: true, stdout: '' })
+  });
+  const { eng } = await makeEngine(api);
+  const r = await eng.compile({ mainFile: 'main.tex', engine: 'pdftex', passes: false });
+  assert.equal(r.success, false);
+  assert.match(r.error, /time limit/);
+});
+
+test('a bibtex warning does not fail a document that compiled', async () => {
+  // bibtex exits 1 on a warning (an empty field, a missing entry). Judging
+  // the compile by every tool's status would turn those into failed builds.
+  const api = fakeApi({
+    tools: ['pdflatex', 'bibtex'],
+    disk: { 'main.pdf': PDF },
+    onRun: (tool) => (tool === 'bibtex' ? { code: 1, stdout: 'Warning--empty journal in x' } : {})
+  });
+  const { eng } = await makeEngine(api);
+  const r = await eng.compile({ mainFile: 'main.tex', engine: 'pdftex', bibtex: 'bibtex' });
+  assert.equal(r.success, true, r.error || '');
+});
+
+test('the page count is the final pass, not the first', async () => {
+  // Pass 1 typesets before the table of contents exists, so its count is
+  // short. The joined log starts with it, and the first match used to win.
+  let pass = 0;
+  const api = fakeApi({
+    tools: ['pdflatex'],
+    disk: { 'main.pdf': PDF },
+    onRun: () => ({ stdout: `Output written on main.pdf (${++pass === 1 ? 10 : 12} pages, 1 bytes).` })
+  });
+  const { eng } = await makeEngine(api);
+  const r = await eng.compile({ mainFile: 'main.tex', engine: 'pdftex', passes: true });
+  assert.equal(r.success, true, r.error || '');
+  assert.equal(r.pages, 12);
+});
 
 /* ── what gets run ────────────────────────────────────────────────────── */
 
@@ -286,6 +340,78 @@ test('a later compile cannot revive a cancelled one', { timeout: 10000 }, async 
   assert.ok(api.calls.some(c => c.mainFile === 'new.tex' && c.tool === 'biber'),
     'the live compile must still run its own passes');
   assert.equal((await current).success, true, 'the live compile must finish normally');
+});
+
+/**
+ * Wrap a pausingApi so it records how many tools were running at once.
+ * Shared between engines on purpose: the property is about the folder.
+ */
+function countingOverlap(api) {
+  let live = 0;
+  const inner = api.runTex;
+  api.maxLive = 0;
+  api.runTex = async (...args) => {
+    api.maxLive = Math.max(api.maxLive, ++live);
+    try { return await inner(...args); } finally { live--; }
+  };
+  return api;
+}
+
+test('a compile started while a cancelled one is still running waits for it', { timeout: 10000 }, async () => {
+  // Cancel cannot kill the tool already running, so the old pass goes on to
+  // its end. The new compile used to start pass 1 beside it, in the same
+  // folder, both writing one .aux.
+  const api = countingOverlap(pausingApi({ tools: ['pdflatex'], disk: { 'main.pdf': PDF } }));
+  const { eng, text } = await makeEngine(api);
+
+  const abandoned = eng.compile({ mainFile: 'main.tex', engine: 'pdftex' });
+  await tick();
+  eng.cancel();
+  const current = eng.compile({ mainFile: 'main.tex', engine: 'pdftex' });
+  await tick();
+  assert.equal(api.calls.length, 1, 'the new compile started a tool while the old one was running');
+  assert.match(text(), /waiting for the cancelled compile/);
+
+  await api.drain();
+  assert.equal((await abandoned).error, 'cancelled');
+  assert.equal((await current).success, true, 'the waiting compile must still run once the folder is free');
+  assert.equal(api.maxLive, 1, `${api.maxLive} TeX tools ran in the folder at once`);
+});
+
+test('a new engine instance waits for a disposed one, too', { timeout: 10000 }, async () => {
+  // engine_host.js builds a new engine when the source changes and disposes
+  // the old one — whose tool is still running in the same folder. A lock on
+  // the instance would not have seen it.
+  const api = countingOverlap(pausingApi({ tools: ['pdflatex'], disk: { 'main.pdf': PDF } }));
+  const { eng: before } = await makeEngine(api);
+  const { eng: after } = await makeEngine(api);
+
+  const abandoned = before.compile({ mainFile: 'main.tex', engine: 'pdftex' });
+  await tick();
+  before.dispose();
+  const current = after.compile({ mainFile: 'main.tex', engine: 'pdftex' });
+  await tick();
+  assert.equal(api.calls.length, 1, 'the new engine started a tool beside the disposed one');
+
+  await api.drain();
+  await abandoned;
+  assert.equal((await current).success, true);
+  assert.equal(api.maxLive, 1);
+});
+
+test('a compile cancelled while it waits for the folder runs nothing', { timeout: 10000 }, async () => {
+  const api = pausingApi({ tools: ['pdflatex'], disk: { 'main.pdf': PDF } });
+  const { eng } = await makeEngine(api);
+  const first = eng.compile({ mainFile: 'main.tex', engine: 'pdftex' });
+  await tick();
+  eng.cancel();
+  const second = eng.compile({ mainFile: 'main.tex', engine: 'pdftex' });
+  await tick();
+  eng.cancel();                                  // abandoned before it ever ran
+  await api.drain();
+  await first;
+  assert.equal((await second).error, 'cancelled');
+  assert.equal(api.calls.length, 1, 'a compile cancelled in the queue still ran a tool');
 });
 
 test('cancel and dispose are safe when nothing is running', async () => {
